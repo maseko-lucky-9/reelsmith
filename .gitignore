@@ -1,0 +1,12 @@
+.vscode/
+.venv/
+.venv-mac/
+env/
+
+# Python artifacts
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Accidental pip install artifacts
+=*

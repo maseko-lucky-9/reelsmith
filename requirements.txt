@@ -1,0 +1,26 @@
+# API + orchestration
+fastapi==0.136.1
+uvicorn[standard]==0.46.0
+sse-starlette==3.4.1
+pydantic==2.13.3
+pydantic-settings==2.14.0
+httpx==0.28.1
+asgi-lifespan==2.1.0
+
+# Domain dependencies
+yt-dlp==2026.3.17
+moviepy==1.0.3
+SpeechRecognition==3.16.1
+pysrt==1.1.2
+webvtt-py==0.5.1
+pillow==12.2.0
+numpy==2.4.4
+
+# UI (thin client only)
+streamlit==1.56.0
+
+# Test
+pytest==9.0.3
+pytest-asyncio==1.3.0
+pytest-timeout==2.4.0
+pytest-playwright==0.7.2
