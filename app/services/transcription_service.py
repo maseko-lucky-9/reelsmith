@@ -15,15 +15,17 @@ def speech_to_text(audio_path: str, language: str = "en-US") -> str:
         log.info("Stub transcription provider; returning placeholder text")
         return "stub transcription text for testing"
 
-    log.info("Speech to text via Google: %s", audio_path)
+    log.info("Speech to text via Google  audio=%s  language=%s", audio_path, language)
     recognizer = sr.Recognizer()
     try:
         with sr.AudioFile(audio_path) as source:
             audio_data = recognizer.record(source)
-        return recognizer.recognize_google(audio_data, language=language)
+        result = recognizer.recognize_google(audio_data, language=language)
+        log.info("Transcription complete  words=%d", len(result.split()) if result else 0)
+        return result
     except sr.UnknownValueError:
-        log.warning("Speech recognition could not understand the audio")
+        log.warning("Speech recognition could not understand the audio  audio=%s", audio_path)
         return ""
     except sr.RequestError as e:
-        log.error("Speech recognition request failed: %s", e)
+        log.error("Speech recognition request failed  audio=%s  error=%s", audio_path, e)
         return ""

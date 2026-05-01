@@ -48,6 +48,7 @@ def extract_chapter_to_disk(
     out_audio_path: str,
 ) -> tuple[str, str]:
     """Slice a chapter from a source video and persist clip + audio to disk."""
+    log.info("Extracting chapter to disk  [%.3f, %.3f]  src=%s", start, end, video_path)
     with closing_clip(video_path) as video:
         sub = create_clip(video, start, end)
         try:
@@ -69,6 +70,7 @@ def extract_chapter_to_disk(
                 sub.close()
             except Exception:
                 pass
+    log.info("Chapter extracted  clip=%s  audio=%s", out_clip_path, out_audio_path)
     return out_clip_path, out_audio_path
 
 

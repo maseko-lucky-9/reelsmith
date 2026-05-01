@@ -12,7 +12,9 @@ log = logging.getLogger(__name__)
 def generate_captions(text: str, start_time: float, end_time: float, format: str = "srt"):
     duration = end_time - start_time
     words = text.split()
+    log.info("Generating captions  format=%s  words=%d  duration=%.1fs", format, len(words), duration)
     if not words or duration <= 0:
+        log.warning("Empty text or zero duration — returning empty captions")
         return pysrt.SubRipFile() if format == "srt" else WebVTT()
 
     words_per_second = len(words) / duration
@@ -43,6 +45,7 @@ def generate_captions(text: str, start_time: float, end_time: float, format: str
             current_time = end_caption_time
             caption_text = ""
 
+    log.info("Captions generated  count=%d  format=%s", len(captions), format)
     if format == "srt":
         return pysrt.SubRipFile(items=captions)
 
@@ -67,6 +70,7 @@ def write_captions(captions, format: str, path: str) -> str:
         captions.save(path)
     else:
         raise ValueError(f"Unsupported format: {format}")
+    log.debug("Captions written  path=%s", path)
     return path
 
 

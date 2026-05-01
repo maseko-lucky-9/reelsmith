@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
@@ -68,15 +69,21 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
         "target_aspect_ratio", settings.default_target_aspect_ratio
     )
 
+    log.info("[%s] Job started  url=%s  format=%s", job_id, url, caption_format)
+    job_t0 = time.perf_counter()
+
     cleanup_root: Path | None = None
     try:
         await store.update(job_id, lambda s: setattr(s, "status", "running"))
 
-        # Folder
+        # ── Folder ────────────────────────────────────────────────────────────
+        log.info("[%s] Step: create folder  path=%s", job_id, download_path)
+        step_t0 = time.perf_counter()
         await store.update(job_id, lambda s: setattr(s, "current_step", "folder"))
         destination, clips_folder = await asyncio.to_thread(
             folder_service.create_video_subfolder, download_path, url
         )
+        log.info("[%s] Folder ready (%.2fs)  dest=%s", job_id, time.perf_counter() - step_t0, destination)
         cleanup_root = Path(clips_folder) / "_tmp" / job_id
         cleanup_root.mkdir(parents=True, exist_ok=True)
 
@@ -93,7 +100,9 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
             clips_folder=clips_folder,
         )
 
-        # Download
+        # ── Download ──────────────────────────────────────────────────────────
+        log.info("[%s] Step: download video", job_id)
+        step_t0 = time.perf_counter()
         await store.update(job_id, lambda s: setattr(s, "current_step", "download"))
         video_path, info = await asyncio.wait_for(
             asyncio.to_thread(download_service.download_video, url, destination),
@@ -104,6 +113,10 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
 
         title = info.get("title", "")
         duration = float(info.get("duration") or 0.0)
+        log.info(
+            "[%s] Download complete (%.2fs)  title=%r  duration=%.1fs  path=%s",
+            job_id, time.perf_counter() - step_t0, title, duration, video_path,
+        )
 
         def _set_download(s: JobState) -> None:
             s.video_path = video_path
@@ -120,16 +133,19 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
             duration=duration,
         )
 
-        # Chapters
+        # ── Chapters ──────────────────────────────────────────────────────────
+        log.info("[%s] Step: extract chapters", job_id)
         await store.update(job_id, lambda s: setattr(s, "current_step", "chapters"))
         chapters = await asyncio.to_thread(download_service.extract_chapters, info)
         if not chapters:
             chapters = [
                 {"index": 0, "title": "Full Video", "start": 0.0, "end": duration}
             ]
+        log.info("[%s] %d chapter(s) detected: %s", job_id, len(chapters),
+                 [c["title"] for c in chapters])
         await _emit(bus, EventType.CHAPTERS_DETECTED, job_id, chapters=chapters)
 
-        # Per-chapter fan-out with semaphore
+        # ── Per-chapter fan-out ───────────────────────────────────────────────
         semaphore = asyncio.Semaphore(settings.max_parallel_chapters)
 
         async def _bound(chapter: dict[str, Any]) -> str | None:
@@ -149,6 +165,12 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
         outputs = await asyncio.gather(*(_bound(c) for c in chapters), return_exceptions=False)
         output_paths = [p for p in outputs if p]
 
+        total_elapsed = time.perf_counter() - job_t0
+        log.info(
+            "[%s] Job completed in %.2fs  outputs=%d  paths=%s",
+            job_id, total_elapsed, len(output_paths), output_paths,
+        )
+
         def _complete(s: JobState) -> None:
             s.status = "completed"
             s.current_step = "completed"
@@ -158,10 +180,10 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
         await _emit(bus, EventType.JOB_COMPLETED, job_id, output_paths=output_paths)
 
     except asyncio.CancelledError:
-        log.warning("Job %s cancelled", job_id)
+        log.warning("[%s] Job cancelled after %.2fs", job_id, time.perf_counter() - job_t0)
         raise
     except Exception as e:  # noqa: BLE001
-        log.exception("Job %s failed", job_id)
+        log.exception("[%s] Job failed after %.2fs", job_id, time.perf_counter() - job_t0)
 
         def _fail(s: JobState) -> None:
             s.status = "failed"
@@ -196,6 +218,11 @@ async def _process_chapter(
     title = chapter["title"]
     start = float(chapter["start"])
     end = float(chapter["end"])
+    chapter_duration = end - start
+
+    log.info("[%s] Chapter %d/%d start  title=%r  %.1f–%.1fs (%.1fs)",
+             job_id, index, index, title, start, end, chapter_duration)
+    chapter_t0 = time.perf_counter()
 
     tmp_dir = cleanup_root
     clip_path = str(tmp_dir / f"chapter_{index}.mp4")
@@ -204,6 +231,9 @@ async def _process_chapter(
     def _set_status(state: ChapterArtifacts, status: str) -> None:
         state.status = status  # type: ignore[assignment]
 
+    # ── Extract clip ──────────────────────────────────────────────────────────
+    log.info("[%s] Chapter %d  extracting clip and audio", job_id, index)
+    step_t0 = time.perf_counter()
     await store.upsert_chapter(job_id, lambda c: _set_status(c, "extracting"), index)
     await asyncio.to_thread(
         clip_service.extract_chapter_to_disk,
@@ -213,6 +243,8 @@ async def _process_chapter(
         clip_path,
         audio_path,
     )
+    log.info("[%s] Chapter %d  clip extracted (%.2fs)  clip=%s  audio=%s",
+             job_id, index, time.perf_counter() - step_t0, clip_path, audio_path)
     await store.upsert_chapter(
         job_id,
         lambda c: (setattr(c, "clip_path", clip_path), setattr(c, "audio_path", audio_path)),
@@ -227,24 +259,34 @@ async def _process_chapter(
         audio_path=audio_path,
     )
 
-    # Transcribe
+    # ── Transcribe ────────────────────────────────────────────────────────────
+    log.info("[%s] Chapter %d  transcribing audio  provider=%s",
+             job_id, index, settings.transcription_provider)
+    step_t0 = time.perf_counter()
     await store.upsert_chapter(job_id, lambda c: _set_status(c, "transcribing"), index)
     text = await asyncio.wait_for(
         asyncio.to_thread(transcription_service.speech_to_text, audio_path),
         timeout=settings.transcription_timeout_seconds,
     )
+    log.info("[%s] Chapter %d  transcription done (%.2fs)  words=%d",
+             job_id, index, time.perf_counter() - step_t0, len(text.split()) if text else 0)
     await store.upsert_chapter(job_id, lambda c: setattr(c, "transcript", text), index)
     await _emit(bus, EventType.CHAPTER_TRANSCRIBED, job_id, chapter_index=index, text=text)
 
-    # Captions
+    # ── Captions ──────────────────────────────────────────────────────────────
+    log.info("[%s] Chapter %d  generating captions  format=%s", job_id, index, caption_format)
+    step_t0 = time.perf_counter()
     await store.upsert_chapter(job_id, lambda c: _set_status(c, "captioning"), index)
     captions_obj = await asyncio.to_thread(
-        caption_service.generate_captions, text, 0.0, end - start, caption_format
+        caption_service.generate_captions, text, 0.0, chapter_duration, caption_format
     )
     captions_path = str(tmp_dir / f"chapter_{index}.{caption_format}")
     await asyncio.to_thread(
         caption_service.write_captions, captions_obj, caption_format, captions_path
     )
+    caption_count = len(captions_obj) if captions_obj is not None else 0
+    log.info("[%s] Chapter %d  captions written (%.2fs)  count=%d  path=%s",
+             job_id, index, time.perf_counter() - step_t0, caption_count, captions_path)
     await store.upsert_chapter(
         job_id, lambda c: setattr(c, "captions_path", captions_path), index
     )
@@ -257,9 +299,11 @@ async def _process_chapter(
         captions_path=captions_path,
     )
 
-    # Subtitle images (one per caption)
+    # ── Subtitle images ───────────────────────────────────────────────────────
     image_paths = []
     if captions_obj is not None:
+        log.info("[%s] Chapter %d  rendering %d subtitle image(s)", job_id, index, caption_count)
+        step_t0 = time.perf_counter()
         videosize = (1280, 720)  # default; overridden by render service per real video size
         for idx, caption in enumerate(captions_obj):
             caption_text = caption.text if hasattr(caption, "text") else str(caption)
@@ -271,6 +315,8 @@ async def _process_chapter(
                 image_path,
             )
             image_paths.append(image_path)
+        log.info("[%s] Chapter %d  subtitle images done (%.2fs)", job_id, index,
+                 time.perf_counter() - step_t0)
     await store.upsert_chapter(
         job_id, lambda c: setattr(c, "image_paths", image_paths), index
     )
@@ -282,7 +328,9 @@ async def _process_chapter(
         image_paths=image_paths,
     )
 
-    # Render
+    # ── Render final clip ─────────────────────────────────────────────────────
+    log.info("[%s] Chapter %d  rendering final clip  aspect=%.4f", job_id, index, target_aspect_ratio)
+    step_t0 = time.perf_counter()
     await store.upsert_chapter(job_id, lambda c: _set_status(c, "rendering"), index)
     safe_title = _sanitize(title)
     output_path = str(Path(clips_folder) / f"{index:02d}_{safe_title}.mp4")
@@ -292,12 +340,16 @@ async def _process_chapter(
             clip_path,
             output_path,
             0.0,
-            end - start,
+            chapter_duration,
             captions_path,
             target_aspect_ratio,
         ),
         timeout=settings.render_timeout_seconds,
     )
+    log.info("[%s] Chapter %d  render done (%.2fs)  output=%s",
+             job_id, index, time.perf_counter() - step_t0, output_path)
+    log.info("[%s] Chapter %d  finished in %.2fs", job_id, index, time.perf_counter() - chapter_t0)
+
     await store.upsert_chapter(
         job_id,
         lambda c: (setattr(c, "output_path", output_path), _set_status(c, "completed")),

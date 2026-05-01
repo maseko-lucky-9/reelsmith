@@ -48,9 +48,11 @@ class AsyncEventBus:
             return
         async with self._lock:
             subs = list(self._subscriptions)
-        for sub in subs:
-            if sub.matches(event):
-                await sub.queue.put(event)
+        matched = [s for s in subs if s.matches(event)]
+        log.debug("Event published  type=%s  job_id=%s  subscribers=%d",
+                  event.type.value, event.job_id, len(matched))
+        for sub in matched:
+            await sub.queue.put(event)
 
     async def subscribe(
         self,

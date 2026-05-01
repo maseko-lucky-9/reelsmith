@@ -16,6 +16,7 @@ def fetch_video_title(video_url: str) -> str:
 
 
 def create_video_subfolder(download_path: str, video_url: str) -> tuple[str, str]:
+    log.info("Resolving folder  url=%s  base=%s", video_url, download_path)
     try:
         title = fetch_video_title(video_url).replace(" ", "_")
         video_folder_path = os.path.join(download_path, title)
@@ -26,4 +27,5 @@ def create_video_subfolder(download_path: str, video_url: str) -> tuple[str, str
     clips_folder_path = os.path.join(video_folder_path, "clips")
     os.makedirs(video_folder_path, exist_ok=True)
     os.makedirs(clips_folder_path, exist_ok=True)
+    log.info("Folders created  video=%s  clips=%s", video_folder_path, clips_folder_path)
     return video_folder_path, clips_folder_path

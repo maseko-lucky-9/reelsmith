@@ -42,6 +42,7 @@ def create_subtitle_image(text: str, videosize: tuple[int, int], font_size: int 
 
 
 def render_to_path(text: str, videosize: tuple[int, int], path: str, font_size: int = 50) -> str:
+    log.debug("Rendering subtitle image  text=%r  size=%s  path=%s", text[:40], videosize, path)
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     arr = create_subtitle_image(text, videosize, font_size=font_size)
     Image.fromarray(arr, mode="RGBA").save(path)

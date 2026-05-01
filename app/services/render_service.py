@@ -35,8 +35,10 @@ def render_clip(
         try:
             if captions_path:
                 captions = _load_captions(captions_path)
+                log.info("Captions loaded  count=%d  path=%s", len(captions), captions_path)
                 final = add_captions_to_clip(sub, captions, target_aspect_ratio)
             else:
+                log.info("No captions provided; rendering clip without subtitles")
                 final = sub
             import os
             cpu_count = os.cpu_count() or 2
@@ -54,4 +56,5 @@ def render_clip(
                 sub.close()
             except Exception:
                 pass
+    log.info("Render complete  output=%s", output_path)
     return output_path
