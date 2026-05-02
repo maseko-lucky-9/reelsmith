@@ -30,3 +30,6 @@ web/playwright-report/
 
 # Root-level screenshots from planning/testing sessions
 /*.png
+.claude/settings.json
+.omc/state/hud-stdin-cache.json
+.omc/state/sessions/c1d462ff-2359-49a2-b49c-8137f9c115a2/hud-state.json

@@ -155,9 +155,14 @@ class SqlJobStore:
     async def get(self, job_id: str) -> JobState:
         from app.db.models import JobRecord
         from sqlalchemy import select
+        from sqlalchemy.orm import selectinload
 
         async with self._factory() as session:
-            result = await session.execute(select(JobRecord).where(JobRecord.id == job_id))
+            result = await session.execute(
+                select(JobRecord)
+                .options(selectinload(JobRecord.clips))
+                .where(JobRecord.id == job_id)
+            )
             record = result.scalar_one_or_none()
         if record is None:
             raise JobNotFoundError(job_id)
@@ -273,9 +278,14 @@ class SqlJobStore:
     ) -> list[JobState]:
         from app.db.models import JobRecord
         from sqlalchemy import select
+        from sqlalchemy.orm import selectinload
 
         async with self._factory() as session:
-            q = select(JobRecord).order_by(JobRecord.created_at.desc())
+            q = (
+                select(JobRecord)
+                .options(selectinload(JobRecord.clips))
+                .order_by(JobRecord.created_at.desc())
+            )
             if search:
                 q = q.where(JobRecord.youtube_url.ilike(f"%{search}%"))
             q = q.offset(offset).limit(limit)
@@ -304,12 +314,15 @@ class SqlJobStore:
 
 
 def _record_to_state(record: Any) -> JobState:
+    loaded_clips = getattr(record, "clips", None) or []
+    output_paths = [c.output_path for c in loaded_clips if c.output_path and not c.retired]
     return JobState(
         job_id=record.id,
         url=record.youtube_url,
         status=record.status,
         error=record.error,
         download_path="/tmp/yt",
+        output_paths=output_paths,
     )
 
 
