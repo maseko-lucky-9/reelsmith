@@ -70,9 +70,13 @@ async def test_orchestrator_emits_full_event_chain(tmp_path, monkeypatch):
             (out_clip, out_audio),
         )[-1],
     )
+    from app.services.transcription_service import WordTiming
     monkeypatch.setattr(
-        orch.transcription_service, "speech_to_text",
-        lambda audio_path, language="en-US": "hello world",
+        orch.transcription_service, "transcribe_to_words",
+        lambda audio_path, language="en": [
+            WordTiming("hello", 0.0, 0.5),
+            WordTiming("world", 0.5, 1.0),
+        ],
     )
     monkeypatch.setattr(orch.render_service, "render_clip", _fake_render)
     monkeypatch.setattr(orch.subtitle_image_service, "render_to_path", _fake_render_to_path)

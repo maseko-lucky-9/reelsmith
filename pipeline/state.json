@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.0",
+  "run_id": "20260501-word-synced-subtitles",
+  "started_at": "2026-05-01T00:00:00Z",
+  "updated_at": "2026-05-01T00:00:00Z",
+  "current_phase": "phase_0_5",
+  "phase_status": "in_progress",
+  "feature": "word-synced-subtitles",
+  "phases": {
+    "phase_0": { "status": "completed", "started_at": "2026-05-01T00:00:00Z", "completed_at": "2026-05-01T00:00:00Z", "duration_seconds": null, "retries": 0 },
+    "phase_0_5": { "status": "in_progress", "started_at": "2026-05-01T00:00:00Z", "completed_at": null, "duration_seconds": null, "skipped": false },
+    "phase_1": { "status": "pending", "started_at": null, "completed_at": null, "duration_seconds": null, "retries": 0 },
+    "phase_1_5": { "status": "pending", "started_at": null, "completed_at": null, "duration_seconds": null, "retries": 0, "refinement_cycles": 0 },
+    "phase_2": { "status": "pending", "started_at": null, "completed_at": null, "duration_seconds": null, "retries": 0 },
+    "phase_3": { "status": "pending", "started_at": null, "completed_at": null, "duration_seconds": null, "retries": 0 },
+    "phase_4": { "status": "pending", "started_at": null, "completed_at": null, "duration_seconds": null, "tasks": [] },
+    "phase_5": { "status": "pending", "started_at": null, "completed_at": null, "duration_seconds": null, "retries": 0 },
+    "phase_6": { "status": "pending", "started_at": null, "completed_at": null, "duration_seconds": null, "retries": 0 },
+    "phase_6_5": { "status": "pending", "started_at": null, "completed_at": null, "duration_seconds": null, "skipped": false },
+    "summary": { "status": "pending", "started_at": null, "completed_at": null, "duration_seconds": null }
+  },
+  "context_pct": 0,
+  "escalations": [],
+  "aborted": false,
+  "abort_reason": null,
+  "worktree_path": null,
+  "design_brief_source": null
+}

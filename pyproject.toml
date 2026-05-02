@@ -8,9 +8,4 @@ markers = [
     "timeout: per-test wall-clock timeout in seconds (pytest-timeout)",
 ]
 addopts = "-m 'not integration and not live and not playwright'"
-filterwarnings = [
-    # SpeechRecognition imports aifc + audioop which are removed in Python 3.13.
-    # Suppress until the library is replaced with Whisper or another backend.
-    "ignore:'aifc' is deprecated:DeprecationWarning",
-    "ignore:'audioop' is deprecated:DeprecationWarning",
-]
+filterwarnings = []

@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import os
 import subprocess
+from datetime import datetime
 
 import streamlit as st
 
 from api_client import ApiClient
+from log_formatter import format_event
 
 
 _API_BASE_URL = os.environ.get("YTVIDEO_API_URL", "http://127.0.0.1:8000")
@@ -163,12 +165,22 @@ def main() -> None:
     global_steps  = st.empty()     # ticks off completed global milestones
     chapter_panel = st.empty()     # redrawn on every chapter event
     output_panel  = st.empty()
+    log_panel     = st.empty()     # live pipeline log
 
     completed_globals: list[str] = []
     chapters_meta: dict[int, dict] = {}
     chapter_status: dict[int, dict] = {}
     last_global = "VideoRequested"
     num_chapters = 0
+    log_lines: list[str] = []
+
+    def _redraw_log(failed: bool = False, error: str | None = None) -> None:
+        with log_panel.container():
+            with st.expander("Pipeline Log", expanded=failed):
+                if failed and error:
+                    st.error(error)
+                if log_lines:
+                    st.code("\n".join(log_lines), language=None)
 
     def _redraw_globals():
         with global_steps.container():
@@ -188,6 +200,11 @@ def main() -> None:
     for event in client.stream_events(job_id):
         etype   = event["type"]
         payload = event["payload"]
+
+        # ── Log line ──────────────────────────────────────────────────────
+        ts = datetime.now().strftime("%H:%M:%S")
+        log_lines.append(format_event(event, ts=ts))
+        _redraw_log()
 
         # ── Global milestones ─────────────────────────────────────────────
         if etype in _GLOBAL_PROGRESS:
@@ -237,8 +254,10 @@ def main() -> None:
         if etype == "JobFailed":
             final = client.get_job(job_id)
             overall_bar.progress(frac, text="❌  Job failed")
+            error_msg = final.get("error", "unknown error")
             with output_panel.container():
-                st.error(f"Job failed: {final.get('error', 'unknown error')}")
+                st.error(f"Job failed: {error_msg}")
+            _redraw_log(failed=True, error=error_msg)
             return
 
 

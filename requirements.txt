@@ -10,7 +10,7 @@ asgi-lifespan==2.1.0
 # Domain dependencies
 yt-dlp==2026.3.17
 moviepy==1.0.3
-SpeechRecognition==3.16.1
+faster-whisper>=1.0.0
 pysrt==1.1.2
 webvtt-py==0.5.1
 pillow==12.2.0

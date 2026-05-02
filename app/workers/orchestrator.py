@@ -264,21 +264,24 @@ async def _process_chapter(
              job_id, index, settings.transcription_provider)
     step_t0 = time.perf_counter()
     await store.upsert_chapter(job_id, lambda c: _set_status(c, "transcribing"), index)
-    text = await asyncio.wait_for(
-        asyncio.to_thread(transcription_service.speech_to_text, audio_path),
+    words = await asyncio.wait_for(
+        asyncio.to_thread(transcription_service.transcribe_to_words, audio_path),
         timeout=settings.transcription_timeout_seconds,
     )
+    text = " ".join(w.word for w in words)
     log.info("[%s] Chapter %d  transcription done (%.2fs)  words=%d",
-             job_id, index, time.perf_counter() - step_t0, len(text.split()) if text else 0)
+             job_id, index, time.perf_counter() - step_t0, len(words))
     await store.upsert_chapter(job_id, lambda c: setattr(c, "transcript", text), index)
     await _emit(bus, EventType.CHAPTER_TRANSCRIBED, job_id, chapter_index=index, text=text)
 
     # ── Captions ──────────────────────────────────────────────────────────────
-    log.info("[%s] Chapter %d  generating captions  format=%s", job_id, index, caption_format)
+    log.info("[%s] Chapter %d  generating captions  format=%s  words_per_segment=%d",
+             job_id, index, caption_format, settings.caption_words_per_segment)
     step_t0 = time.perf_counter()
     await store.upsert_chapter(job_id, lambda c: _set_status(c, "captioning"), index)
     captions_obj = await asyncio.to_thread(
-        caption_service.generate_captions, text, 0.0, chapter_duration, caption_format
+        caption_service.generate_captions_from_word_timings,
+        words, settings.caption_words_per_segment, caption_format,
     )
     captions_path = str(tmp_dir / f"chapter_{index}.{caption_format}")
     await asyncio.to_thread(

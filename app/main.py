@@ -29,7 +29,7 @@ import app.logging_config  # noqa: F401
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Cap the thread pool used by every asyncio.to_thread call.
-    # MoviePy/yt-dlp/SpeechRecognition are all CPU/IO heavy; an unbounded pool
+    # MoviePy/yt-dlp/faster-whisper are all CPU/IO heavy; an unbounded pool
     # (Python default: min(32, cpu_count+4)) causes thermal throttling and
     # memory pressure on a laptop. max_thread_workers controls this via env var
     # YTVIDEO_MAX_THREAD_WORKERS (default 4).

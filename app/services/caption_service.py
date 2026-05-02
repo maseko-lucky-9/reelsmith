@@ -9,6 +9,49 @@ import app.logging_config  # noqa: F401
 log = logging.getLogger(__name__)
 
 
+def generate_captions_from_word_timings(words: list, n: int = 3, format: str = "srt"):
+    """Generate captions from word-level timestamps, grouping N words per segment.
+
+    Each element of *words* must have .word (str), .start (float), .end (float).
+    """
+    if not words:
+        log.warning("No word timings — returning empty captions")
+        return pysrt.SubRipFile() if format == "srt" else WebVTT()
+
+    captions = []
+    for i in range(0, len(words), n):
+        group = words[i:i + n]
+        text = " ".join(w.word for w in group)
+        start = group[0].start
+        end = group[-1].end
+
+        if format == "srt":
+            caption = pysrt.SubRipItem(
+                index=len(captions) + 1,
+                start=pysrt.SubRipTime(seconds=start),
+                end=pysrt.SubRipTime(seconds=end),
+                text=text,
+            )
+        elif format == "vtt":
+            caption = Caption(
+                start=_format_vtt_time(start),
+                end=_format_vtt_time(end),
+                text=text,
+            )
+        else:
+            raise ValueError(f"Unsupported format: {format}")
+        captions.append(caption)
+
+    log.info("Captions generated from word timings  count=%d  format=%s", len(captions), format)
+    if format == "srt":
+        return pysrt.SubRipFile(items=captions)
+    vtt = WebVTT()
+    for c in captions:
+        vtt.captions.append(c)
+    return vtt
+
+
+# Deprecated: uses uniform words-per-second rate, not actual word timestamps.
 def generate_captions(text: str, start_time: float, end_time: float, format: str = "srt"):
     duration = end_time - start_time
     words = text.split()

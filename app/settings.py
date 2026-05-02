@@ -37,7 +37,9 @@ if _HAS_PYDANTIC_SETTINGS:
         download_timeout_seconds: int = 600
         transcription_timeout_seconds: int = 120
         render_timeout_seconds: int = 3600
-        transcription_provider: str = "google"  # "google" | "stub"
+        transcription_provider: str = "whisper"  # "whisper" | "stub"
+        whisper_model: str = "base"
+        caption_words_per_segment: int = 3
 
 else:  # Fallback so Phase 2 doesn't require pydantic-settings to be installed yet.
 
@@ -51,7 +53,9 @@ else:  # Fallback so Phase 2 doesn't require pydantic-settings to be installed y
         download_timeout_seconds = 600
         transcription_timeout_seconds = 120
         render_timeout_seconds = 300
-        transcription_provider = "google"
+        transcription_provider = "whisper"
+        whisper_model = "base"
+        caption_words_per_segment = 3
 
 
 settings = Settings()

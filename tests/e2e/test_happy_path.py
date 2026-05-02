@@ -61,9 +61,13 @@ async def test_happy_path_emits_completed(tmp_path, monkeypatch):
     monkeypatch.setattr(orch.folder_service, "create_video_subfolder", _fake_subfolder)
     monkeypatch.setattr(orch.download_service, "download_video", _fake_download)
     monkeypatch.setattr(orch.clip_service, "extract_chapter_to_disk", _fake_extract_chapter)
+    from app.services.transcription_service import WordTiming
     monkeypatch.setattr(
-        orch.transcription_service, "speech_to_text",
-        lambda audio_path, language="en-US": "hello world",
+        orch.transcription_service, "transcribe_to_words",
+        lambda audio_path, language="en": [
+            WordTiming("hello", 0.0, 0.5),
+            WordTiming("world", 0.5, 1.0),
+        ],
     )
     monkeypatch.setattr(orch.render_service, "render_clip", _fake_render)
     monkeypatch.setattr(orch.subtitle_image_service, "render_to_path", _fake_render_to_path)
