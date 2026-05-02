@@ -10,6 +10,11 @@ import app.logging_config  # noqa: F401
 
 log = logging.getLogger(__name__)
 
+_GREEN = (0, 255, 0, 255)
+_WHITE = (255, 255, 255, 255)
+_BLACK = (0, 0, 0, 255)
+_STROKE_WIDTH = 2
+
 
 def _load_font(font_size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     font_path = settings.font_path
@@ -22,28 +27,70 @@ def _load_font(font_size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     return ImageFont.load_default()
 
 
-def create_subtitle_image(text: str, videosize: tuple[int, int], font_size: int = 50) -> np.ndarray:
-    log.info("Create Subtitle Image (%dx%d, font_size=%d)", videosize[0], videosize[1], font_size)
+def create_subtitle_image(
+    text: str,
+    videosize: tuple[int, int],
+    font_size: int = 50,
+    highlight_word_index: int | None = None,
+) -> np.ndarray:
+    log.info(
+        "Create Subtitle Image (%dx%d, font_size=%d, highlight=%s)",
+        videosize[0], videosize[1], font_size, highlight_word_index,
+    )
+    text = text.upper()
+
     img = Image.new("RGBA", videosize, (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     font = _load_font(font_size)
+    is_freetype = isinstance(font, ImageFont.FreeTypeFont)
+    stroke_width = _STROKE_WIDTH if is_freetype else 0
+    stroke_fill = _BLACK if is_freetype else None
 
+    # Measure full text for background rectangle and vertical positioning.
     left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
-    text_width = right - left
     text_height = bottom - top
-    text_position = ((videosize[0] - text_width) / 2, videosize[1] - text_height - 10)
+    text_y = videosize[1] - text_height - 10
 
-    bg_height = text_height + 10
-    bg_top = videosize[1] - bg_height
-    draw.rectangle([(0, bg_top), (videosize[0], videosize[1])], fill=(0, 0, 0, 255))
-    draw.text(text_position, text, font=font, fill=(255, 255, 255, 255))
+    bg_top = videosize[1] - text_height - 10
+    draw.rectangle([(0, bg_top), (videosize[0], videosize[1])], fill=_BLACK)
+
+    # Measure each word and space for per-word x-offsets.
+    words = text.split()
+    space_bbox = draw.textbbox((0, 0), " ", font=font)
+    space_w = space_bbox[2] - space_bbox[0]
+
+    word_widths = []
+    for word in words:
+        wb = draw.textbbox((0, 0), word, font=font)
+        word_widths.append(wb[2] - wb[0])
+
+    total_w = sum(word_widths) + space_w * max(len(words) - 1, 0)
+    x = (videosize[0] - total_w) / 2
+
+    for i, (word, w) in enumerate(zip(words, word_widths)):
+        color = _GREEN if i == highlight_word_index else _WHITE
+        draw.text(
+            (x, text_y),
+            word,
+            font=font,
+            fill=color,
+            stroke_width=stroke_width,
+            stroke_fill=stroke_fill,
+        )
+        x += w + space_w
 
     return np.array(img)
 
 
-def render_to_path(text: str, videosize: tuple[int, int], path: str, font_size: int = 50) -> str:
+def render_to_path(
+    text: str,
+    videosize: tuple[int, int],
+    path: str,
+    font_size: int = 50,
+    highlight_word_index: int | None = None,
+) -> str:
     log.debug("Rendering subtitle image  text=%r  size=%s  path=%s", text[:40], videosize, path)
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    arr = create_subtitle_image(text, videosize, font_size=font_size)
+    arr = create_subtitle_image(text, videosize, font_size=font_size, highlight_word_index=highlight_word_index)
     Image.fromarray(arr, mode="RGBA").save(path)
     return path

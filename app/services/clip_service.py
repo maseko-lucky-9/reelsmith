@@ -74,9 +74,9 @@ def extract_chapter_to_disk(
     return out_clip_path, out_audio_path
 
 
-def create_subtitle_clip(text: str, videosize, duration: float):
+def create_subtitle_clip(text: str, videosize, duration: float, highlight_word_index: int | None = None):
     log.info("Create Subtitle Clip...")
-    subtitle_image = create_subtitle_image(text, videosize)
+    subtitle_image = create_subtitle_image(text, videosize, highlight_word_index=highlight_word_index)
     return ImageClip(subtitle_image).set_duration(duration)
 
 
@@ -126,7 +126,13 @@ def create_background(clip, target_aspect_ratio: float = 9 / 16):
     return ImageClip(blurred).set_duration(clip.duration)
 
 
-def add_captions_to_clip(clip, captions, target_aspect_ratio: float = 9 / 16):
+def add_captions_to_clip(
+    clip,
+    captions,
+    target_aspect_ratio: float = 9 / 16,
+    word_timings=None,
+    caption_words_per_segment: int = 3,
+):
     log.info("Add Captions To Clip...")
     background = create_background(clip, target_aspect_ratio)
 
@@ -137,12 +143,32 @@ def add_captions_to_clip(clip, captions, target_aspect_ratio: float = 9 / 16):
     resized_clip = resized_clip.set_position(("center", "center"))
 
     subtitle_clips = []
-    for caption in captions:
-        start_time = caption.start.seconds
-        end_time = caption.end.seconds
-        duration = end_time - start_time
-        subtitle_clip = create_subtitle_clip(caption.text, clip.size, duration)
-        subtitle_clips.append(subtitle_clip.set_start(start_time))
+    if word_timings is not None:
+        n = caption_words_per_segment
+        for i, word in enumerate(word_timings):
+            group_idx = i // n
+            word_pos = i % n
+            group_start = group_idx * n
+            group = word_timings[group_start:group_start + n]
+            group_text = " ".join(w.word for w in group)
+
+            # Extend clip to next word's start to avoid inter-word blank frames.
+            clip_end = word_timings[i + 1].start if i + 1 < len(word_timings) else word.end
+            duration = clip_end - word.start
+            if duration <= 0:
+                continue
+
+            subtitle_clip = create_subtitle_clip(
+                group_text, clip.size, duration, highlight_word_index=word_pos
+            )
+            subtitle_clips.append(subtitle_clip.set_start(word.start))
+    else:
+        for caption in captions:
+            start_time = caption.start.seconds
+            end_time = caption.end.seconds
+            duration = end_time - start_time
+            subtitle_clip = create_subtitle_clip(caption.text, clip.size, duration)
+            subtitle_clips.append(subtitle_clip.set_start(start_time))
 
     main_clip_with_subtitles = CompositeVideoClip(
         [resized_clip] + subtitle_clips, size=clip.size

@@ -27,13 +27,22 @@ def render_clip(
     end: float,
     captions_path: str | None = None,
     target_aspect_ratio: float = 9 / 16,
+    word_timings=None,
+    caption_words_per_segment: int = 3,
 ) -> str:
     log.info("Rendering clip %s [%.3f, %.3f] -> %s", video_path, start, end, output_path)
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     with closing_clip(video_path) as video:
         sub = video.subclip(start, end)
         try:
-            if captions_path:
+            if word_timings is not None:
+                log.info("Karaoke render  words=%d  n=%d", len(word_timings), caption_words_per_segment)
+                final = add_captions_to_clip(
+                    sub, None, target_aspect_ratio,
+                    word_timings=word_timings,
+                    caption_words_per_segment=caption_words_per_segment,
+                )
+            elif captions_path:
                 captions = _load_captions(captions_path)
                 log.info("Captions loaded  count=%d  path=%s", len(captions), captions_path)
                 final = add_captions_to_clip(sub, captions, target_aspect_ratio)

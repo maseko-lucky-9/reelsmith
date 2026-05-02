@@ -346,6 +346,8 @@ async def _process_chapter(
             chapter_duration,
             captions_path,
             target_aspect_ratio,
+            word_timings=words,
+            caption_words_per_segment=settings.caption_words_per_segment,
         ),
         timeout=settings.render_timeout_seconds,
     )
