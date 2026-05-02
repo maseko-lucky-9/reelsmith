@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from app.bus.job_store import JobNotFoundError
 
-router = APIRouter(prefix="/api/clips", tags=["media"])
+router = APIRouter(prefix="/clips", tags=["media"])
 
 _RANGE_RE = re.compile(r"bytes=(\d+)-(\d*)")
 
@@ -37,6 +37,8 @@ async def stream_video(clip_id: str, request: Request):
 
     file_size = path.stat().st_size
     range_header = request.headers.get("range")
+
+    filename = path.name
 
     if range_header:
         m = _RANGE_RE.match(range_header)
@@ -65,12 +67,14 @@ async def stream_video(clip_id: str, request: Request):
                     "Content-Range": f"bytes {start}-{end}/{file_size}",
                     "Accept-Ranges": "bytes",
                     "Content-Length": str(chunk_size),
+                    "Content-Disposition": f'attachment; filename="{filename}"',
                 },
             )
 
     return FileResponse(
         str(path),
         media_type="video/mp4",
+        filename=filename,
         headers={"Accept-Ranges": "bytes"},
     )
 

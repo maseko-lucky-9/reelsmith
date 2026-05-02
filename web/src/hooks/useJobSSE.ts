@@ -23,7 +23,7 @@ export function useJobSSE(jobId: string | undefined) {
       if (closed) return
       esRef.current?.close()
 
-      const es = new EventSource(`/jobs/${jobId}/events`)
+      const es = new EventSource(`/api/jobs/${jobId}/events`)
       esRef.current = es
 
       es.onmessage = () => {

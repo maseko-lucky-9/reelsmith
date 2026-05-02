@@ -11,3 +11,22 @@ __pycache__/
 # Accidental pip install artifacts
 =*
 app/example/Screenshot 2025-08-26 190730.png
+
+# Database (SQLite dev store)
+*.db
+
+# Video files — downloaded clips and MoviePy temp renders land here
+*.mp4
+*TEMP_MPY*
+
+# Playwright MCP session artifacts (console logs, page snapshots)
+.playwright-mcp/
+
+# Playwright test results and reports
+test-results/
+playwright-report/
+web/test-results/
+web/playwright-report/
+
+# Root-level screenshots from planning/testing sessions
+/*.png

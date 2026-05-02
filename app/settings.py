@@ -30,9 +30,9 @@ if _HAS_PYDANTIC_SETTINGS:
         model_config = SettingsConfigDict(env_prefix="YTVIDEO_", extra="ignore")
 
         # ── Database ──────────────────────────────────────────────────────────
-        db_url: str = "postgresql+asyncpg://reelsmith:reelsmith@localhost/reelsmith"
+        db_url: str = "sqlite+aiosqlite:///./reelsmith.db"
         # "sql" | "memory"
-        job_store: str = "memory"
+        job_store: str = "sql"
 
         # ── Jobs & concurrency ────────────────────────────────────────────────
         max_concurrent_jobs: int = 1
@@ -95,8 +95,8 @@ if _HAS_PYDANTIC_SETTINGS:
 else:  # Fallback: pydantic-settings not yet installed
 
     class Settings:  # type: ignore[no-redef]
-        db_url = "postgresql+asyncpg://reelsmith:reelsmith@localhost/reelsmith"
-        job_store = "memory"
+        db_url = "sqlite+aiosqlite:///./reelsmith.db"
+        job_store = "sql"
         max_concurrent_jobs = 1
         max_parallel_chapters = 1
         max_thread_workers = 4

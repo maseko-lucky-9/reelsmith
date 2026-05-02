@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import subprocess
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -29,8 +31,46 @@ class CreateJobResponse(BaseModel):
     status: str
 
 
+class VideoPreviewResponse(BaseModel):
+    title: str
+    duration: float
+    resolution: str
+
+
+@router.get("/preview", response_model=VideoPreviewResponse)
+async def preview_video(url: str) -> VideoPreviewResponse:
+    """Fetch video metadata without downloading. Returns empty fields on failure."""
+    def _fetch() -> dict:
+        result = subprocess.run(
+            ["yt-dlp", "--dump-json", "--no-playlist", url],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return {}
+        return json.loads(result.stdout)
+
+    try:
+        info = await asyncio.wait_for(asyncio.to_thread(_fetch), timeout=12)
+    except Exception:
+        info = {}
+
+    height = info.get("height") or 0
+    resolution = f"{height}p" if height else ""
+    return VideoPreviewResponse(
+        title=info.get("title", ""),
+        duration=float(info.get("duration") or 0.0),
+        resolution=resolution,
+    )
+
+
 @router.post("", response_model=CreateJobResponse, status_code=202)
 async def create_job(req: CreateJobRequest, request: Request) -> CreateJobResponse:
+    # Return existing job if the same URL was already processed or is running.
+    existing = await request.app.state.job_store.list_jobs(limit=200)
+    for job in existing:
+        if job.url == req.url and job.status in ("completed", "running", "pending"):
+            return CreateJobResponse(job_id=job.job_id, status=job.status)
+
     job_id = new_job_id()
     state = JobState(
         job_id=job_id,

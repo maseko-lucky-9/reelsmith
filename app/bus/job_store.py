@@ -25,6 +25,7 @@ class JobStoreProtocol(Protocol):
     async def list_jobs(
         self, limit: int = 20, offset: int = 0, search: str = ""
     ) -> list[JobState]: ...
+    async def get_clip(self, clip_id: str) -> dict[str, Any] | None: ...
     async def list_clips(
         self,
         job_id: str | None = None,
@@ -92,6 +93,10 @@ class InMemoryJobStore:
             mutator(clip)
             self._clips[clip_id] = clip
             return clip
+
+    async def get_clip(self, clip_id: str) -> dict[str, Any] | None:
+        async with self._lock:
+            return self._clips.get(clip_id)
 
     async def list_jobs(
         self, limit: int = 20, offset: int = 0, search: str = ""
@@ -228,6 +233,8 @@ class SqlJobStore:
                     "virality_score": record.virality_score,
                     "score_breakdown": record.score_breakdown,
                     "transcript": record.transcript,
+                    "liked": record.liked,
+                    "disliked": record.disliked,
                 })
             mutator(clip)
             def _apply_clip_to_record(r: Any, c: dict[str, Any]) -> None:
@@ -240,6 +247,8 @@ class SqlJobStore:
                 r.virality_score = c.get("virality_score")
                 r.score_breakdown = c.get("score_breakdown")
                 r.transcript = c.get("transcript")
+                r.liked = bool(c.get("liked", False))
+                r.disliked = bool(c.get("disliked", False))
 
             if record is None:
                 record = ClipRecord(id=clip_id, job_id=job_id)
@@ -247,6 +256,17 @@ class SqlJobStore:
             _apply_clip_to_record(record, clip)
             await session.commit()
         return clip
+
+    async def get_clip(self, clip_id: str) -> dict[str, Any] | None:
+        from app.db.models import ClipRecord
+        from sqlalchemy import select
+
+        async with self._factory() as session:
+            result = await session.execute(
+                select(ClipRecord).where(ClipRecord.id == clip_id)
+            )
+            record = result.scalar_one_or_none()
+            return _clip_record_to_dict(record) if record else None
 
     async def list_jobs(
         self, limit: int = 20, offset: int = 0, search: str = ""
@@ -307,5 +327,7 @@ def _clip_record_to_dict(record: Any) -> dict[str, Any]:
         "virality_score": record.virality_score,
         "score_breakdown": record.score_breakdown,
         "transcript": record.transcript,
+        "liked": record.liked,
+        "disliked": record.disliked,
         "retired": record.retired,
     }

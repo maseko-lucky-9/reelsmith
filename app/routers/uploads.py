@@ -11,7 +11,7 @@ from app.domain.ids import new_job_id
 from app.domain.models import JobState
 from app.settings import settings
 
-router = APIRouter(prefix="/api/uploads", tags=["uploads"])
+router = APIRouter(prefix="/uploads", tags=["uploads"])
 
 _ALLOWED_MIME = {"video/mp4", "video/quicktime", "video/x-m4v"}
 _UPLOAD_DIR = Path("/tmp/yt/uploads")

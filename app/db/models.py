@@ -95,6 +95,8 @@ class ClipRecord(Base):
     virality_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     score_breakdown: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     transcript: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    liked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    disliked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     retired: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_now

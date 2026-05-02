@@ -22,6 +22,40 @@ async def list_clips(
     )
 
 
+@router.patch("/{clip_id}/like")
+async def like_clip(clip_id: str, request: Request) -> dict[str, Any]:
+    store = request.app.state.job_store
+    clip = await store.get_clip(clip_id)
+    if clip is None:
+        raise HTTPException(status_code=404, detail="clip not found")
+    new_liked = not clip.get("liked", False)
+
+    async def _toggle(c: dict[str, Any]) -> None:
+        c["liked"] = new_liked
+        if new_liked:
+            c["disliked"] = False
+
+    await store.upsert_clip(clip["job_id"], clip_id, _toggle)
+    return {**clip, "liked": new_liked, "disliked": False if new_liked else clip.get("disliked", False)}
+
+
+@router.patch("/{clip_id}/dislike")
+async def dislike_clip(clip_id: str, request: Request) -> dict[str, Any]:
+    store = request.app.state.job_store
+    clip = await store.get_clip(clip_id)
+    if clip is None:
+        raise HTTPException(status_code=404, detail="clip not found")
+    new_disliked = not clip.get("disliked", False)
+
+    async def _toggle(c: dict[str, Any]) -> None:
+        c["disliked"] = new_disliked
+        if new_disliked:
+            c["liked"] = False
+
+    await store.upsert_clip(clip["job_id"], clip_id, _toggle)
+    return {**clip, "disliked": new_disliked, "liked": False if new_disliked else clip.get("liked", False)}
+
+
 class RerenderRequest(BaseModel):
     reframe_provider: str = "letterbox"
 

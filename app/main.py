@@ -169,8 +169,8 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Health probe used by the React dev-server to confirm the API is up.
-    @app.get("/api/health", tags=["meta"])
+    # Health probe — Vite proxy strips /api prefix so this must live at /health.
+    @app.get("/health", tags=["meta"])
     async def health() -> JSONResponse:
         return JSONResponse({"status": "ok", "job_store": settings.job_store})
 

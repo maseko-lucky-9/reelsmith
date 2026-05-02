@@ -8,26 +8,39 @@ describe('ScoreBadge', () => {
     expect(screen.getByText('—')).toBeDefined()
   })
 
-  it('applies green class for high score', () => {
-    const { container } = render(<ScoreBadge score={80} />)
-    const badge = container.firstChild as HTMLElement
-    expect(badge.className).toContain('bg-emerald')
+  it('renders — for undefined score', () => {
+    render(<ScoreBadge score={undefined} />)
+    expect(screen.getByText('—')).toBeDefined()
   })
 
-  it('applies amber class for medium score', () => {
-    const { container } = render(<ScoreBadge score={50} />)
-    const badge = container.firstChild as HTMLElement
-    expect(badge.className).toContain('bg-amber')
-  })
-
-  it('applies red class for low score', () => {
-    const { container } = render(<ScoreBadge score={10} />)
-    const badge = container.firstChild as HTMLElement
-    expect(badge.className).toContain('bg-red')
-  })
-
-  it('shows the score value', () => {
+  it('shows the score value as a plain number', () => {
     render(<ScoreBadge score={75} />)
     expect(screen.getByText('75')).toBeDefined()
+  })
+
+  it('applies score-green color via inline style', () => {
+    const { container } = render(<ScoreBadge score={80} />)
+    const span = container.firstChild as HTMLElement
+    expect(span.style.color).toBe('var(--score-green)')
+  })
+
+  it('applies bold font weight', () => {
+    const { container } = render(<ScoreBadge score={50} />)
+    const span = container.firstChild as HTMLElement
+    expect(span.style.fontWeight).toBe('700')
+  })
+
+  it('does NOT render a pill badge (no background color class)', () => {
+    const { container } = render(<ScoreBadge score={90} />)
+    const span = container.firstChild as HTMLElement
+    expect(span.className).not.toContain('bg-emerald')
+    expect(span.className).not.toContain('bg-amber')
+    expect(span.className).not.toContain('bg-red')
+  })
+
+  it('accepts a custom className', () => {
+    const { container } = render(<ScoreBadge score={42} className="text-7xl font-bold" />)
+    const span = container.firstChild as HTMLElement
+    expect(span.className).toContain('text-7xl')
   })
 })

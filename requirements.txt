@@ -10,6 +10,7 @@ asgi-lifespan==2.1.0
 # Database
 sqlalchemy[asyncio]==2.0.41
 asyncpg==0.30.0
+aiosqlite==0.22.1
 alembic==1.16.1
 
 # Domain dependencies

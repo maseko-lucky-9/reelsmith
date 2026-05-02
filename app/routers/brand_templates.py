@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_session
 from app.db.models import BrandTemplate
 
-router = APIRouter(prefix="/api/brand-templates", tags=["brand-templates"])
+router = APIRouter(prefix="/brand-templates", tags=["brand-templates"])
 
 _BRAND_ASSETS_ROOT = Path("data/brand_assets")
 
