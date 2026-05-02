@@ -1,0 +1,20 @@
+- generic [ref=e3]:
+  - navigation [ref=e4]:
+    - link "Reelsmith" [ref=e5] [cursor=pointer]:
+      - /url: /
+    - link "Library" [ref=e6] [cursor=pointer]:
+      - /url: /
+    - link "New Job" [ref=e7] [cursor=pointer]:
+      - /url: /jobs/new
+  - main [ref=e8]:
+    - generic [ref=e9]:
+      - generic [ref=e10]:
+        - heading "Library" [level=1] [ref=e11]
+        - paragraph [ref=e12]: 0 job(s)
+      - generic [ref=e13]:
+        - textbox "Search clips…" [ref=e14]
+        - combobox [ref=e15]:
+          - option "All scores" [selected]
+          - option "High (67+)"
+          - option "Medium (34+)"
+  - region "Notifications alt+T"

@@ -2,18 +2,41 @@
 
 **Problem:** Manually trimming YouTube videos into captioned short-form clips is tedious and time-consuming for a solo creator.
 
-Reelsmith is a learning project that automates the pipeline: download a YouTube video, transcribe it, generate SRT captions, burn subtitles into chapter clips, and produce 9:16 vertical reels — all through a FastAPI backend with a Streamlit UI.
+Reelsmith automates the pipeline: download a video, transcribe it with word-level timing, score clips by virality heuristics, burn karaoke subtitles, and produce 9:16 vertical reels — all through a FastAPI backend and a React dashboard.
+
+## Quick Start
+
+```bash
+# 1. Start Postgres
+docker compose up -d postgres
+
+# 2. Install Python deps
+python -m venv .venv-mac && source .venv-mac/bin/activate
+pip install -r requirements.txt
+
+# 3. Start API (memory store for dev)
+YTVIDEO_JOB_STORE=memory uvicorn app.main:app --reload
+
+# 4. Start React dev server (separate terminal)
+cd web && pnpm install && pnpm dev
+```
+
+Open **<http://localhost:5173>** in your browser.
+
+> **Note:** Only process videos you have the right to use. Check the platform's terms of service before downloading.
 
 ## Architecture
 
 ```
-ui/streamlit_app.py      — thin Streamlit client
-app/main.py              — FastAPI app with SSE progress streaming
-app/routers/             — HTTP endpoints (jobs, downloads, transcriptions, captions, renders)
-app/services/            — domain logic per pipeline stage
-app/workers/orchestrator — async job runner
+web/                     — React 19 + Vite + TanStack Router/Query + shadcn/ui
+app/main.py              — FastAPI app, job queue, SSE streaming
+app/routers/             — jobs, clips, media, uploads, brand_templates
+app/services/            — download, transcription, caption, render, segment_proposer,
+                           reframe, broll, thumbnail
+app/workers/orchestrator — async pipeline runner
 app/domain/              — events, models, IDs
-app/bus/                 — in-process async event bus + job store
+app/bus/                 — async event bus + job store (memory / Postgres)
+app/db/                  — SQLAlchemy ORM models + alembic migrations
 ```
 
 ## Stack
@@ -21,51 +44,51 @@ app/bus/                 — in-process async event bus + job store
 | Layer | Library |
 |---|---|
 | API | FastAPI + Uvicorn |
+| Database | Postgres 16 + SQLAlchemy 2 async + Alembic |
 | Video download | yt-dlp |
 | Video editing | MoviePy |
-| Transcription | SpeechRecognition (Google) |
+| Transcription | Whisper (word-level) |
+| Virality scoring | librosa + VADER + spaCy + webrtcvad |
+| Reframe | MediaPipe face detection |
 | Captions | pysrt / webvtt-py |
 | Subtitle images | Pillow + NumPy |
-| UI | Streamlit |
-| Tests | pytest + pytest-asyncio + Playwright |
+| UI | React 19 + Vite 8 + shadcn/ui |
+| Tests | pytest + vitest |
 
-## Setup
+## Environment Variables
 
-```bash
-python -m venv .venv-mac
-source .venv-mac/bin/activate
-pip install -r requirements.txt
-```
-
-## Running
-
-```bash
-# API (from repo root)
-uvicorn app.main:app --reload
-
-# UI (separate terminal)
-cd ui
-streamlit run streamlit_app.py
-```
-
-Environment variables (all prefixed `YTVIDEO_`):
+See `.env.example` for the full list. Key settings:
 
 | Variable | Default | Description |
 |---|---|---|
-| `YTVIDEO_DEFAULT_DOWNLOAD_PATH` | `/tmp/yt` | Where videos are saved |
-| `YTVIDEO_MAX_THREAD_WORKERS` | `4` | Thread pool cap for CPU-heavy tasks |
-| `YTVIDEO_TRANSCRIPTION_PROVIDER` | `google` | `google` or `stub` |
-| `YTVIDEO_FONT_PATH` | auto-detected | Path to a `.ttf`/`.ttc` font |
+| `YTVIDEO_JOB_STORE` | `memory` | `memory` or `sql` |
+| `YTVIDEO_DB_URL` | `postgresql+asyncpg://reelsmith:reelsmith@localhost/reelsmith` | Postgres connection |
+| `YTVIDEO_SEGMENT_PROVIDER` | `chapter` | `chapter`, `local_heuristic`, or `stub` |
+| `YTVIDEO_REFRAME_PROVIDER` | `letterbox` | `letterbox`, `face_track`, or `stub` |
+| `YTVIDEO_SERVE_FRONTEND` | `false` | Serve built React app from FastAPI |
+| `YTVIDEO_REQUIRE_AUTH` | `false` | Enable API key auth |
+| `YTVIDEO_API_KEY` | `null` | API key when auth enabled |
 
 ## Testing
 
 ```bash
-# Unit + e2e (default — no network)
+# Unit + contract tests (no network, no Postgres)
 pytest
 
-# Integration (hits real network)
-pytest -m integration
+# Integration tests (requires Postgres)
+YTVIDEO_DB_URL=postgresql+asyncpg://reelsmith:reelsmith@localhost:5432/reelsmith pytest -m integration
 
-# Playwright UI smoke tests (requires running services)
-pytest -m playwright
+# Frontend tests
+cd web && pnpm test
+
+# Full build check
+cd web && pnpm build
+```
+
+## Production Build
+
+```bash
+cd web && pnpm build
+# Then run API with YTVIDEO_SERVE_FRONTEND=true
+YTVIDEO_SERVE_FRONTEND=true uvicorn app.main:app
 ```

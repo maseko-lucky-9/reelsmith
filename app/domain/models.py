@@ -52,4 +52,5 @@ class JobState(BaseModel):
     chapters: dict[int, ChapterArtifacts] = Field(default_factory=dict)
     output_paths: list[str] = Field(default_factory=list)
     error: str | None = None
+    clips: dict[str, Any] = Field(default_factory=dict)
     extra: dict[str, Any] = Field(default_factory=dict)

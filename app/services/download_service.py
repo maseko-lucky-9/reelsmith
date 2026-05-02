@@ -1,11 +1,39 @@
 import logging
 import os
+from urllib.parse import urlparse
 
 from yt_dlp import YoutubeDL
 
 import app.logging_config  # noqa: F401
 
 log = logging.getLogger(__name__)
+
+_SUPPORTED_DOMAINS = frozenset({
+    "youtube.com", "www.youtube.com", "youtu.be", "m.youtube.com",
+    "vimeo.com", "www.vimeo.com",
+    "twitch.tv", "www.twitch.tv", "clips.twitch.tv",
+    "loom.com", "www.loom.com",
+    "facebook.com", "www.facebook.com", "fb.watch",
+    "linkedin.com", "www.linkedin.com",
+    "twitter.com", "www.twitter.com", "x.com",
+    "rumble.com", "www.rumble.com",
+    "dailymotion.com", "www.dailymotion.com",
+    "tiktok.com", "www.tiktok.com",
+    "instagram.com", "www.instagram.com",
+    "reddit.com", "www.reddit.com",
+    "streamyard.com", "riverside.fm",
+    "drive.google.com",
+})
+
+
+def is_supported_url(url: str) -> bool:
+    if url.startswith("upload://"):
+        return True
+    try:
+        host = urlparse(url).hostname or ""
+        return host in _SUPPORTED_DOMAINS
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def download_video(url: str, destination_folder: str) -> tuple[str | None, dict | None]:

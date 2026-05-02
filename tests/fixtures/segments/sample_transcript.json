@@ -1,0 +1,16 @@
+{
+  "words": [
+    {"word": "How", "start": 0.0, "end": 0.3},
+    {"word": "to", "start": 0.3, "end": 0.5},
+    {"word": "make", "start": 0.5, "end": 0.8},
+    {"word": "money", "start": 0.8, "end": 1.2},
+    {"word": "online", "start": 1.2, "end": 1.6},
+    {"word": "in", "start": 1.6, "end": 1.8},
+    {"word": "5", "start": 1.8, "end": 2.0},
+    {"word": "steps", "start": 2.0, "end": 2.5},
+    {"word": "This", "start": 5.0, "end": 5.3},
+    {"word": "is", "start": 5.3, "end": 5.5},
+    {"word": "amazing", "start": 5.5, "end": 6.0}
+  ],
+  "duration": 30.0
+}

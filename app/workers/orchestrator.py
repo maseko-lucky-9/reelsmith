@@ -5,6 +5,7 @@ import logging
 import re
 import shutil
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ from app.services import (
     folder_service,
     render_service,
     subtitle_image_service,
+    thumbnail_service,
     transcription_service,
 )
 from app.settings import settings
@@ -367,4 +369,31 @@ async def _process_chapter(
         chapter_index=index,
         output_path=output_path,
     )
+
+    # ── Thumbnail ─────────────────────────────────────────────────────────────
+    clip_id = str(uuid.uuid4())
+    thumbnail_path: str | None = None
+    try:
+        thumbnail_out = str(Path(clips_folder) / f"{index:02d}_{safe_title}_thumb.jpg")
+        thumbnail_path = await asyncio.to_thread(
+            thumbnail_service.generate_thumbnail, output_path, thumbnail_out
+        )
+        log.info("[%s] Chapter %d  thumbnail generated  path=%s", job_id, index, thumbnail_path)
+        await _emit(bus, EventType.THUMBNAIL_GENERATED, job_id, chapter_index=index, thumbnail_path=thumbnail_path)
+    except Exception as e:  # noqa: BLE001
+        log.warning("[%s] Chapter %d  thumbnail failed: %s", job_id, index, e)
+
+    # ── Upsert clip record ────────────────────────────────────────────────────
+    def _init_clip(c: dict[str, Any]) -> None:
+        c.update({
+            "start": start,
+            "end": end,
+            "output_path": output_path,
+            "thumbnail_path": thumbnail_path,
+            "title": title,
+            "transcript": text,
+        })
+
+    await store.upsert_clip(job_id, clip_id, _init_clip)
+
     return output_path

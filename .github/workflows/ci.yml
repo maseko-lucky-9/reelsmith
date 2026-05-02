@@ -1,0 +1,59 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: reelsmith
+          POSTGRES_PASSWORD: reelsmith
+          POSTGRES_DB: reelsmith
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run unit + contract tests
+        run: pytest
+
+      - name: Run integration tests
+        env:
+          YTVIDEO_DB_URL: postgresql+asyncpg://reelsmith:reelsmith@localhost:5432/reelsmith
+          YTVIDEO_JOB_STORE: sql
+        run: pytest -m integration
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Install frontend dependencies
+        run: cd web && pnpm install --frozen-lockfile
+
+      - name: Run frontend tests
+        run: cd web && pnpm test
+
+      - name: Build frontend
+        run: cd web && pnpm build

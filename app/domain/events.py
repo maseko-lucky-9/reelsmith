@@ -18,6 +18,10 @@ class EventType(str, Enum):
     CAPTIONS_GENERATED = "CaptionsGenerated"
     SUBTITLE_IMAGE_RENDERED = "SubtitleImageRendered"
     CLIP_RENDERED = "ClipRendered"
+    THUMBNAIL_GENERATED = "ThumbnailGenerated"
+    SEGMENTS_PROPOSED = "SegmentsProposed"
+    SEGMENT_SCORED = "SegmentScored"
+    UPLOAD_RECEIVED = "UploadReceived"
     JOB_COMPLETED = "JobCompleted"
     JOB_FAILED = "JobFailed"
 

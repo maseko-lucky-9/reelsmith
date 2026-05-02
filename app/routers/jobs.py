@@ -40,19 +40,32 @@ async def create_job(req: CreateJobRequest, request: Request) -> CreateJobRespon
         target_aspect_ratio=req.target_aspect_ratio,
     )
     await request.app.state.job_store.create(state)
-    await request.app.state.event_bus.publish(
-        Event(
-            type=EventType.VIDEO_REQUESTED,
-            job_id=job_id,
-            payload={
-                "url": req.url,
-                "download_path": req.download_path,
-                "caption_format": req.caption_format,
-                "target_aspect_ratio": req.target_aspect_ratio,
-            },
+    payload = {
+        "url": req.url,
+        "download_path": req.download_path,
+        "caption_format": req.caption_format,
+        "target_aspect_ratio": req.target_aspect_ratio,
+    }
+    # Enqueue via the job queue so concurrency is capped by YTVIDEO_MAX_CONCURRENT_JOBS.
+    if hasattr(request.app.state, "job_queue"):
+        await request.app.state.job_queue.put((job_id, payload))
+    else:
+        await request.app.state.event_bus.publish(
+            Event(type=EventType.VIDEO_REQUESTED, job_id=job_id, payload=payload)
         )
-    )
     return CreateJobResponse(job_id=job_id, status="accepted")
+
+
+@router.get("", response_model=list[JobState])
+async def list_jobs(
+    request: Request,
+    limit: int = 20,
+    offset: int = 0,
+    search: str = "",
+) -> list[JobState]:
+    return await request.app.state.job_store.list_jobs(
+        limit=limit, offset=offset, search=search
+    )
 
 
 @router.get("/{job_id}", response_model=JobState)
