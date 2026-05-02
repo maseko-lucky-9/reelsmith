@@ -7,6 +7,11 @@ pydantic-settings==2.14.0
 httpx==0.28.1
 asgi-lifespan==2.1.0
 
+# Database
+sqlalchemy[asyncio]==2.0.41
+asyncpg==0.30.0
+alembic==1.16.1
+
 # Domain dependencies
 yt-dlp==2026.3.17
 moviepy==1.0.3
@@ -16,7 +21,7 @@ webvtt-py==0.5.1
 pillow==12.2.0
 numpy==2.4.4
 
-# UI (thin client only)
+# UI (thin client — kept until Phase 8, archived after React parity)
 streamlit==1.56.0
 
 # Test

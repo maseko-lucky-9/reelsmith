@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 try:
     from pydantic_settings import BaseSettings, SettingsConfigDict
     _HAS_PYDANTIC_SETTINGS = True
-except ImportError:  # pragma: no cover - resolved in Phase 8 once dep is added
+except ImportError:  # pragma: no cover
     _HAS_PYDANTIC_SETTINGS = False
 
 
@@ -28,34 +29,107 @@ if _HAS_PYDANTIC_SETTINGS:
     class Settings(BaseSettings):
         model_config = SettingsConfigDict(env_prefix="YTVIDEO_", extra="ignore")
 
+        # ── Database ──────────────────────────────────────────────────────────
+        db_url: str = "postgresql+asyncpg://reelsmith:reelsmith@localhost/reelsmith"
+        # "sql" | "memory"
+        job_store: str = "memory"
+
+        # ── Jobs & concurrency ────────────────────────────────────────────────
+        max_concurrent_jobs: int = 1
+        max_parallel_chapters: int = 1
+        max_thread_workers: int = 4
+
+        # ── Pipeline defaults ─────────────────────────────────────────────────
         default_download_path: str = "/tmp/yt"
         default_caption_format: str = "srt"
         default_target_aspect_ratio: float = 9 / 16
-        max_parallel_chapters: int = 1
-        max_thread_workers: int = 4
+        default_transcription_language: str = "en-US"
         font_path: str | None = _default_font_path()
-        download_timeout_seconds: int = 600
-        transcription_timeout_seconds: int = 120
-        render_timeout_seconds: int = 3600
+
+        # ── Transcription ─────────────────────────────────────────────────────
         transcription_provider: str = "whisper"  # "whisper" | "stub"
         whisper_model: str = "base"
+        transcription_timeout_seconds: int = 120
+
+        # ── Segment scoring ───────────────────────────────────────────────────
+        # "local_heuristic" | "chapter" | "stub"
+        segment_provider: str = "chapter"
+        target_clip_seconds_min: int = 20
+        target_clip_seconds_max: int = 60
+        score_weights: str = '{"hook":0.30,"value":0.25,"emotion":0.15,"audio":0.15,"trend":0.15}'
+
+        # ── Reframe ───────────────────────────────────────────────────────────
+        # "letterbox" | "face_track" | "stub"
+        reframe_provider: str = "letterbox"
+
+        # ── B-Roll ────────────────────────────────────────────────────────────
+        # "local" | "none"
+        broll_provider: str = "none"
+
+        # ── Media & retention ─────────────────────────────────────────────────
+        max_upload_mb: int = 500
+        retention_days: int = 30
+        retention_sweep_minutes: int = 60
+
+        # ── Frontend ──────────────────────────────────────────────────────────
+        serve_frontend: bool = False
+
+        # ── Auth ──────────────────────────────────────────────────────────────
+        require_auth: bool = False
+        api_key: str | None = None
+
+        # ── CORS ──────────────────────────────────────────────────────────────
+        cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+
+        # ── Rendering ─────────────────────────────────────────────────────────
         caption_words_per_segment: int = 3
+        download_timeout_seconds: int = 600
+        render_timeout_seconds: int = 3600
 
-else:  # Fallback so Phase 2 doesn't require pydantic-settings to be installed yet.
+        def cors_origins_list(self) -> list[str]:
+            return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
-    class Settings:
+        def score_weights_dict(self) -> dict[str, float]:
+            return json.loads(self.score_weights)
+
+else:  # Fallback: pydantic-settings not yet installed
+
+    class Settings:  # type: ignore[no-redef]
+        db_url = "postgresql+asyncpg://reelsmith:reelsmith@localhost/reelsmith"
+        job_store = "memory"
+        max_concurrent_jobs = 1
+        max_parallel_chapters = 1
+        max_thread_workers = 4
         default_download_path = "/tmp/yt"
         default_caption_format = "srt"
         default_target_aspect_ratio = 9 / 16
-        max_parallel_chapters = 1
-        max_thread_workers = 4
+        default_transcription_language = "en-US"
         font_path = _default_font_path()
-        download_timeout_seconds = 600
-        transcription_timeout_seconds = 120
-        render_timeout_seconds = 300
         transcription_provider = "whisper"
         whisper_model = "base"
+        transcription_timeout_seconds = 120
+        segment_provider = "chapter"
+        target_clip_seconds_min = 20
+        target_clip_seconds_max = 60
+        score_weights = '{"hook":0.30,"value":0.25,"emotion":0.15,"audio":0.15,"trend":0.15}'
+        reframe_provider = "letterbox"
+        broll_provider = "none"
+        max_upload_mb = 500
+        retention_days = 30
+        retention_sweep_minutes = 60
+        serve_frontend = False
+        require_auth = False
+        api_key = None
+        cors_origins = "http://localhost:5173,http://127.0.0.1:5173"
         caption_words_per_segment = 3
+        download_timeout_seconds = 600
+        render_timeout_seconds = 3600
+
+        def cors_origins_list(self) -> list[str]:
+            return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+        def score_weights_dict(self) -> dict[str, float]:
+            return json.loads(self.score_weights)
 
 
 settings = Settings()
