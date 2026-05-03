@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import json
@@ -81,6 +82,15 @@ if _HAS_PYDANTIC_SETTINGS:
         # ── CORS ──────────────────────────────────────────────────────────────
         cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
+        # ── Ollama ────────────────────────────────────────────────────────────
+        ollama_base_url: str = "http://localhost:11434"
+        ollama_model: str = "mistral"
+        ollama_enabled: bool = True
+        ollama_timeout_seconds: int = 60
+
+        # ── Export ────────────────────────────────────────────────────────────
+        export_base_folder: str = ""
+
         # ── Rendering ─────────────────────────────────────────────────────────
         caption_words_per_segment: int = 3
         download_timeout_seconds: int = 600
@@ -121,6 +131,11 @@ else:  # Fallback: pydantic-settings not yet installed
         require_auth = False
         api_key = None
         cors_origins = "http://localhost:5173,http://127.0.0.1:5173"
+        ollama_base_url = "http://localhost:11434"
+        ollama_model = "mistral"
+        ollama_enabled = True
+        ollama_timeout_seconds = 60
+        export_base_folder = ""
         caption_words_per_segment = 3
         download_timeout_seconds = 600
         render_timeout_seconds = 3600

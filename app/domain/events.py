@@ -22,6 +22,9 @@ class EventType(str, Enum):
     SEGMENTS_PROPOSED = "SegmentsProposed"
     SEGMENT_SCORED = "SegmentScored"
     UPLOAD_RECEIVED = "UploadReceived"
+    SOCIAL_CONTENT_GENERATED = "SocialContentGenerated"
+    EXPORT_COMPLETED = "ExportCompleted"
+    MANIFEST_CREATED = "ManifestCreated"
     JOB_COMPLETED = "JobCompleted"
     JOB_FAILED = "JobFailed"
 

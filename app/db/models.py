@@ -92,6 +92,7 @@ class ClipRecord(Base):
     thumbnail_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    hashtags: Mapped[list | None] = mapped_column(JSON, nullable=True)
     virality_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     score_breakdown: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     transcript: Mapped[dict | None] = mapped_column(JSON, nullable=True)

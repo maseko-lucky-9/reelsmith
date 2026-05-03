@@ -17,7 +17,10 @@ from app.services import (
     caption_service,
     clip_service,
     download_service,
+    export_service,
     folder_service,
+    manifest_service,
+    ollama_service,
     render_service,
     subtitle_image_service,
     thumbnail_service,
@@ -166,6 +169,26 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
 
         outputs = await asyncio.gather(*(_bound(c) for c in chapters), return_exceptions=False)
         output_paths = [p for p in outputs if p]
+
+        # ── Export ────────────────────────────────────────────────────────────
+        export_dir = settings.export_base_folder or str(Path(clips_folder).parent / "exports")
+        exported_paths = await asyncio.to_thread(
+            export_service.export_clips, output_paths, export_dir
+        )
+        await _emit(bus, EventType.EXPORT_COMPLETED, job_id,
+                    export_dir=export_dir, count=len(exported_paths))
+
+        # ── Manifest ──────────────────────────────────────────────────────────
+        clips_data = await store.list_clips(job_id=job_id)
+        path_map = {Path(p).stem: p for p in exported_paths}
+        for clip in clips_data:
+            stem = Path(clip.get("output_path") or "").stem
+            clip["export_path"] = path_map.get(stem, "")
+
+        manifest_path = await asyncio.to_thread(
+            manifest_service.write_manifest, clips_data, export_dir
+        )
+        await _emit(bus, EventType.MANIFEST_CREATED, job_id, manifest_path=manifest_path)
 
         total_elapsed = time.perf_counter() - job_t0
         log.info(
@@ -395,5 +418,28 @@ async def _process_chapter(
         })
 
     await store.upsert_clip(job_id, clip_id, _init_clip)
+
+    # ── Social content ────────────────────────────────────────────────────────
+    if settings.ollama_enabled:
+        description, hashtags = await asyncio.to_thread(
+            ollama_service.generate_social_content,
+            title,
+            text,
+            settings.ollama_base_url,
+            settings.ollama_model,
+            settings.ollama_timeout_seconds,
+        )
+    else:
+        description, hashtags = "", []
+
+    def _update_social(c: dict[str, Any]) -> None:
+        c["summary"] = description
+        c["hashtags"] = hashtags
+
+    await store.upsert_clip(job_id, clip_id, _update_social)
+    await _emit(
+        bus, EventType.SOCIAL_CONTENT_GENERATED, job_id,
+        chapter_index=index, description=description, hashtag_count=len(hashtags),
+    )
 
     return output_path

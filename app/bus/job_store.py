@@ -235,6 +235,7 @@ class SqlJobStore:
                     "output_path": record.output_path,
                     "thumbnail_path": record.thumbnail_path,
                     "title": record.title, "summary": record.summary,
+                    "hashtags": record.hashtags,
                     "virality_score": record.virality_score,
                     "score_breakdown": record.score_breakdown,
                     "transcript": record.transcript,
@@ -249,6 +250,7 @@ class SqlJobStore:
                 r.thumbnail_path = c.get("thumbnail_path")
                 r.title = c.get("title")
                 r.summary = c.get("summary")
+                r.hashtags = c.get("hashtags")
                 r.virality_score = c.get("virality_score")
                 r.score_breakdown = c.get("score_breakdown")
                 r.transcript = c.get("transcript")
@@ -337,6 +339,7 @@ def _clip_record_to_dict(record: Any) -> dict[str, Any]:
         "thumbnail_path": record.thumbnail_path,
         "title": record.title,
         "summary": record.summary,
+        "hashtags": record.hashtags,
         "virality_score": record.virality_score,
         "score_breakdown": record.score_breakdown,
         "transcript": record.transcript,
