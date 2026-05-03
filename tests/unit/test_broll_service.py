@@ -32,6 +32,7 @@ def test_local_broll_finds_matching_clip(tmp_path, monkeypatch):
     monkeypatch.setattr(bs, "_BROLL_DIR", tmp_path)
     (tmp_path / "sunset_timelapse.mp4").write_bytes(b"\x00")
     svc = LocalBRoll()
+    monkeypatch.setattr(svc, "_extract_noun_phrases", lambda text: ["sunset"])
     result = svc.find_broll("The beautiful sunset over the mountains was amazing")
     assert result is not None
     assert "sunset" in result

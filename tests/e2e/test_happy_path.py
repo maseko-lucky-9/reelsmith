@@ -71,6 +71,12 @@ async def test_happy_path_emits_completed(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(orch.render_service, "render_clip", _fake_render)
     monkeypatch.setattr(orch.subtitle_image_service, "render_to_path", _fake_render_to_path)
+    monkeypatch.setattr(orch.settings, "ollama_enabled", False)
+    monkeypatch.setattr(orch.thumbnail_service, "generate_thumbnail", lambda *a, **kw: None)
+    # Use in-memory store to avoid stale SQL state returning old job_ids for the
+    # same test URL, which causes the SSE handler to wait forever for events that
+    # will never arrive.
+    monkeypatch.setattr(orch.settings, "job_store", "memory")
 
     app = create_app()
     async with LifespanManager(app):
