@@ -171,7 +171,10 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
         output_paths = [p for p in outputs if p]
 
         # ── Export ────────────────────────────────────────────────────────────
-        export_dir = settings.export_base_folder or str(Path(clips_folder).parent / "exports")
+        if settings.export_base_folder:
+            export_dir = str(Path(settings.export_base_folder) / job_id)
+        else:
+            export_dir = str(Path(clips_folder).parent / "exports")
         exported_paths = await asyncio.to_thread(
             export_service.export_clips, output_paths, export_dir
         )
