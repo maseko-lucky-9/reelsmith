@@ -21,11 +21,13 @@ from app.services import (
     folder_service,
     manifest_service,
     ollama_service,
+    platforms,
     render_service,
     subtitle_image_service,
     thumbnail_service,
     transcription_service,
 )
+from app.services.platforms import resolve as resolve_adapter
 from app.settings import settings
 
 import app.logging_config  # noqa: F401
@@ -81,12 +83,16 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
     try:
         await store.update(job_id, lambda s: setattr(s, "status", "running"))
 
+        # ── Resolve platform adapter ─────────────────────────────────────────
+        adapter = resolve_adapter(url)
+        log.info("[%s] Platform=%s", job_id, adapter.platform_id)
+
         # ── Folder ────────────────────────────────────────────────────────────
         log.info("[%s] Step: create folder  path=%s", job_id, download_path)
         step_t0 = time.perf_counter()
         await store.update(job_id, lambda s: setattr(s, "current_step", "folder"))
         destination, clips_folder = await asyncio.to_thread(
-            folder_service.create_video_subfolder, download_path, url
+            folder_service.create_video_subfolder, download_path, url, adapter.platform_id
         )
         log.info("[%s] Folder ready (%.2fs)  dest=%s", job_id, time.perf_counter() - step_t0, destination)
         cleanup_root = Path(clips_folder) / "_tmp" / job_id
@@ -109,10 +115,18 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
         log.info("[%s] Step: download video", job_id)
         step_t0 = time.perf_counter()
         await store.update(job_id, lambda s: setattr(s, "current_step", "download"))
-        video_path, info = await asyncio.wait_for(
-            asyncio.to_thread(download_service.download_video, url, destination),
-            timeout=settings.download_timeout_seconds,
-        )
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(adapter.download, url, destination),
+                timeout=settings.download_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            raise
+        except Exception as e:
+            log.error("[%s] download failed  url=%s  error=%s", job_id, url, e)
+            raise RuntimeError(f"download failed: {e}") from e
+        video_path = result.video_path
+        info = result.info
         if not video_path or info is None:
             raise RuntimeError("download failed")
 
@@ -141,7 +155,11 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
         # ── Chapters ──────────────────────────────────────────────────────────
         log.info("[%s] Step: extract chapters", job_id)
         await store.update(job_id, lambda s: setattr(s, "current_step", "chapters"))
-        chapters = await asyncio.to_thread(download_service.extract_chapters, info)
+        raw_chapters = adapter.extract_chapters(info)
+        chapters = [
+            {"index": c.index, "title": c.title, "start": c.start, "end": c.end}
+            for c in raw_chapters
+        ]
         safe_end = await asyncio.to_thread(clip_service.probe_safe_end, video_path)
 
         if not chapters:

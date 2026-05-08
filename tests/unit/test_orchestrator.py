@@ -14,25 +14,47 @@ from app.domain.models import JobState
 from app.workers import orchestrator as orch
 
 
-def _fake_subfolder(download_path: str, url: str):
+def _fake_subfolder(download_path: str, url: str, platform_id: str = "video"):
     base = Path(download_path) / "vid"
     clips = base / "clips"
     clips.mkdir(parents=True, exist_ok=True)
     return str(base), str(clips)
 
 
-def _fake_download(url: str, destination_folder: str):
-    video_path = str(Path(destination_folder) / "video.mp4")
-    Path(video_path).write_bytes(b"\x00")
-    info = {
-        "title": "Test",
-        "duration": 12.0,
-        "chapters": [
-            {"title": "Intro", "start_time": 0.0, "end_time": 6.0},
-            {"title": "Outro", "start_time": 6.0, "end_time": 12.0},
-        ],
-    }
-    return video_path, info
+from app.services.platforms.base import Chapter, DownloadResult
+
+
+class _FakeAdapter:
+    platform_id = "youtube"
+
+    def download(self, url: str, destination_folder: str) -> DownloadResult:
+        video_path = str(Path(destination_folder) / "video.mp4")
+        Path(video_path).write_bytes(b"\x00")
+        info = {
+            "title": "Test",
+            "duration": 12.0,
+            "chapters": [
+                {"title": "Intro", "start_time": 0.0, "end_time": 6.0},
+                {"title": "Outro", "start_time": 6.0, "end_time": 12.0},
+            ],
+        }
+        return DownloadResult(
+            video_path=video_path,
+            info=info,
+            title="Test",
+            duration=12.0,
+            source=self.platform_id,
+        )
+
+    def extract_chapters(self, info: dict) -> list[Chapter]:
+        raw = info.get("chapters") or []
+        return [
+            Chapter(
+                index=i, title=c["title"],
+                start=float(c["start_time"]), end=float(c["end_time"]),
+            )
+            for i, c in enumerate(raw)
+        ]
 
 
 def _fake_extract(*args, **kwargs):
@@ -56,11 +78,16 @@ async def test_orchestrator_emits_full_event_chain(tmp_path, monkeypatch):
     bus = AsyncEventBus()
     store = JobStore()
 
-    state = JobState(job_id="job-1", url="https://example.com/v", download_path=str(tmp_path))
+    state = JobState(
+        job_id="job-1",
+        url="https://www.youtube.com/watch?v=fake",
+        source="youtube",
+        download_path=str(tmp_path),
+    )
     await store.create(state)
 
     monkeypatch.setattr(orch.folder_service, "create_video_subfolder", _fake_subfolder)
-    monkeypatch.setattr(orch.download_service, "download_video", _fake_download)
+    monkeypatch.setattr(orch, "resolve_adapter", lambda url: _FakeAdapter())
     monkeypatch.setattr(orch.clip_service, "probe_safe_end", lambda path: 999.0)
     monkeypatch.setattr(
         orch.clip_service, "extract_chapter_to_disk",

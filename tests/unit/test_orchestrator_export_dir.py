@@ -26,19 +26,27 @@ def _wire_stubs(monkeypatch, tmp_path: Path, export_base: str = "") -> str:
         orch.folder_service, "create_video_subfolder",
         lambda *a, **kw: (str(vid_dir), str(clips_dir)),
     )
-    monkeypatch.setattr(
-        orch.download_service, "download_video",
-        lambda *a, **kw: (
-            str(vid_dir / "video.mp4"),
-            {"title": "T", "duration": 6.0, "chapters": [
-                {"title": "C", "start_time": 0.0, "end_time": 6.0}
-            ]},
-        ),
-    )
-    monkeypatch.setattr(
-        orch.download_service, "extract_chapters",
-        lambda info: [{"index": 0, "title": "C", "start": 0.0, "end": 6.0}],
-    )
+
+    from app.services.platforms.base import Chapter, DownloadResult
+
+    class _FakeAdapter:
+        platform_id = "youtube"
+
+        def download(self, url, destination_folder):
+            return DownloadResult(
+                video_path=str(vid_dir / "video.mp4"),
+                info={"title": "T", "duration": 6.0, "chapters": [
+                    {"title": "C", "start_time": 0.0, "end_time": 6.0}
+                ]},
+                title="T",
+                duration=6.0,
+                source=self.platform_id,
+            )
+
+        def extract_chapters(self, info):
+            return [Chapter(index=0, title="C", start=0.0, end=6.0)]
+
+    monkeypatch.setattr(orch, "resolve_adapter", lambda url: _FakeAdapter())
     monkeypatch.setattr(orch.clip_service, "probe_safe_end", lambda path: 5.0)
 
     fake_clip = str(vid_dir / "clips" / "chapter_0.mp4")
@@ -54,14 +62,19 @@ def _wire_stubs(monkeypatch, tmp_path: Path, export_base: str = "") -> str:
 async def _run(job_id: str, tmp_path: Path) -> None:
     bus = AsyncEventBus()
     store = JobStore()
-    state = JobState(job_id=job_id, url="https://example.com/v", download_path=str(tmp_path))
+    state = JobState(
+        job_id=job_id,
+        url="https://www.youtube.com/watch?v=fake",
+        source="youtube",
+        download_path=str(tmp_path),
+    )
     await store.create(state)
 
     trigger = Event(
         type=EventType.VIDEO_REQUESTED,
         job_id=job_id,
         payload={
-            "url": "https://example.com/v",
+            "url": "https://www.youtube.com/watch?v=fake",
             "download_path": str(tmp_path),
             "caption_format": "srt",
             "target_aspect_ratio": 9 / 16,

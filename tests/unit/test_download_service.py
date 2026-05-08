@@ -19,8 +19,17 @@ def test_is_supported_url_tiktok():
     assert is_supported_url("https://www.tiktok.com/@user/video/123") is True
 
 
-def test_is_supported_url_vimeo():
-    assert is_supported_url("https://vimeo.com/12345") is True
+def test_is_supported_url_facebook():
+    assert is_supported_url("https://www.facebook.com/reel/123") is True
+
+
+def test_is_supported_url_instagram():
+    assert is_supported_url("https://www.instagram.com/reel/abc/") is True
+
+
+def test_is_supported_url_vimeo_now_unsupported():
+    """Vimeo had no working adapter; whitelist removed in multi-platform refactor."""
+    assert is_supported_url("https://vimeo.com/12345") is False
 
 
 def test_is_supported_url_unsupported_domain():
@@ -69,7 +78,10 @@ def test_download_video_returns_filename_on_success(tmp_path):
     info = {"title": "Test Video", "duration": 120}
     expected = str(tmp_path / "Test Video.mp4")
 
-    with patch("app.services.download_service.YoutubeDL", return_value=_mock_ydl(info, expected)):
+    with patch(
+        "app.services.platforms._yt_dlp_base.YoutubeDL",
+        return_value=_mock_ydl(info, expected),
+    ):
         filename, returned_info = download_video("https://youtu.be/abc", str(tmp_path))
 
     assert filename == expected
@@ -82,7 +94,7 @@ def test_download_video_returns_none_on_failure(tmp_path):
     mock_ydl.__exit__ = MagicMock(return_value=False)
     mock_ydl.extract_info.side_effect = Exception("network error")
 
-    with patch("app.services.download_service.YoutubeDL", return_value=mock_ydl):
+    with patch("app.services.platforms._yt_dlp_base.YoutubeDL", return_value=mock_ydl):
         filename, info = download_video("https://youtu.be/abc", str(tmp_path))
 
     assert filename is None

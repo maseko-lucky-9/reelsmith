@@ -1,12 +1,13 @@
 import { createRoute, useNavigate } from '@tanstack/react-router'
 import { useMutation } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { toast } from 'sonner'
 import { rootRoute } from './root'
 import { api } from '@/api/client'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
+import { detectPlatform, platformLabel } from '@/lib/detectPlatform'
 
 export const jobsNewRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -20,6 +21,9 @@ function NewJobPage() {
   const [downloadPath, setDownloadPath] = useState('/tmp/yt')
   const [language, setLanguage] = useState('en-US')
   const [segmentMode, setSegmentMode] = useState<'auto' | 'chapter'>('chapter')
+
+  const platform = useMemo(() => detectPlatform(url.trim()), [url])
+  const isUnsupported = url.length > 0 && platform === 'unsupported'
 
   const mutation = useMutation({
     mutationFn: () =>
@@ -50,11 +54,30 @@ function NewJobPage() {
         <div className="space-y-1">
           <Label>Video URL</Label>
           <Input
-            placeholder="https://youtube.com/watch?v=..."
+            placeholder="YouTube, Facebook, TikTok or Instagram URL"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             className="bg-zinc-900 border-zinc-700"
           />
+          {url && (
+            <div className="flex items-center gap-2 pt-1">
+              <span
+                className={
+                  'inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ' +
+                  (isUnsupported
+                    ? 'bg-red-900/40 text-red-300 border border-red-800'
+                    : 'bg-emerald-900/40 text-emerald-300 border border-emerald-800')
+                }
+              >
+                {platformLabel(platform)}
+              </span>
+              {isUnsupported && (
+                <span className="text-xs text-zinc-500">
+                  Only YouTube, Facebook, TikTok, Instagram are supported.
+                </span>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="space-y-1">
@@ -96,7 +119,7 @@ function NewJobPage() {
 
         <Button
           className="w-full"
-          disabled={!url || mutation.isPending}
+          disabled={!url || mutation.isPending || isUnsupported}
           onClick={() => mutation.mutate()}
         >
           {mutation.isPending ? 'Queuing…' : 'Start job'}

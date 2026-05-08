@@ -174,6 +174,12 @@ def create_app() -> FastAPI:
     async def health() -> JSONResponse:
         return JSONResponse({"status": "ok", "job_store": settings.job_store})
 
+    from app.services.platforms import UnsupportedPlatformError
+
+    @app.exception_handler(UnsupportedPlatformError)
+    async def _unsupported_platform_handler(request, exc: UnsupportedPlatformError):
+        return JSONResponse(status_code=400, content={"detail": str(exc), "url": exc.url})
+
     app.include_router(jobs.router)
     app.include_router(clips.router)
     app.include_router(media.router)

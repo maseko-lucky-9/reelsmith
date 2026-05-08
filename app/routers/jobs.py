@@ -12,6 +12,7 @@ from app.bus.job_store import JobNotFoundError
 from app.domain.events import Event, EventType
 from app.domain.ids import new_job_id
 from app.domain.models import JobState
+from app.services.platforms import detect_platform_id
 from app.settings import settings
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -65,6 +66,12 @@ async def preview_video(url: str) -> VideoPreviewResponse:
 
 @router.post("", response_model=CreateJobResponse, status_code=202)
 async def create_job(req: CreateJobRequest, request: Request) -> CreateJobResponse:
+    source = detect_platform_id(req.url)
+    if source is None and not req.url.startswith("upload://"):
+        raise HTTPException(
+            status_code=400, detail=f"Unsupported platform for URL: {req.url}"
+        )
+
     # Return existing job if the same URL was already processed or is running.
     existing = await request.app.state.job_store.list_jobs(limit=200)
     for job in existing:
@@ -75,6 +82,7 @@ async def create_job(req: CreateJobRequest, request: Request) -> CreateJobRespon
     state = JobState(
         job_id=job_id,
         url=req.url,
+        source=source,
         download_path=req.download_path,
         caption_format=req.caption_format,
         target_aspect_ratio=req.target_aspect_ratio,

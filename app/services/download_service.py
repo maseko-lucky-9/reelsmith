@@ -1,72 +1,51 @@
-import logging
-import os
-from urllib.parse import urlparse
+"""Backward-compat shims.
 
-from yt_dlp import YoutubeDL
+The real implementation lives under `app.services.platforms`. These shims
+preserve the previous module-level API so existing tests and callers keep
+working during the multi-platform migration.
+
+`upload://` is preserved as a special case because it represents an internal
+uploaded-video path, not a remote platform.
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import asdict
+
+from app.services.platforms import (
+    UnsupportedPlatformError,
+    YouTubeAdapter,
+    detect_platform_id,
+)
 
 import app.logging_config  # noqa: F401
 
 log = logging.getLogger(__name__)
 
-_SUPPORTED_DOMAINS = frozenset({
-    "youtube.com", "www.youtube.com", "youtu.be", "m.youtube.com",
-    "vimeo.com", "www.vimeo.com",
-    "twitch.tv", "www.twitch.tv", "clips.twitch.tv",
-    "loom.com", "www.loom.com",
-    "facebook.com", "www.facebook.com", "fb.watch",
-    "linkedin.com", "www.linkedin.com",
-    "twitter.com", "www.twitter.com", "x.com",
-    "rumble.com", "www.rumble.com",
-    "dailymotion.com", "www.dailymotion.com",
-    "tiktok.com", "www.tiktok.com",
-    "instagram.com", "www.instagram.com",
-    "reddit.com", "www.reddit.com",
-    "streamyard.com", "riverside.fm",
-    "drive.google.com",
-})
-
 
 def is_supported_url(url: str) -> bool:
+    if not isinstance(url, str) or not url:
+        return False
     if url.startswith("upload://"):
         return True
     try:
-        host = urlparse(url).hostname or ""
-        return host in _SUPPORTED_DOMAINS
+        return detect_platform_id(url) is not None
     except Exception:  # noqa: BLE001
         return False
 
 
 def download_video(url: str, destination_folder: str) -> tuple[str | None, dict | None]:
-    log.info("Downloading  url=%s  dest=%s", url, destination_folder)
-    ydl_opts = {
-        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-        "outtmpl": os.path.join(destination_folder, "%(title)s.%(ext)s"),
-    }
+    """Deprecated. Use `app.services.platforms.resolve(url).download(...)` instead."""
+    log.info("download_service.download_video(...) is a shim — use platform adapters")
     try:
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
-        log.info("Download success  title=%r  duration=%ss  file=%s",
-                 info.get("title"), info.get("duration"), filename)
-        return filename, info
-    except Exception as e:
+        result = YouTubeAdapter().download(url, destination_folder)
+        return result.video_path, result.info
+    except Exception as e:  # noqa: BLE001
         log.error("Download failed  url=%s  error=%s", url, e)
         return None, None
 
 
 def extract_chapters(info: dict) -> list[dict]:
-    raw_chapters = info.get("chapters") or []
-    log.info("Extracting chapters  raw_count=%d", len(raw_chapters))
-    parsed = []
-    for index, chapter in enumerate(raw_chapters):
-        parsed.append(
-            {
-                "index": index,
-                "title": chapter["title"],
-                "start": chapter["start_time"],
-                "end": chapter["end_time"],
-            }
-        )
-        log.debug("  chapter %d: %r  %.1f–%.1fs", index, chapter["title"],
-                  chapter["start_time"], chapter["end_time"])
-    return parsed
+    """Deprecated. Use `YouTubeAdapter().extract_chapters(info)` instead."""
+    chapters = YouTubeAdapter().extract_chapters(info)
+    return [asdict(c) for c in chapters]
