@@ -11,7 +11,11 @@ except ImportError:  # pragma: no cover
     _HAS_PYDANTIC_SETTINGS = False
 
 
+_REPO_ANTON = (
+    Path(__file__).resolve().parent / "assets" / "fonts" / "Anton-Regular.ttf"
+)
 _DEFAULT_FONT_CANDIDATES = (
+    str(_REPO_ANTON),
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
     "/System/Library/Fonts/Supplemental/Arial.ttf",
     "/System/Library/Fonts/Helvetica.ttc",

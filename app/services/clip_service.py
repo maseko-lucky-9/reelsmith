@@ -110,9 +110,20 @@ def extract_chapter_to_disk(
     return out_clip_path, out_audio_path
 
 
-def create_subtitle_clip(text: str, videosize, duration: float, highlight_word_index: int | None = None):
+def create_subtitle_clip(
+    text: str,
+    videosize,
+    duration: float,
+    highlight_word_index: int | None = None,
+    text_anchor_y: int | None = None,
+):
     log.info("Create Subtitle Clip...")
-    subtitle_image = create_subtitle_image(text, videosize, highlight_word_index=highlight_word_index)
+    subtitle_image = create_subtitle_image(
+        text,
+        videosize,
+        highlight_word_index=highlight_word_index,
+        text_anchor_y=text_anchor_y,
+    )
     return ImageClip(subtitle_image).set_duration(duration)
 
 
@@ -178,13 +189,17 @@ def add_captions_to_clip(
     resized_clip = clip.resize(height=clip.h)
     resized_clip = resized_clip.set_position(("center", "center"))
 
+    # Anchor captions in the centre of the lower blur band (below the inset video).
+    inner_top = (new_height - clip.h) // 2
+    inner_bottom = inner_top + clip.h
+    band_anchor_y = inner_bottom + (new_height - inner_bottom) // 2
+
     subtitle_clips = []
     if word_timings is not None:
         n = caption_words_per_segment
         for i, word in enumerate(word_timings):
-            group_idx = i // n
             word_pos = i % n
-            group_start = group_idx * n
+            group_start = (i // n) * n
             group = word_timings[group_start:group_start + n]
             group_text = " ".join(w.word for w in group)
 
@@ -195,7 +210,9 @@ def add_captions_to_clip(
                 continue
 
             subtitle_clip = create_subtitle_clip(
-                group_text, clip.size, duration, highlight_word_index=word_pos
+                group_text, new_size, duration,
+                highlight_word_index=word_pos,
+                text_anchor_y=band_anchor_y,
             )
             subtitle_clips.append(subtitle_clip.set_start(word.start))
     else:
@@ -203,14 +220,13 @@ def add_captions_to_clip(
             start_time = caption.start.seconds
             end_time = caption.end.seconds
             duration = end_time - start_time
-            subtitle_clip = create_subtitle_clip(caption.text, clip.size, duration)
+            subtitle_clip = create_subtitle_clip(
+                caption.text, new_size, duration,
+                text_anchor_y=band_anchor_y,
+            )
             subtitle_clips.append(subtitle_clip.set_start(start_time))
 
-    main_clip_with_subtitles = CompositeVideoClip(
-        [resized_clip] + subtitle_clips, size=clip.size
-    )
-    final_clip = CompositeVideoClip(
-        [background, main_clip_with_subtitles.set_position(("center", "center"))],
+    return CompositeVideoClip(
+        [background, resized_clip, *subtitle_clips],
         size=new_size,
     )
-    return final_clip

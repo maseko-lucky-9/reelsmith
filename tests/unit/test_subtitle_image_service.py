@@ -11,11 +11,45 @@ def test_returns_rgba_array_with_expected_shape():
     assert arr.shape == (360, 640, 4)
 
 
-def test_bottom_strip_is_opaque_dark_background():
+def test_no_full_width_opaque_bar_at_bottom():
+    """Regression: legacy full-width black bar replaced with per-word pill."""
     arr = create_subtitle_image("hello", (320, 180), font_size=20)
-    bottom_strip = arr[-5:, :, :]
-    # Alpha channel fully opaque on bottom strip
-    assert int(bottom_strip[..., 3].mean()) == 255
+    # No bottom row should be 100% opaque across its full width.
+    bottom_30 = arr[-30:, :, 3]
+    fully_opaque_rows = (bottom_30 == 255).all(axis=1).sum()
+    assert fully_opaque_rows == 0
+
+
+def test_active_word_pill_is_green():
+    """The active word should sit on a green rounded pill."""
+    arr = create_subtitle_image(
+        "ALPHA BETA GAMMA", (1080, 1920),
+        font_size=96, highlight_word_index=1, text_anchor_y=1500,
+    )
+    # Sample a horizontal band at the anchor centre.
+    band = arr[1490:1510, :, :]
+    # Find pixels whose RGB is close to _GREEN (46, 204, 64).
+    r, g, b = band[..., 0], band[..., 1], band[..., 2]
+    green_mask = (g > 150) & (r < 120) & (b < 120) & (band[..., 3] > 200)
+    assert green_mask.sum() > 200, "expected a non-trivial green pill region"
+
+
+def test_text_anchor_y_centers_text():
+    arr = create_subtitle_image(
+        "HELLO", (640, 720), font_size=60, text_anchor_y=300,
+    )
+    # Locate topmost non-transparent row.
+    nonzero_rows = (arr[..., 3] > 0).any(axis=1)
+    top = int(nonzero_rows.argmax())
+    # Text should be centred near y=300 — top edge above 300, bottom below.
+    assert 200 <= top <= 300
+
+
+def test_default_font_resolves():
+    """Bundled Anton (or system fallback) must resolve to a real file."""
+    from app.settings import _default_font_path
+    path = _default_font_path()
+    assert path is not None, "no usable default font on this system"
 
 
 def test_render_to_path_writes_png(tmp_path):
