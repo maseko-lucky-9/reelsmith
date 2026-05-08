@@ -32,3 +32,4 @@ web/playwright-report/
 /*.png
 .claude/settings.json
 .omc/
+.env
