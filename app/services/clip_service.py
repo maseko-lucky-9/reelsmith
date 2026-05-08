@@ -12,6 +12,28 @@ import app.logging_config  # noqa: F401
 log = logging.getLogger(__name__)
 
 
+# MoviePy's AudioFileClip writer reads in fixed-size sample buffers and can
+# request a window up to ~1 buffer (≈4.5s @ 44.1kHz on the 1.0.x default)
+# past the clip's `duration`, raising `OSError: Accessing time t=...`. Keeping
+# subclip ends ≥ EPSILON below the audio EOF is the documented workaround.
+# Bump if a future MoviePy version widens the buffer.
+AUDIO_TAIL_EPSILON_SECONDS = 1.0
+
+
+def probe_safe_end(video_path: str) -> float:
+    """Return the highest `end` value safe to pass to extract_chapter_to_disk.
+
+    Takes the minimum of video and audio stream durations (audio is often
+    shorter on re-muxed YouTube downloads) and subtracts
+    AUDIO_TAIL_EPSILON_SECONDS so MoviePy's chunked audio writer cannot
+    overshoot EOF.
+    """
+    with closing_clip(video_path) as video:
+        v_dur = float(video.duration)
+        a_dur = float(video.audio.duration) if video.audio is not None else v_dur
+        return max(0.0, min(v_dur, a_dur) - AUDIO_TAIL_EPSILON_SECONDS)
+
+
 @contextmanager
 def closing_clip(path: str):
     clip = VideoFileClip(path)
@@ -50,6 +72,20 @@ def extract_chapter_to_disk(
     """Slice a chapter from a source video and persist clip + audio to disk."""
     log.info("Extracting chapter to disk  [%.3f, %.3f]  src=%s", start, end, video_path)
     with closing_clip(video_path) as video:
+        v_dur = float(video.duration)
+        a_dur = float(video.audio.duration) if video.audio is not None else v_dur
+        hard_max = max(0.0, min(v_dur, a_dur) - AUDIO_TAIL_EPSILON_SECONDS)
+        if end > hard_max:
+            log.warning(
+                "Clamping chapter end %.3f -> %.3f (video=%.3f audio=%.3f epsilon=%.3f)",
+                end, hard_max, v_dur, a_dur, AUDIO_TAIL_EPSILON_SECONDS,
+            )
+            end = hard_max
+        if end <= start:
+            raise ValueError(
+                f"chapter end ({end:.3f}) <= start ({start:.3f}) after clamp; "
+                f"video={v_dur:.3f}s audio={a_dur:.3f}s"
+            )
         sub = create_clip(video, start, end)
         try:
             sub.write_videofile(

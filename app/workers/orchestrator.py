@@ -142,10 +142,38 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
         log.info("[%s] Step: extract chapters", job_id)
         await store.update(job_id, lambda s: setattr(s, "current_step", "chapters"))
         chapters = await asyncio.to_thread(download_service.extract_chapters, info)
+        safe_end = await asyncio.to_thread(clip_service.probe_safe_end, video_path)
+
         if not chapters:
             chapters = [
-                {"index": 0, "title": "Full Video", "start": 0.0, "end": duration}
+                {"index": 0, "title": "Full Video", "start": 0.0, "end": safe_end}
             ]
+        else:
+            clamped: list[dict[str, Any]] = []
+            for c in chapters:
+                cstart = max(0.0, float(c["start"]))
+                cend = min(float(c["end"]), safe_end)
+                if cend - cstart < 0.5:
+                    log.warning(
+                        "[%s] Dropping chapter %r post-clamp (duration=%.3fs)",
+                        job_id, c.get("title"), cend - cstart,
+                    )
+                    continue
+                clamped.append({**c, "start": cstart, "end": cend})
+            chapters = clamped
+
+        if not chapters:
+            raise RuntimeError(
+                f"all chapters out-of-bounds vs safe_end {safe_end:.3f}s "
+                f"(yt-dlp duration {duration:.3f}s)"
+            )
+
+        if duration - safe_end > clip_service.AUDIO_TAIL_EPSILON_SECONDS + 0.5:
+            log.info(
+                "[%s] Audio EOF gap: yt-dlp=%.3fs safe_end=%.3fs (audio shorter than video?)",
+                job_id, duration, safe_end,
+            )
+
         log.info("[%s] %d chapter(s) detected: %s", job_id, len(chapters),
                  [c["title"] for c in chapters])
         await _emit(bus, EventType.CHAPTERS_DETECTED, job_id, chapters=chapters)

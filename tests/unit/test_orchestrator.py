@@ -61,6 +61,7 @@ async def test_orchestrator_emits_full_event_chain(tmp_path, monkeypatch):
 
     monkeypatch.setattr(orch.folder_service, "create_video_subfolder", _fake_subfolder)
     monkeypatch.setattr(orch.download_service, "download_video", _fake_download)
+    monkeypatch.setattr(orch.clip_service, "probe_safe_end", lambda path: 999.0)
     monkeypatch.setattr(
         orch.clip_service, "extract_chapter_to_disk",
         lambda video_path, start, end, out_clip, out_audio: (

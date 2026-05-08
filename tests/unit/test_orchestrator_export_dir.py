@@ -39,6 +39,7 @@ def _wire_stubs(monkeypatch, tmp_path: Path, export_base: str = "") -> str:
         orch.download_service, "extract_chapters",
         lambda info: [{"index": 0, "title": "C", "start": 0.0, "end": 6.0}],
     )
+    monkeypatch.setattr(orch.clip_service, "probe_safe_end", lambda path: 5.0)
 
     fake_clip = str(vid_dir / "clips" / "chapter_0.mp4")
 
