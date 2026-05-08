@@ -2,7 +2,7 @@ import logging
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from app.settings import settings
 
@@ -10,13 +10,13 @@ import app.logging_config  # noqa: F401
 
 log = logging.getLogger(__name__)
 
-_GREEN = (46, 204, 64, 255)  # ≈ #2ECC40, matches example screenshot
+_GREEN = (46, 204, 64, 255)  # ≈ #2ECC40
 _WHITE = (255, 255, 255, 255)
 _BLACK = (0, 0, 0, 255)
+_SHADOW_FILL = (0, 0, 0, 200)
+_SHADOW_OFFSET = (4, 6)
+_SHADOW_BLUR = 4
 _STROKE_WIDTH = 4
-_PILL_RADIUS = 24
-_PILL_PAD_X = 18
-_PILL_PAD_Y = 8
 
 
 def _load_font(font_size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -70,28 +70,29 @@ def create_subtitle_image(
         word_widths.append(wb[2] - wb[0])
 
     total_w = sum(word_widths) + space_w * max(len(words) - 1, 0)
-    x = (videosize[0] - total_w) / 2
+    x_start = (videosize[0] - total_w) / 2
 
-    # Pass 1: paint pill behind the active word so text overlays it cleanly.
-    if highlight_word_index is not None and 0 <= highlight_word_index < len(words):
-        pill_x = x + sum(word_widths[:highlight_word_index]) + space_w * highlight_word_index
-        pill_w = word_widths[highlight_word_index]
-        draw.rounded_rectangle(
-            [
-                (pill_x - _PILL_PAD_X, text_y - _PILL_PAD_Y),
-                (pill_x + pill_w + _PILL_PAD_X, text_y + text_height + _PILL_PAD_Y),
-            ],
-            radius=_PILL_RADIUS,
-            fill=_GREEN,
-        )
-
-    # Pass 2: draw all words in white with black stroke (active word sits on the pill).
+    # Pass 1: blurred drop-shadow layer behind every word.
+    shadow_layer = Image.new("RGBA", videosize, (0, 0, 0, 0))
+    shadow_draw = ImageDraw.Draw(shadow_layer)
+    sx = x_start + _SHADOW_OFFSET[0]
+    sy = text_y + _SHADOW_OFFSET[1]
     for word, w in zip(words, word_widths):
+        shadow_draw.text((sx, sy), word, font=font, fill=_SHADOW_FILL)
+        sx += w + space_w
+    shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(_SHADOW_BLUR))
+    img.alpha_composite(shadow_layer)
+    draw = ImageDraw.Draw(img)
+
+    # Pass 2: foreground words; active word renders in green, others white.
+    x = x_start
+    for i, (word, w) in enumerate(zip(words, word_widths)):
+        fill = _GREEN if i == highlight_word_index else _WHITE
         draw.text(
             (x, text_y),
             word,
             font=font,
-            fill=_WHITE,
+            fill=fill,
             stroke_width=stroke_width,
             stroke_fill=stroke_fill,
         )

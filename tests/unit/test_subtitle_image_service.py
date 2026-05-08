@@ -20,18 +20,28 @@ def test_no_full_width_opaque_bar_at_bottom():
     assert fully_opaque_rows == 0
 
 
-def test_active_word_pill_is_green():
-    """The active word should sit on a green rounded pill."""
+def test_active_word_renders_green():
+    """The active word's glyph fill should be green (no pill)."""
     arr = create_subtitle_image(
         "ALPHA BETA GAMMA", (1080, 1920),
         font_size=96, highlight_word_index=1, text_anchor_y=1500,
     )
-    # Sample a horizontal band at the anchor centre.
-    band = arr[1490:1510, :, :]
-    # Find pixels whose RGB is close to _GREEN (46, 204, 64).
-    r, g, b = band[..., 0], band[..., 1], band[..., 2]
-    green_mask = (g > 150) & (r < 120) & (b < 120) & (band[..., 3] > 200)
-    assert green_mask.sum() > 200, "expected a non-trivial green pill region"
+    # Sample the row band where the text sits.
+    band = arr[1450:1550, :, :]
+    r, g, b, a = band[..., 0], band[..., 1], band[..., 2], band[..., 3]
+    green_mask = (g > 150) & (r < 120) & (b < 120) & (a > 200)
+    assert green_mask.sum() > 50, "expected green glyph pixels for the active word"
+
+
+def test_drop_shadow_present_below_text():
+    """A blurred shadow should add semi-transparent pixels offset below the glyphs."""
+    arr = create_subtitle_image(
+        "HELLO", (640, 720), font_size=80, text_anchor_y=300,
+    )
+    # Shadow lives a few rows below the glyph baseline; sample a strip there.
+    strip = arr[340:360, :, :]
+    semi = (strip[..., 3] > 30) & (strip[..., 3] < 220)
+    assert semi.sum() > 20, "expected partially-transparent shadow pixels below text"
 
 
 def test_text_anchor_y_centers_text():
