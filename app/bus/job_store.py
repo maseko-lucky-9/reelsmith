@@ -146,6 +146,7 @@ class SqlJobStore:
             record = JobRecord(
                 id=state.job_id,
                 youtube_url=state.url,
+                source=state.source,
                 status=state.status,
             )
             session.add(record)
@@ -181,6 +182,7 @@ class SqlJobStore:
             mutator(state)
             record.status = state.status
             record.error = state.error
+            record.source = state.source
             await session.commit()
         return state
 
@@ -321,6 +323,7 @@ def _record_to_state(record: Any) -> JobState:
     return JobState(
         job_id=record.id,
         url=record.youtube_url,
+        source=getattr(record, "source", None),
         status=record.status,
         error=record.error,
         download_path="/tmp/yt",

@@ -41,6 +41,7 @@ class JobState(BaseModel):
     status: JobStatus = "pending"
     current_step: str | None = None
     url: str
+    source: str | None = None  # platform_id derived at job creation
     download_path: str
     caption_format: str = "srt"
     target_aspect_ratio: float = 9 / 16
