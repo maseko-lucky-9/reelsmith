@@ -8,6 +8,9 @@ import { useJobSSE } from '@/hooks/useJobSSE'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ClipCard } from '@/components/dashboard/ClipCard'
 import { ClipListRow } from '@/components/dashboard/ClipListRow'
+import { JobProgressTimeline } from '@/components/job-progress-timeline'
+import { TimelineErrorBoundary } from '@/components/timeline-error-boundary'
+import { PlatformChip } from '@/components/platform-chip'
 
 export const jobDetailRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -84,20 +87,30 @@ function JobDetailPage() {
     return <p className="text-red-400">Job not found.</p>
   }
 
+  const showTimeline = job.status === 'running' || job.status === 'failed' || job.status === 'pending'
+
   return (
     <div className="space-y-4">
-      {/* Processing banner */}
-      {job.status === 'running' && (
-        <div className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-orange-950/60 border border-orange-700/50 text-orange-300 text-sm">
-          <span className="w-2 h-2 rounded-full bg-orange-400 animate-pulse flex-shrink-0" />
-          Processing clips… {job.current_step ?? ''}
+      {/* Header: title + platform chip + duration (visible during processing & after) */}
+      {(job.source || job.title) && (
+        <div className="flex items-center gap-2 flex-wrap">
+          {job.source && <PlatformChip platform={job.source} />}
+          <span className="text-sm font-medium text-white truncate max-w-md">
+            {job.title ?? 'Loading title…'}
+          </span>
+          {job.duration != null && (
+            <span className="text-xs text-zinc-500 tabular-nums">
+              {formatDuration(job.duration)}
+            </span>
+          )}
         </div>
       )}
 
-      {job.status === 'failed' && job.error && (
-        <div className="rounded-lg bg-red-950 border border-red-800 px-4 py-3 text-red-300 text-sm">
-          {job.error}
-        </div>
+      {/* Live progress timeline during pending/running/failed */}
+      {showTimeline && (
+        <TimelineErrorBoundary>
+          <JobProgressTimeline job={job} />
+        </TimelineErrorBoundary>
       )}
 
       {/* Project top bar */}
@@ -219,4 +232,10 @@ function JobDetailPage() {
       )}
     </div>
   )
+}
+
+function formatDuration(seconds: number): string {
+  const m = Math.floor(seconds / 60)
+  const s = Math.floor(seconds % 60)
+  return `${m}:${s.toString().padStart(2, '0')}`
 }

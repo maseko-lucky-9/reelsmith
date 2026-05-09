@@ -1,17 +1,43 @@
 /** Typed API helpers wrapping fetch against the FastAPI backend. */
 
+export type ChapterStatus =
+  | 'pending'
+  | 'extracting'
+  | 'transcribing'
+  | 'captioning'
+  | 'rendering'
+  | 'completed'
+  | 'failed'
+
+export interface ChapterArtifacts {
+  chapter_index: number
+  status: ChapterStatus
+  clip_path: string | null
+  audio_path: string | null
+  transcript: string | null
+  captions_path: string | null
+  image_paths: string[]
+  output_path: string | null
+  error: string | null
+}
+
 export interface JobState {
   job_id: string
   status: 'pending' | 'running' | 'completed' | 'failed'
   current_step: string | null
   url: string
+  source: string | null
   download_path: string
   caption_format: string
   target_aspect_ratio: number
+  destination_folder: string | null
+  clips_folder: string | null
+  video_path: string | null
   title: string | null
   duration: number | null
-  error: string | null
+  chapters: Record<string, ChapterArtifacts>
   output_paths: string[]
+  error: string | null
   prompt?: string | null
 }
 

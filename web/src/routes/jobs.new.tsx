@@ -7,7 +7,8 @@ import { api } from '@/api/client'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
-import { detectPlatform, platformLabel } from '@/lib/detectPlatform'
+import { detectPlatform } from '@/lib/detectPlatform'
+import { PlatformChip } from '@/components/platform-chip'
 
 export const jobsNewRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -61,16 +62,7 @@ function NewJobPage() {
           />
           {url && (
             <div className="flex items-center gap-2 pt-1">
-              <span
-                className={
-                  'inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ' +
-                  (isUnsupported
-                    ? 'bg-red-900/40 text-red-300 border border-red-800'
-                    : 'bg-emerald-900/40 text-emerald-300 border border-emerald-800')
-                }
-              >
-                {platformLabel(platform)}
-              </span>
+              <PlatformChip platform={platform} />
               {isUnsupported && (
                 <span className="text-xs text-zinc-500">
                   Only YouTube, Facebook, TikTok, Instagram are supported.
