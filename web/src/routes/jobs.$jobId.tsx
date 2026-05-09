@@ -212,7 +212,16 @@ function JobDetailPage() {
       )}
 
       {!clipsQuery.isLoading && filteredClips.length === 0 && allClips.length === 0 && job.status === 'completed' && (
-        <p className="text-zinc-500 text-sm py-8 text-center">No clips generated.</p>
+        job.pipeline_options?.render === false ? (
+          <div className="py-8 text-center space-y-2">
+            <p className="text-zinc-300 text-sm">Source downloaded. Per job options, no clips were rendered.</p>
+            {job.destination_folder && (
+              <p className="text-zinc-500 text-xs font-mono">{job.destination_folder}</p>
+            )}
+          </div>
+        ) : (
+          <p className="text-zinc-500 text-sm py-8 text-center">Pipeline complete but no clip-worthy segments were found.</p>
+        )
       )}
 
       {viewMode === 'grid' && filteredClips.length > 0 && (

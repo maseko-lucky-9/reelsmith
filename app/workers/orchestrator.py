@@ -12,7 +12,7 @@ from typing import Any
 from app.bus.event_bus import AsyncEventBus
 from app.bus.job_store import JobStore
 from app.domain.events import Event, EventType
-from app.domain.models import ChapterArtifacts, JobState
+from app.domain.models import ChapterArtifacts, JobState, PipelineOptions
 from app.services import (
     caption_service,
     clip_service,
@@ -75,6 +75,21 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
     target_aspect_ratio: float = payload.get(
         "target_aspect_ratio", settings.default_target_aspect_ratio
     )
+
+    # ── Pipeline options with server-side safety net (G2) ────────────────────
+    raw_opts = payload.get("pipeline_options")
+    if raw_opts and isinstance(raw_opts, dict):
+        opts = PipelineOptions(**raw_opts)
+    else:
+        opts = PipelineOptions()
+
+    # Enforce dependency rules server-side regardless of what UI sent
+    if not opts.transcription:
+        opts.captions = False
+    if not opts.render:
+        opts.reframe = False
+        opts.broll = False
+        opts.thumbnail = False
 
     log.info("[%s] Job started  url=%s  format=%s", job_id, url, caption_format)
     job_t0 = time.perf_counter()
@@ -163,9 +178,22 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
         safe_end = await asyncio.to_thread(clip_service.probe_safe_end, video_path)
 
         if not chapters:
-            chapters = [
-                {"index": 0, "title": "Full Video", "start": 0.0, "end": safe_end}
-            ]
+            if opts.segment_proposer:
+                # Heuristic segment proposer would run here (future)
+                chapters = [
+                    {"index": 0, "title": "Full Video", "start": 0.0, "end": safe_end}
+                ]
+            else:
+                # segment_proposer off → single full-video pseudo-chapter
+                chapters = [
+                    {"index": 0, "title": "Full Video", "start": 0.0, "end": safe_end}
+                ]
+                await _emit(
+                    bus,
+                    EventType.STAGE_SKIPPED,
+                    job_id,
+                    stage_id="segment_proposer",
+                )
         else:
             clamped: list[dict[str, Any]] = []
             for c in chapters:
@@ -211,6 +239,7 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
                     target_aspect_ratio=target_aspect_ratio,
                     bus=bus,
                     store=store,
+                    pipeline_options=opts,
                 )
 
         outputs = await asyncio.gather(*(_bound(c) for c in chapters), return_exceptions=False)
@@ -287,6 +316,7 @@ async def _process_chapter(
     target_aspect_ratio: float,
     bus: AsyncEventBus,
     store: JobStore,
+    pipeline_options: PipelineOptions | None = None,
 ) -> str | None:
     index = int(chapter["index"])
     title = chapter["title"]
@@ -298,6 +328,7 @@ async def _process_chapter(
              job_id, index, index, title, start, end, chapter_duration)
     chapter_t0 = time.perf_counter()
 
+    opts = pipeline_options or PipelineOptions()
     tmp_dir = cleanup_root
     clip_path = str(tmp_dir / f"chapter_{index}.mp4")
     audio_path = str(tmp_dir / f"chapter_{index}.wav")
@@ -305,80 +336,107 @@ async def _process_chapter(
     def _set_status(state: ChapterArtifacts, status: str) -> None:
         state.status = status  # type: ignore[assignment]
 
-    # ── Extract clip ──────────────────────────────────────────────────────────
-    log.info("[%s] Chapter %d  extracting clip and audio", job_id, index)
-    step_t0 = time.perf_counter()
-    await store.upsert_chapter(job_id, lambda c: _set_status(c, "extracting"), index)
-    await asyncio.to_thread(
-        clip_service.extract_chapter_to_disk,
-        video_path,
-        start,
-        end,
-        clip_path,
-        audio_path,
-    )
-    log.info("[%s] Chapter %d  clip extracted (%.2fs)  clip=%s  audio=%s",
-             job_id, index, time.perf_counter() - step_t0, clip_path, audio_path)
-    await store.upsert_chapter(
-        job_id,
-        lambda c: (setattr(c, "clip_path", clip_path), setattr(c, "audio_path", audio_path)),
-        index,
-    )
-    await _emit(
-        bus,
-        EventType.CHAPTER_CLIP_EXTRACTED,
-        job_id,
-        chapter_index=index,
-        clip_path=clip_path,
-        audio_path=audio_path,
-    )
+    # ── Extract clip (gated on render — G19) ─────────────────────────────────
+    if opts.render:
+        log.info("[%s] Chapter %d  extracting clip and audio", job_id, index)
+        step_t0 = time.perf_counter()
+        await store.upsert_chapter(job_id, lambda c: _set_status(c, "extracting"), index)
+        await asyncio.to_thread(
+            clip_service.extract_chapter_to_disk,
+            video_path,
+            start,
+            end,
+            clip_path,
+            audio_path,
+        )
+        log.info("[%s] Chapter %d  clip extracted (%.2fs)  clip=%s  audio=%s",
+                 job_id, index, time.perf_counter() - step_t0, clip_path, audio_path)
+        await store.upsert_chapter(
+            job_id,
+            lambda c: (setattr(c, "clip_path", clip_path), setattr(c, "audio_path", audio_path)),
+            index,
+        )
+        await _emit(
+            bus,
+            EventType.CHAPTER_CLIP_EXTRACTED,
+            job_id,
+            chapter_index=index,
+            clip_path=clip_path,
+            audio_path=audio_path,
+        )
+    else:
+        # render=False → source video stays untouched, no per-chapter clip extraction
+        log.info("[%s] Chapter %d  skipping clip extraction (render=False)", job_id, index)
+        # We still need audio for transcription if enabled
+        if opts.transcription:
+            await asyncio.to_thread(
+                clip_service.extract_chapter_to_disk,
+                video_path,
+                start,
+                end,
+                clip_path,
+                audio_path,
+            )
 
     # ── Transcribe ────────────────────────────────────────────────────────────
-    log.info("[%s] Chapter %d  transcribing audio  provider=%s",
-             job_id, index, settings.transcription_provider)
-    step_t0 = time.perf_counter()
-    await store.upsert_chapter(job_id, lambda c: _set_status(c, "transcribing"), index)
-    words = await asyncio.wait_for(
-        asyncio.to_thread(transcription_service.transcribe_to_words, audio_path),
-        timeout=settings.transcription_timeout_seconds,
-    )
-    text = " ".join(w.word for w in words)
-    log.info("[%s] Chapter %d  transcription done (%.2fs)  words=%d",
-             job_id, index, time.perf_counter() - step_t0, len(words))
-    await store.upsert_chapter(job_id, lambda c: setattr(c, "transcript", text), index)
-    await _emit(bus, EventType.CHAPTER_TRANSCRIBED, job_id, chapter_index=index, text=text)
+    words = []
+    text = ""
+    if opts.transcription:
+        log.info("[%s] Chapter %d  transcribing audio  provider=%s",
+                 job_id, index, settings.transcription_provider)
+        step_t0 = time.perf_counter()
+        await store.upsert_chapter(job_id, lambda c: _set_status(c, "transcribing"), index)
+        words = await asyncio.wait_for(
+            asyncio.to_thread(transcription_service.transcribe_to_words, audio_path),
+            timeout=settings.transcription_timeout_seconds,
+        )
+        text = " ".join(w.word for w in words)
+        log.info("[%s] Chapter %d  transcription done (%.2fs)  words=%d",
+                 job_id, index, time.perf_counter() - step_t0, len(words))
+        await store.upsert_chapter(job_id, lambda c: setattr(c, "transcript", text), index)
+        await _emit(bus, EventType.CHAPTER_TRANSCRIBED, job_id, chapter_index=index, text=text)
+    else:
+        log.info("[%s] Chapter %d  skipping transcription", job_id, index)
+        await _emit(bus, EventType.STAGE_SKIPPED, job_id, stage_id="transcribe", chapter_index=index)
 
     # ── Captions ──────────────────────────────────────────────────────────────
-    log.info("[%s] Chapter %d  generating captions  format=%s  words_per_segment=%d",
-             job_id, index, caption_format, settings.caption_words_per_segment)
-    step_t0 = time.perf_counter()
-    await store.upsert_chapter(job_id, lambda c: _set_status(c, "captioning"), index)
-    captions_obj = await asyncio.to_thread(
-        caption_service.generate_captions_from_word_timings,
-        words, settings.caption_words_per_segment, caption_format,
-    )
-    captions_path = str(tmp_dir / f"chapter_{index}.{caption_format}")
-    await asyncio.to_thread(
-        caption_service.write_captions, captions_obj, caption_format, captions_path
-    )
-    caption_count = len(captions_obj) if captions_obj is not None else 0
-    log.info("[%s] Chapter %d  captions written (%.2fs)  count=%d  path=%s",
-             job_id, index, time.perf_counter() - step_t0, caption_count, captions_path)
-    await store.upsert_chapter(
-        job_id, lambda c: setattr(c, "captions_path", captions_path), index
-    )
-    await _emit(
-        bus,
-        EventType.CAPTIONS_GENERATED,
-        job_id,
-        chapter_index=index,
-        format=caption_format,
-        captions_path=captions_path,
-    )
+    captions_obj = None
+    captions_path: str | None = None
+    if opts.captions and opts.transcription:
+        log.info("[%s] Chapter %d  generating captions  format=%s  words_per_segment=%d",
+                 job_id, index, caption_format, settings.caption_words_per_segment)
+        step_t0 = time.perf_counter()
+        await store.upsert_chapter(job_id, lambda c: _set_status(c, "captioning"), index)
+        captions_obj = await asyncio.to_thread(
+            caption_service.generate_captions_from_word_timings,
+            words, settings.caption_words_per_segment, caption_format,
+        )
+        captions_path = str(tmp_dir / f"chapter_{index}.{caption_format}")
+        await asyncio.to_thread(
+            caption_service.write_captions, captions_obj, caption_format, captions_path
+        )
+        caption_count = len(captions_obj) if captions_obj is not None else 0
+        log.info("[%s] Chapter %d  captions written (%.2fs)  count=%d  path=%s",
+                 job_id, index, time.perf_counter() - step_t0, caption_count, captions_path)
+        await store.upsert_chapter(
+            job_id, lambda c: setattr(c, "captions_path", captions_path), index
+        )
+        await _emit(
+            bus,
+            EventType.CAPTIONS_GENERATED,
+            job_id,
+            chapter_index=index,
+            format=caption_format,
+            captions_path=captions_path,
+        )
+    else:
+        log.info("[%s] Chapter %d  skipping captions", job_id, index)
+        await _emit(bus, EventType.STAGE_SKIPPED, job_id, stage_id="caption", chapter_index=index)
 
-    # ── Subtitle images ───────────────────────────────────────────────────────
-    image_paths = []
-    if captions_obj is not None:
+    # ── Subtitle images (gated on captions) ──────────────────────────────────
+    image_paths: list[str] = []
+    if captions_obj is not None and opts.captions:
+        caption_count = len(captions_obj)
         log.info("[%s] Chapter %d  rendering %d subtitle image(s)", job_id, index, caption_count)
         step_t0 = time.perf_counter()
         videosize = (1280, 720)  # default; overridden by render service per real video size
@@ -397,63 +455,85 @@ async def _process_chapter(
     await store.upsert_chapter(
         job_id, lambda c: setattr(c, "image_paths", image_paths), index
     )
-    await _emit(
-        bus,
-        EventType.SUBTITLE_IMAGE_RENDERED,
-        job_id,
-        chapter_index=index,
-        image_paths=image_paths,
-    )
+    if image_paths:
+        await _emit(
+            bus,
+            EventType.SUBTITLE_IMAGE_RENDERED,
+            job_id,
+            chapter_index=index,
+            image_paths=image_paths,
+        )
 
-    # ── Render final clip ─────────────────────────────────────────────────────
-    log.info("[%s] Chapter %d  rendering final clip  aspect=%.4f", job_id, index, target_aspect_ratio)
-    step_t0 = time.perf_counter()
-    await store.upsert_chapter(job_id, lambda c: _set_status(c, "rendering"), index)
+    # ── Render final clip (gated on render) ──────────────────────────────────
+    output_path: str | None = None
     safe_title = _sanitize(title)
-    output_path = str(Path(clips_folder) / f"{index:02d}_{safe_title}.mp4")
-    await asyncio.wait_for(
-        asyncio.to_thread(
-            render_service.render_clip,
-            clip_path,
-            output_path,
-            0.0,
-            chapter_duration,
-            captions_path,
-            target_aspect_ratio,
-            word_timings=words,
-            caption_words_per_segment=settings.caption_words_per_segment,
-        ),
-        timeout=settings.render_timeout_seconds,
-    )
-    log.info("[%s] Chapter %d  render done (%.2fs)  output=%s",
-             job_id, index, time.perf_counter() - step_t0, output_path)
-    log.info("[%s] Chapter %d  finished in %.2fs", job_id, index, time.perf_counter() - chapter_t0)
+    if opts.render:
+        log.info("[%s] Chapter %d  rendering final clip  aspect=%.4f", job_id, index, target_aspect_ratio)
+        step_t0 = time.perf_counter()
+        await store.upsert_chapter(job_id, lambda c: _set_status(c, "rendering"), index)
+        output_path = str(Path(clips_folder) / f"{index:02d}_{safe_title}.mp4")
+        await asyncio.wait_for(
+            asyncio.to_thread(
+                render_service.render_clip,
+                clip_path,
+                output_path,
+                0.0,
+                chapter_duration,
+                captions_path,
+                target_aspect_ratio,
+                word_timings=words,
+                caption_words_per_segment=settings.caption_words_per_segment,
+            ),
+            timeout=settings.render_timeout_seconds,
+        )
+        log.info("[%s] Chapter %d  render done (%.2fs)  output=%s",
+                 job_id, index, time.perf_counter() - step_t0, output_path)
+        log.info("[%s] Chapter %d  finished in %.2fs", job_id, index, time.perf_counter() - chapter_t0)
 
-    await store.upsert_chapter(
-        job_id,
-        lambda c: (setattr(c, "output_path", output_path), _set_status(c, "completed")),
-        index,
-    )
-    await _emit(
-        bus,
-        EventType.CLIP_RENDERED,
-        job_id,
-        chapter_index=index,
-        output_path=output_path,
-    )
+        await store.upsert_chapter(
+            job_id,
+            lambda c: (setattr(c, "output_path", output_path), _set_status(c, "completed")),
+            index,
+        )
+        await _emit(
+            bus,
+            EventType.CLIP_RENDERED,
+            job_id,
+            chapter_index=index,
+            output_path=output_path,
+        )
+    else:
+        log.info("[%s] Chapter %d  skipping render (render=False)", job_id, index)
+        await _emit(bus, EventType.STAGE_SKIPPED, job_id, stage_id="render", chapter_index=index)
+        # Also emit skips for dependent stages
+        if not opts.reframe:
+            await _emit(bus, EventType.STAGE_SKIPPED, job_id, stage_id="reframe", chapter_index=index)
+        if not opts.broll:
+            await _emit(bus, EventType.STAGE_SKIPPED, job_id, stage_id="broll", chapter_index=index)
+        if not opts.thumbnail:
+            await _emit(bus, EventType.STAGE_SKIPPED, job_id, stage_id="thumbnail", chapter_index=index)
+        await store.upsert_chapter(
+            job_id,
+            lambda c: _set_status(c, "completed"),
+            index,
+        )
 
-    # ── Thumbnail ─────────────────────────────────────────────────────────────
+    # ── Thumbnail (gated on render + thumbnail) ──────────────────────────────
     clip_id = str(uuid.uuid4())
     thumbnail_path: str | None = None
-    try:
-        thumbnail_out = str(Path(clips_folder) / f"{index:02d}_{safe_title}_thumb.jpg")
-        thumbnail_path = await asyncio.to_thread(
-            thumbnail_service.generate_thumbnail, output_path, thumbnail_out
-        )
-        log.info("[%s] Chapter %d  thumbnail generated  path=%s", job_id, index, thumbnail_path)
-        await _emit(bus, EventType.THUMBNAIL_GENERATED, job_id, chapter_index=index, thumbnail_path=thumbnail_path)
-    except Exception as e:  # noqa: BLE001
-        log.warning("[%s] Chapter %d  thumbnail failed: %s", job_id, index, e)
+    if opts.render and opts.thumbnail and output_path:
+        try:
+            thumbnail_out = str(Path(clips_folder) / f"{index:02d}_{safe_title}_thumb.jpg")
+            thumbnail_path = await asyncio.to_thread(
+                thumbnail_service.generate_thumbnail, output_path, thumbnail_out
+            )
+            log.info("[%s] Chapter %d  thumbnail generated  path=%s", job_id, index, thumbnail_path)
+            await _emit(bus, EventType.THUMBNAIL_GENERATED, job_id, chapter_index=index, thumbnail_path=thumbnail_path)
+        except Exception as e:  # noqa: BLE001
+            log.warning("[%s] Chapter %d  thumbnail failed: %s", job_id, index, e)
+    elif opts.render and not opts.thumbnail:
+        log.info("[%s] Chapter %d  skipping thumbnail", job_id, index)
+        await _emit(bus, EventType.STAGE_SKIPPED, job_id, stage_id="thumbnail", chapter_index=index)
 
     # ── Upsert clip record ────────────────────────────────────────────────────
     def _init_clip(c: dict[str, Any]) -> None:

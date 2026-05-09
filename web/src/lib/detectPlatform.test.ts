@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { detectPlatform, platformLabel } from './detectPlatform'
+import { detectPlatform, isShortFormUrl, platformLabel } from './detectPlatform'
 
 describe('detectPlatform', () => {
   it.each([
@@ -44,6 +44,23 @@ describe('detectPlatform', () => {
     'not-a-url',
   ])('rejects unsupported / confusable: %s', (url) => {
     expect(detectPlatform(url)).toBe('unsupported')
+  })
+
+  it.each([
+    ['https://www.youtube.com/shorts/abc', true],
+    ['https://youtube.com/shorts/xyz?si=foo', true],
+    ['https://m.youtube.com/shorts/abc', true],
+    ['https://www.tiktok.com/@u/video/1', true],
+    ['https://vt.tiktok.com/ABC/', true],
+    ['https://www.instagram.com/reel/abc/', true],
+    ['https://instagr.am/p/abc/', true],
+    ['https://www.youtube.com/watch?v=abc', false],
+    ['https://youtu.be/abc', false],
+    ['https://www.facebook.com/share/r/123/', false],
+    ['', false],
+    ['not-a-url', false],
+  ])('isShortFormUrl(%s) === %s', (url, expected) => {
+    expect(isShortFormUrl(url)).toBe(expected)
   })
 
   it('platformLabel maps every id', () => {

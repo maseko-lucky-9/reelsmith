@@ -27,6 +27,12 @@ class JobRecord(Base):
     source: Mapped[str | None] = mapped_column(String(32), nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    segment_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    language: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    auto_hook: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    brand_template_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    pipeline_options: Mapped[dict | None] = mapped_column(JSON, default=dict, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_now
     )

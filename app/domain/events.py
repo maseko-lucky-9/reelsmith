@@ -25,6 +25,7 @@ class EventType(str, Enum):
     SOCIAL_CONTENT_GENERATED = "SocialContentGenerated"
     EXPORT_COMPLETED = "ExportCompleted"
     MANIFEST_CREATED = "ManifestCreated"
+    STAGE_SKIPPED = "StageSkipped"
     JOB_COMPLETED = "JobCompleted"
     JOB_FAILED = "JobFailed"
 

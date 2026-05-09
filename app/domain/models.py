@@ -6,6 +6,16 @@ from pydantic import BaseModel, Field
 
 
 JobStatus = Literal["pending", "running", "completed", "failed"]
+
+
+class PipelineOptions(BaseModel):
+    transcription: bool = True
+    captions: bool = True
+    render: bool = True
+    segment_proposer: bool = True
+    reframe: bool = True
+    broll: bool = True
+    thumbnail: bool = True
 ChapterStatus = Literal[
     "pending",
     "extracting",
@@ -55,3 +65,9 @@ class JobState(BaseModel):
     error: str | None = None
     clips: dict[str, Any] = Field(default_factory=dict)
     extra: dict[str, Any] = Field(default_factory=dict)
+    segment_mode: Literal["auto", "chapter"] = "auto"
+    language: str = "en-US"
+    prompt: str | None = None
+    auto_hook: bool = True
+    brand_template_id: str | None = None
+    pipeline_options: PipelineOptions = Field(default_factory=PipelineOptions)

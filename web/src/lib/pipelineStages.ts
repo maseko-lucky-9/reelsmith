@@ -9,7 +9,7 @@
  * If the backend adds an EventType, the runtime in `useJobSSE` will warn for
  * unknown events; add the new stage here to surface it.
  */
-import type { ChapterArtifacts, ChapterStatus, JobState } from '@/api/client'
+import type { ChapterArtifacts, ChapterStatus, JobState, PipelineOptions } from '@/api/client'
 
 export type StageId =
   | 'folder'
@@ -23,7 +23,7 @@ export type StageId =
   | 'export'
   | 'complete'
 
-export type StageState = 'pending' | 'active' | 'done' | 'failed'
+export type StageState = 'pending' | 'active' | 'done' | 'failed' | 'skipped'
 
 export interface StageDescriptor {
   id: StageId
@@ -54,6 +54,49 @@ export const STAGES: readonly StageDescriptor[] = [
   { id: 'export',   label: 'Export & manifest', doneOnEvents: ['ExportCompleted', 'ManifestCreated'] },
   { id: 'complete', label: 'Done',              doneOnEvents: ['JobCompleted'] },
 ] as const
+
+/**
+ * Maps PipelineOptions keys to the stage IDs they control.
+ * When a pipeline option is false, all mapped stages are pinned to 'skipped'.
+ *
+ * Dependency rules (also enforced server-side):
+ * - transcription off ⇒ caption skipped (no transcript → no captions)
+ * - render off ⇒ extract, render, finalise_chapters skipped (no clip extraction, no render, no thumbnail)
+ */
+const PIPELINE_OPTION_TO_STAGES: Record<keyof PipelineOptions, StageId[]> = {
+  transcription: ['transcribe'],
+  captions: ['caption'],
+  render: ['extract', 'render'],
+  thumbnail: ['finalise_chapters'],
+  segment_proposer: ['chapters'],
+  // reframe and broll live inside the render stage — no separate stage to skip
+  reframe: [],
+  broll: [],
+}
+
+/** Resolve the full set of skipped stage IDs from pipeline_options, including dependency cascades. */
+export function resolveSkippedStages(opts: PipelineOptions): Set<StageId> {
+  const skipped = new Set<StageId>()
+  // Apply explicit option → stage mapping
+  for (const [key, stageIds] of Object.entries(PIPELINE_OPTION_TO_STAGES)) {
+    if (!opts[key as keyof PipelineOptions]) {
+      for (const sid of stageIds) {
+        skipped.add(sid)
+      }
+    }
+  }
+  // Dependency cascades: transcription off ⇒ caption skipped
+  if (!opts.transcription) {
+    skipped.add('caption')
+  }
+  // render off ⇒ extract, render, finalise_chapters all skipped
+  if (!opts.render) {
+    skipped.add('extract')
+    skipped.add('render')
+    skipped.add('finalise_chapters')
+  }
+  return skipped
+}
 
 /** Outer steps the orchestrator writes to JobState.current_step (orchestrator.py:93,117,157,250). */
 const STEP_ORDER = ['folder', 'download', 'chapters', 'completed'] as const
@@ -191,31 +234,45 @@ export function deriveStageStates(
 
   const totalChapters = Object.keys(job.chapters ?? {}).length || null
 
+  // Resolve skipped stages from pipeline_options (always populated per backend contract).
+  const skippedStages = job.pipeline_options
+    ? resolveSkippedStages(job.pipeline_options)
+    : new Set<StageId>()
+
   // Per-chapter failure detection.
   const failedChapter = Object.values(job.chapters ?? {}).find((c) => c.status === 'failed')
 
   // First derive raw done state for each stage (max of poll-derived and event-derived).
-  const rawStates = STAGES.map((stage): { stage: StageDescriptor; done: boolean; count: number } => {
+  const rawStates = STAGES.map((stage): { stage: StageDescriptor; done: boolean; count: number; skipped: boolean } => {
+    // Skipped pinning: if pipeline_options says this stage is off, pin to skipped
+    if (skippedStages.has(stage.id)) {
+      return { stage, done: false, count: 0, skipped: true }
+    }
+
     if (stage.perChapter) {
       const fromArtifacts = chaptersDoneFromArtifacts(job.chapters ?? {}, stage)
       const fromEvents = chaptersDoneFromEvents(evs, stage)
       const count = Math.max(fromArtifacts, fromEvents)
       const fullyDone = totalChapters !== null && count >= totalChapters && totalChapters > 0
-      return { stage, done: fullyDone, count }
+      return { stage, done: fullyDone, count, skipped: false }
     }
     // Outer stage.
     const eventDone = stage.doneOnEvents.some((t) => evs.some((e) => e.type === t))
     const pollDone = isOuterStageDone(stage, job, evs)
-    return { stage, done: eventDone || pollDone, count: 0 }
+    return { stage, done: eventDone || pollDone, count: 0, skipped: false }
   })
 
-  // Find the first incomplete stage; that's the active one (unless job is terminal).
-  const isTerminal = job.status === 'completed' || job.status === 'failed'
-  const firstIncomplete = rawStates.findIndex((r) => !r.done)
+  // Find the first incomplete stage (not skipped); that's the active one (unless job is terminal).
+  const firstIncomplete = rawStates.findIndex((r) => !r.done && !r.skipped)
 
   return rawStates.map((r, i) => {
     let state: StageState
-    if (job.status === 'failed') {
+
+    // Skipped stages stay skipped regardless of job status
+    if (r.skipped) {
+      // Exception: when job is completed, skipped stages stay skipped (not flipped to done)
+      state = 'skipped'
+    } else if (job.status === 'failed') {
       // Outer failure: the failed stage is r.stage matching current_step (folder/download/chapters).
       // Per-chapter failure: the in-flight per-chapter stage is the failed one.
       const outerFailMatch = r.stage.id === job.current_step
@@ -226,7 +283,7 @@ export function deriveStageStates(
         state = r.done ? 'done' : 'pending'
       }
     } else if (job.status === 'completed') {
-      // Everything flips to done on completion.
+      // Non-skipped stages flip to done on completion.
       state = 'done'
     } else if (r.done) {
       state = 'done'
@@ -265,8 +322,18 @@ export function describeActiveStage(stages: DerivedStage[]): string {
   }
   const failed = stages.find((s) => s.state === 'failed')
   if (failed) return `Failed at: ${failed.descriptor.label}`
-  if (stages.every((s) => s.state === 'done')) return 'Job completed'
+  if (stages.every((s) => s.state === 'done' || s.state === 'skipped')) return 'Job completed'
   return ''
+}
+
+/**
+ * One-shot announcement listing all skipped stages (for live-region on mount).
+ * Returns empty string if no stages are skipped.
+ */
+export function describeSkippedStages(stages: DerivedStage[]): string {
+  const skipped = stages.filter((s) => s.state === 'skipped')
+  if (skipped.length === 0) return ''
+  return `Stages skipped per job options: ${skipped.map((s) => s.descriptor.label).join(', ')}.`
 }
 
 /** Set of all known event types — used by useJobSSE to warn on drift. */
@@ -274,5 +341,6 @@ export const KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set([
   'VideoRequested',
   ...STAGES.flatMap((s) => [...s.doneOnEvents]),
   'JobFailed',
+  'StageSkipped', // emitted when orchestrator skips a stage per pipeline_options
   'SubtitleImageRendered', // emitted but not rendered as its own row (rolled into render)
 ])

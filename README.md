@@ -1,8 +1,19 @@
 # Reelsmith
 
-**Problem:** Manually trimming YouTube videos into captioned short-form clips is tedious and time-consuming for a solo creator.
+**Problem:** Manually trimming long-form videos from YouTube, Facebook, TikTok, or Instagram into captioned short-form clips is tedious and time-consuming for a solo creator.
 
-Reelsmith automates the pipeline: download a video, transcribe it with word-level timing, score clips by virality heuristics, burn karaoke subtitles, and produce 9:16 vertical reels — all through a FastAPI backend and a React dashboard.
+Reelsmith automates the pipeline: download a video from any supported platform, transcribe it with word-level timing, score clips by virality heuristics, burn karaoke subtitles, and produce 9:16 vertical reels — all through a FastAPI backend and a React dashboard with a live per-stage progress timeline.
+
+## Supported Platforms
+
+| Platform | Mode | Chapter support |
+|---|---|---|
+| YouTube | Long-form | Full chapter parsing |
+| Facebook | Short-form | Single clip (no chapters) |
+| TikTok | Short-form | Single clip (no chapters) |
+| Instagram | Short-form | Public posts only |
+
+URLs are routed via a `PlatformAdapter` strategy registry (`app/services/platforms/`). Unsupported URLs are rejected at submission time with HTTP 400.
 
 ## Quick Start
 
@@ -29,15 +40,28 @@ Open **<http://localhost:5173>** in your browser.
 
 ```
 web/                     — React 19 + Vite + TanStack Router/Query + shadcn/ui
+  components/job-progress-timeline.tsx — live per-stage progress UI on /jobs/$jobId
+  components/platform-chip.tsx         — shared platform badge
+  lib/pipelineStages.ts                — pure deriveStageStates(job, events) helper
+  lib/detectPlatform.ts                — frontend mirror of the platform registry
 app/main.py              — FastAPI app, job queue, SSE streaming
 app/routers/             — jobs, clips, media, uploads, brand_templates
-app/services/            — download, transcription, caption, render, segment_proposer,
-                           reframe, broll, thumbnail
-app/workers/orchestrator — async pipeline runner
-app/domain/              — events, models, IDs
+app/services/            — transcription, caption, render, segment_proposer, reframe, broll, thumbnail
+app/services/platforms/  — PlatformAdapter strategy: youtube, facebook, tiktok, instagram
+app/services/download_service.py — backward-compat shim (delegates to YouTube adapter)
+app/workers/orchestrator — async pipeline runner (resolves adapter per URL)
+app/domain/              — events, models (incl. JobState.source), IDs
 app/bus/                 — async event bus + job store (memory / Postgres)
 app/db/                  — SQLAlchemy ORM models + alembic migrations
 ```
+
+## Live Progress Timeline
+
+The `/jobs/$jobId` page renders a per-stage timeline while the pipeline runs. Stages: prepare workspace → download source → detect chapters → extract clips → transcribe → caption → render → thumbnails+social → export & manifest → done. Per-chapter stages show `N/M` sub-progress.
+
+- **Data plane:** `useJobSSE` mirrors every SSE event into the React Query cache `['job-events', jobId]`. `deriveStageStates(jobState, events)` is a pure helper — `JobState` is the source of truth, events are a low-latency optimisation. Max-merge reconciliation between SSE counts and `JobState.chapters[i]` artifact fields means a stage never un-completes (kills SSE-reconnect drift and tab-refocus races in one rule).
+- **Accessibility:** single visually-hidden `role="status" aria-live="polite"` region announces only stage transitions (~10/job, not ~60). Active row gets `aria-current="step"` plus a static emerald left-border so reduced-motion users still get a non-animation cue.
+- **Resilience:** `<TimelineErrorBoundary>` wraps the component; a malformed `JobState` falls back without blanking the page.
 
 ## Stack
 
@@ -45,7 +69,7 @@ app/db/                  — SQLAlchemy ORM models + alembic migrations
 |---|---|
 | API | FastAPI + Uvicorn |
 | Database | Postgres 16 + SQLAlchemy 2 async + Alembic |
-| Video download | yt-dlp |
+| Video download | yt-dlp (YouTube / Facebook / TikTok / Instagram via PlatformAdapter registry) |
 | Video editing | MoviePy |
 | Transcription | Whisper (word-level) |
 | Virality scoring | librosa + VADER + spaCy + webrtcvad |

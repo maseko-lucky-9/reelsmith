@@ -29,6 +29,15 @@ const baseJob: JobState = {
   chapters: {},
   output_paths: [],
   error: null,
+  pipeline_options: {
+    transcription: true,
+    captions: true,
+    render: true,
+    segment_proposer: true,
+    reframe: true,
+    broll: true,
+    thumbnail: true,
+  },
 }
 
 describe('<JobProgressTimeline />', () => {
@@ -99,5 +108,37 @@ describe('<JobProgressTimeline />', () => {
     const live = container.querySelector('[role="status"][aria-live="polite"]')
     expect(live).toBeTruthy()
     expect(live!.textContent).toContain('Prepare workspace')
+  })
+
+  it('renders skipped row with gray dash icon and helper text', () => {
+    const job: JobState = {
+      ...baseJob,
+      pipeline_options: {
+        ...baseJob.pipeline_options,
+        transcription: false,
+      },
+    }
+    wrap(<JobProgressTimeline job={job} />)
+    // Skipped helper text should appear for transcribe and caption (dependency cascade)
+    const skippedTexts = screen.getAllByText('Skipped (per job options)')
+    expect(skippedTexts.length).toBeGreaterThanOrEqual(2)
+    // Gray dash icon has aria-label="skipped"
+    const skippedIcons = screen.getAllByLabelText('skipped')
+    expect(skippedIcons.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('live region announces skipped stages on mount', () => {
+    const job: JobState = {
+      ...baseJob,
+      pipeline_options: {
+        ...baseJob.pipeline_options,
+        transcription: false,
+      },
+    }
+    const { container } = wrap(<JobProgressTimeline job={job} />)
+    const live = container.querySelector('[role="status"][aria-live="polite"]')
+    expect(live).toBeTruthy()
+    expect(live!.textContent).toContain('Stages skipped per job options')
+    expect(live!.textContent).toContain('Transcribe audio')
   })
 })

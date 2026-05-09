@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Callable, Protocol, runtime_checkable
 
-from app.domain.models import ChapterArtifacts, JobState
+from app.domain.models import ChapterArtifacts, JobState, PipelineOptions
 
 
 class JobNotFoundError(KeyError):
@@ -148,6 +148,12 @@ class SqlJobStore:
                 youtube_url=state.url,
                 source=state.source,
                 status=state.status,
+                segment_mode=state.segment_mode,
+                language=state.language,
+                prompt=state.prompt,
+                auto_hook=state.auto_hook,
+                brand_template_id=state.brand_template_id,
+                pipeline_options=state.pipeline_options.model_dump(),
             )
             session.add(record)
             await session.commit()
@@ -172,9 +178,14 @@ class SqlJobStore:
     async def update(self, job_id: str, mutator: Callable[[JobState], None]) -> JobState:
         from app.db.models import JobRecord
         from sqlalchemy import select
+        from sqlalchemy.orm import selectinload
 
         async with self._factory() as session:
-            result = await session.execute(select(JobRecord).where(JobRecord.id == job_id))
+            result = await session.execute(
+                select(JobRecord)
+                .options(selectinload(JobRecord.clips))
+                .where(JobRecord.id == job_id)
+            )
             record = result.scalar_one_or_none()
             if record is None:
                 raise JobNotFoundError(job_id)
@@ -183,6 +194,12 @@ class SqlJobStore:
             record.status = state.status
             record.error = state.error
             record.source = state.source
+            record.segment_mode = state.segment_mode
+            record.language = state.language
+            record.prompt = state.prompt
+            record.auto_hook = state.auto_hook
+            record.brand_template_id = state.brand_template_id
+            record.pipeline_options = state.pipeline_options.model_dump()
             await session.commit()
         return state
 
@@ -320,6 +337,14 @@ class SqlJobStore:
 def _record_to_state(record: Any) -> JobState:
     loaded_clips = getattr(record, "clips", None) or []
     output_paths = [c.output_path for c in loaded_clips if c.output_path and not c.retired]
+
+    # Coerce None/missing pipeline_options → defaults (G4: old rows must not crash)
+    raw_opts = getattr(record, "pipeline_options", None)
+    if raw_opts and isinstance(raw_opts, dict):
+        pipeline_opts = PipelineOptions(**raw_opts)
+    else:
+        pipeline_opts = PipelineOptions()
+
     return JobState(
         job_id=record.id,
         url=record.youtube_url,
@@ -328,6 +353,12 @@ def _record_to_state(record: Any) -> JobState:
         error=record.error,
         download_path="/tmp/yt",
         output_paths=output_paths,
+        segment_mode=getattr(record, "segment_mode", None) or "auto",
+        language=getattr(record, "language", None) or "en-US",
+        prompt=getattr(record, "prompt", None),
+        auto_hook=getattr(record, "auto_hook", None) if getattr(record, "auto_hook", None) is not None else True,
+        brand_template_id=getattr(record, "brand_template_id", None),
+        pipeline_options=pipeline_opts,
     )
 
 

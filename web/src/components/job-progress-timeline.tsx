@@ -1,10 +1,11 @@
-import { useMemo } from 'react'
+import { useMemo, useRef, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Check, Loader2, XCircle, Circle } from 'lucide-react'
+import { Check, Loader2, XCircle, Circle, Minus } from 'lucide-react'
 import type { JobState } from '@/api/client'
 import {
   deriveStageStates,
   describeActiveStage,
+  describeSkippedStages,
   type DerivedStage,
   type PipelineEvent,
 } from '@/lib/pipelineStages'
@@ -35,6 +36,15 @@ export function JobProgressTimeline({ job }: Props) {
 
   const announce = describeActiveStage(stages)
 
+  // One-shot skipped-stages announcement on initial mount
+  const skippedAnnouncedRef = useRef(false)
+  const skippedAnnouncement = useMemo(() => describeSkippedStages(stages), [stages])
+  useEffect(() => {
+    if (skippedAnnouncement && !skippedAnnouncedRef.current) {
+      skippedAnnouncedRef.current = true
+    }
+  }, [skippedAnnouncement])
+
   return (
     <div className="rounded-xl border border-white/10 bg-[var(--card-bg,#1a1a1a)] p-4">
       <ol role="list" className="space-y-1">
@@ -42,9 +52,10 @@ export function JobProgressTimeline({ job }: Props) {
           <StageRow key={s.descriptor.id} stage={s} />
         ))}
       </ol>
-      {/* Visually hidden live region — announces only stage transitions, not the whole tree. */}
+      {/* Visually hidden live region — announces stage transitions + skipped stages. */}
       <div role="status" aria-live="polite" className="sr-only">
         {announce}
+        {skippedAnnouncement && ` ${skippedAnnouncement}`}
       </div>
     </div>
   )
@@ -55,6 +66,7 @@ function StageRow({ stage }: { stage: DerivedStage }) {
   const isActive = state === 'active'
   const isDone = state === 'done'
   const isFailed = state === 'failed'
+  const isSkipped = state === 'skipped'
   const isPerChapter = descriptor.perChapter && total !== null && total > 0
 
   const rowBg =
@@ -76,6 +88,8 @@ function StageRow({ stage }: { stage: DerivedStage }) {
       <span className="mt-0.5 flex-shrink-0">
         {isDone ? (
           <Check className="w-4 h-4 text-emerald-400" aria-label="done" />
+        ) : isSkipped ? (
+          <Minus className="w-4 h-4 text-zinc-500" aria-label="skipped" />
         ) : isFailed ? (
           <XCircle className="w-4 h-4 text-red-400" aria-label="failed" />
         ) : isActive ? (
@@ -94,23 +108,29 @@ function StageRow({ stage }: { stage: DerivedStage }) {
             className={
               isDone
                 ? 'text-zinc-300'
-                : isActive
-                  ? 'text-white font-medium'
-                  : isFailed
-                    ? 'text-red-300 font-medium'
-                    : 'text-zinc-500'
+                : isSkipped
+                  ? 'text-zinc-500'
+                  : isActive
+                    ? 'text-white font-medium'
+                    : isFailed
+                      ? 'text-red-300 font-medium'
+                      : 'text-zinc-500'
             }
           >
             {descriptor.label}
           </span>
-          {isPerChapter && (
+          {isPerChapter && !isSkipped && (
             <span className="text-xs text-zinc-500 tabular-nums">
               {done}/{total}
             </span>
           )}
         </div>
 
-        {isPerChapter && (
+        {isSkipped && (
+          <p className="mt-0.5 text-xs text-zinc-500">Skipped (per job options)</p>
+        )}
+
+        {isPerChapter && !isSkipped && (
           <div className="mt-1 h-1 w-full rounded-full bg-zinc-800 overflow-hidden">
             <div
               className={`h-full transition-all duration-300 ${

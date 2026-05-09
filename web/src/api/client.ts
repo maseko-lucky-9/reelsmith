@@ -39,6 +39,7 @@ export interface JobState {
   output_paths: string[]
   error: string | null
   prompt?: string | null
+  pipeline_options: PipelineOptions
 }
 
 export interface ClipRecord {
@@ -71,10 +72,21 @@ export interface BrandTemplate {
   outro_clip_path: string | null
 }
 
+export interface PipelineOptions {
+  transcription: boolean
+  captions: boolean
+  render: boolean
+  segment_proposer: boolean
+  reframe: boolean
+  broll: boolean
+  thumbnail: boolean
+}
+
 export interface VideoPreviewResponse {
   title: string
   duration: number
   resolution: string
+  thumbnail: string
 }
 
 export interface CreateJobRequest {
@@ -84,12 +96,10 @@ export interface CreateJobRequest {
   target_aspect_ratio?: number
   language?: string
   segment_mode?: 'auto' | 'chapter'
-  genre?: string
   prompt?: string
-  start_offset?: number
-  end_offset?: number
   auto_hook?: boolean
   brand_template_id?: string
+  pipeline_options?: PipelineOptions
 }
 
 export interface CreateJobResponse {

@@ -46,3 +46,17 @@ export function detectPlatform(url: string): PlatformId {
 export function platformLabel(id: PlatformId): string {
   return LABELS[id]
 }
+
+/**
+ * True when the URL is short-form 9:16 source (YouTube Shorts, TikTok, Instagram Reel).
+ * Used to opt these platforms into Render 9:16 by default in the Advanced tab.
+ */
+export function isShortFormUrl(url: string): boolean {
+  if (!url) return false
+  const platform = detectPlatform(url)
+  if (platform === 'tiktok' || platform === 'instagram') return true
+  if (platform === 'youtube') {
+    return /^https?:\/\/(?:[^/]+\.)?(?:youtube\.com|youtu\.be)\/shorts\//i.test(url)
+  }
+  return false
+}
