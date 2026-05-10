@@ -23,6 +23,7 @@ from app.routers import (
     clip_edits,
     clips,
     downloads,
+    enhance_speech,
     folders,
     jobs,
     media,
@@ -200,6 +201,7 @@ def create_app() -> FastAPI:
     app.include_router(social_publish.router)
     app.include_router(xml_export.router)
     app.include_router(ai_hook.router)
+    app.include_router(enhance_speech.router)
 
     # Serve the built React app in production (YTVIDEO_SERVE_FRONTEND=true).
     if settings.serve_frontend:
