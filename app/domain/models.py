@@ -16,6 +16,18 @@ class PipelineOptions(BaseModel):
     reframe: bool = True
     broll: bool = True
     thumbnail: bool = True
+
+    # W1.10 — custom clip length range (seconds). When None, fall back
+    # to settings.target_clip_seconds_{min,max}.
+    target_length_min_seconds: int | None = None
+    target_length_max_seconds: int | None = None
+
+    # W1.7 — AI hook stage (opt-in).
+    ai_hook: bool = False
+    # W1.8 — speech enhancement stage (additive; default on).
+    audio_enhance: bool = True
+
+
 ChapterStatus = Literal[
     "pending",
     "extracting",
