@@ -83,6 +83,12 @@ if _HAS_PYDANTIC_SETTINGS:
         require_auth: bool = False
         api_key: str | None = None
 
+        # ── Multi-user auth (W3.8) ────────────────────────────────────────────
+        # When False (default), current_user_id() returns 'local' and the
+        # API token resolver is bypassed. Flip to True after issuing the
+        # first API token.
+        auth_enabled: bool = False
+
         # ── OAuth at-rest encryption (W1.3) ───────────────────────────────────
         # Fernet key (URL-safe base64-encoded 32 bytes). When unset, the
         # token vault falls back to an ephemeral in-process key — tokens
