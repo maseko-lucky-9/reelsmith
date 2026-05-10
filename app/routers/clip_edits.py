@@ -38,6 +38,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ClipEdit, ClipRecord
 from app.db.session import get_session
+from app.services.timeline_render_service import (
+    TimelineError,
+    build_render_plan,
+)
 
 router = APIRouter(prefix="/api/clips", tags=["clip-edits"])
 
@@ -133,6 +137,23 @@ async def upsert_clip_edit(
     await session.commit()
     await session.refresh(edit)
     return _to_dict(edit)
+
+
+@router.get("/{clip_id}/edit/plan")
+async def get_render_plan(
+    clip_id: str, session: AsyncSession = Depends(get_session)
+):
+    """Return the deterministic render plan for the editor preview."""
+    clip = await _load_clip(session, clip_id)
+    edit = await _load_edit(session, clip_id)
+    if edit is None:
+        raise HTTPException(status_code=404, detail="no edit state for clip")
+    base = clip.output_path or ""
+    try:
+        plan = build_render_plan(edit.timeline, base)
+    except TimelineError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return plan.to_dict()
 
 
 @router.delete("/{clip_id}/edit", status_code=204)
