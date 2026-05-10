@@ -8,6 +8,7 @@ import { clipEditRoute } from './routes/clips.$clipId.edit'
 import { brandTemplateRoute } from './routes/settings.brand'
 import { socialAccountsRoute } from './routes/settings.social'
 import { clipPublishRoute } from './routes/clips.$clipId.publish'
+import { captionsSettingsRoute } from './routes/settings.captions'
 
 export const routeTree = rootRoute.addChildren([
   indexRoute,
@@ -19,4 +20,5 @@ export const routeTree = rootRoute.addChildren([
   brandTemplateRoute,
   socialAccountsRoute,
   clipPublishRoute,
+  captionsSettingsRoute,
 ])
