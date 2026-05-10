@@ -89,6 +89,11 @@ if _HAS_PYDANTIC_SETTINGS:
         # cannot survive process restarts in that mode.
         oauth_encrypt_key: str | None = None
 
+        # ── Publish scheduler (W1.4) ──────────────────────────────────────────
+        scheduler_enabled: bool = False
+        scheduler_poll_seconds: int = 30
+        scheduler_max_concurrent: int = 3
+
         # ── CORS ──────────────────────────────────────────────────────────────
         cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 

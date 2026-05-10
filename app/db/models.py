@@ -182,3 +182,54 @@ class SocialAccount(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_now, onupdate=_now
     )
+
+
+# Status state machine for PublishJob (W1.4).
+PUBLISH_JOB_STATUSES: tuple[str, ...] = (
+    "pending", "queued", "posting", "published", "failed", "cancelled",
+)
+
+
+class PublishJob(Base):
+    """Scheduled or immediate publish to a social platform (W1.4)."""
+
+    __tablename__ = "publish_jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    clip_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("clips.id", ondelete="CASCADE", name="fk_publish_jobs_clip_id"),
+        nullable=False,
+        index=True,
+    )
+    social_account_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey(
+            "social_accounts.id",
+            ondelete="CASCADE",
+            name="fk_publish_jobs_social_account_id",
+        ),
+        nullable=False,
+    )
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    hashtags: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", index=True
+    )
+    schedule_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    posted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    external_post_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    external_post_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now, onupdate=_now
+    )
