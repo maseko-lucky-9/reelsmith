@@ -107,6 +107,9 @@ if _HAS_PYDANTIC_SETTINGS:
         pexels_api_key: str | None = None
         broll_cache_dir: str = "data/broll-cache"
 
+        # ── Bulk export (W3.7) ────────────────────────────────────────────────
+        bulk_export_max_clips: int = 200
+
         # ── Long-stage hardening (W2.10) ──────────────────────────────────────
         # Per-stage soft timeout in seconds. Workers respect this to abort
         # runaway voice-over / demucs / animated-caption renders.
