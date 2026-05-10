@@ -17,6 +17,7 @@ from app.bus.event_bus import AsyncEventBus
 from app.bus.job_store import InMemoryJobStore, SqlJobStore
 from app.domain.events import Event, EventType
 from app.routers import (
+    ai_hook,
     brand_templates,
     captions,
     clip_edits,
@@ -198,6 +199,7 @@ def create_app() -> FastAPI:
     app.include_router(renders.router)
     app.include_router(social_publish.router)
     app.include_router(xml_export.router)
+    app.include_router(ai_hook.router)
 
     # Serve the built React app in production (YTVIDEO_SERVE_FRONTEND=true).
     if settings.serve_frontend:

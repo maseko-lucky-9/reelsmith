@@ -106,6 +106,8 @@ class ClipRecord(Base):
     liked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     disliked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     retired: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    ai_hook_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ai_hook_audio_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_now
     )

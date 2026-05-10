@@ -94,6 +94,10 @@ if _HAS_PYDANTIC_SETTINGS:
         scheduler_poll_seconds: int = 30
         scheduler_max_concurrent: int = 3
 
+        # ── AI Hook (W1.7) ────────────────────────────────────────────────────
+        ai_hook_enabled: bool = True
+        ai_hook_max_chars: int = 80
+
         # ── CORS ──────────────────────────────────────────────────────────────
         cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
