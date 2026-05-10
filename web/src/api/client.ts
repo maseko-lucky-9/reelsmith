@@ -182,4 +182,183 @@ export const api = {
 
   deleteBrandTemplate: (id: string) =>
     apiFetch<void>(`/api/brand-templates/${id}`, { method: 'DELETE' }),
+
+  // ── Wave 1 — clip edits (timeline) ────────────────────────────────────────
+  getClipEdit: (clipId: string) =>
+    apiFetch<ClipEditState>(`/api/clips/${clipId}/edit`),
+
+  upsertClipEdit: (clipId: string, body: ClipEditUpsert) =>
+    apiFetch<ClipEditState>(`/api/clips/${clipId}/edit`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+
+  deleteClipEdit: (clipId: string) =>
+    apiFetch<void>(`/api/clips/${clipId}/edit`, { method: 'DELETE' }),
+
+  getClipRenderPlan: (clipId: string) =>
+    apiFetch<RenderPlan>(`/api/clips/${clipId}/edit/plan`),
+
+  // ── Wave 1 — AI hook ─────────────────────────────────────────────────────
+  generateAiHook: (clipId: string) =>
+    apiFetch<{ clip_id: string; hook: string }>(
+      `/api/clips/${clipId}/ai-hook`,
+      { method: 'POST' },
+    ),
+
+  // ── Wave 1 — Speech enhance ──────────────────────────────────────────────
+  enhanceSpeech: (clipId: string) =>
+    apiFetch<{ clip_id: string; output_path: string; provider: string }>(
+      `/api/clips/${clipId}/enhance-speech`,
+      { method: 'POST' },
+    ),
+
+  // ── Wave 1 — XML export ──────────────────────────────────────────────────
+  xmlExportUrl: (clipId: string, format: 'premiere' | 'davinci' = 'premiere') =>
+    `${BASE}/api/clips/${clipId}/export.xml?format=${format}`,
+
+  // ── Wave 1 — Reprompt ────────────────────────────────────────────────────
+  repromptJob: (jobId: string, body: RepromptRequest) =>
+    apiFetch<{
+      job_id: string
+      status: string
+      prompt: string | null
+      pipeline_options: Record<string, unknown>
+    }>(`/api/jobs/${jobId}/reprompt`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  // ── Wave 1 — Social accounts ─────────────────────────────────────────────
+  listSocialAccounts: () =>
+    apiFetch<SocialAccount[]>('/api/social/accounts'),
+
+  createSocialAccount: (body: SocialAccountCreate) =>
+    apiFetch<SocialAccount>('/api/social/accounts', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  deleteSocialAccount: (id: string) =>
+    apiFetch<void>(`/api/social/accounts/${id}`, { method: 'DELETE' }),
+
+  // ── Wave 1 — Publish jobs ────────────────────────────────────────────────
+  createPublish: (body: PublishCreate) =>
+    apiFetch<PublishJob>('/api/social/publish', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  getPublish: (id: string) =>
+    apiFetch<PublishJob>(`/api/social/publish/${id}`),
+
+  listPublishForClip: (clipId: string) => {
+    const q = new URLSearchParams({ clip_id: clipId })
+    return apiFetch<PublishJob[]>(`/api/social/publish?${q}`)
+  },
+}
+
+// ── Wave 1 types ────────────────────────────────────────────────────────────
+
+export interface TimelineItem {
+  start: number
+  end: number
+  [key: string]: unknown
+}
+
+export interface TimelineTrack {
+  kind: 'video' | 'caption' | 'text-overlay'
+  items: TimelineItem[]
+}
+
+export interface TimelinePayload {
+  tracks: TimelineTrack[]
+}
+
+export interface ClipEditState {
+  clip_id: string
+  timeline: TimelinePayload
+  version: number
+  created_at: string
+  updated_at: string
+}
+
+export interface ClipEditUpsert {
+  timeline: TimelinePayload
+  version?: number
+}
+
+export interface RenderPlan {
+  duration: number
+  video: Array<{ start: number; end: number; src: string; trim_start: number }>
+  captions: Array<{ start: number; end: number; text: string; style: string }>
+  overlays: Array<{
+    start: number
+    end: number
+    text: string
+    x: number
+    y: number
+    font_size: number
+    color: string
+  }>
+}
+
+export interface RepromptRequest {
+  prompt?: string
+  length_range?: '0-1m' | '1-3m' | '3-5m' | '5-10m' | '10-15m'
+  length_min_seconds?: number
+  length_max_seconds?: number
+}
+
+export interface SocialAccount {
+  id: string
+  platform: 'youtube' | 'tiktok' | 'instagram' | 'linkedin' | 'x'
+  account_handle: string
+  display_name: string | null
+  expires_at: string | null
+  scopes: string[]
+  active: boolean
+  created_at: string
+}
+
+export interface SocialAccountCreate {
+  platform: SocialAccount['platform']
+  account_handle: string
+  display_name?: string
+  access_token: string
+  refresh_token?: string
+  expires_at?: string
+  scopes?: string[]
+}
+
+export interface PublishCreate {
+  clip_id: string
+  social_account_id: string
+  title?: string
+  description?: string
+  hashtags?: string[]
+  schedule_at?: string
+}
+
+export interface PublishJob {
+  id: string
+  clip_id: string
+  social_account_id: string
+  title: string | null
+  description: string | null
+  hashtags: string[]
+  status:
+    | 'pending'
+    | 'queued'
+    | 'posting'
+    | 'published'
+    | 'failed'
+    | 'cancelled'
+  schedule_at: string | null
+  posted_at: string | null
+  external_post_id: string | null
+  external_post_url: string | null
+  error: string | null
+  attempts: number
+  created_at: string
 }

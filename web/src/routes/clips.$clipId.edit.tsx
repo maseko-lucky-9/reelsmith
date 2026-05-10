@@ -21,6 +21,8 @@ import {
 import { rootRoute } from './root'
 import { api } from '@/api/client'
 import { toast } from 'sonner'
+import { useTimelineEditor } from '@/hooks/useTimelineEditor'
+import { MultiTrackTimeline } from '@/components/editor/MultiTrackTimeline'
 
 export const clipEditRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -58,6 +60,7 @@ export function ClipEditorPage() {
   const [duration, setDuration] = useState(0)
   const [activeWordIdx, setActiveWordIdx] = useState<number | null>(null)
   const [transcriptOnly, setTranscriptOnly] = useState(false)
+  const editor = useTimelineEditor(clipId)
 
   const clipsQuery = useQuery({
     queryKey: ['clips'],
@@ -135,10 +138,22 @@ export function ClipEditorPage() {
         </span>
 
         <div className="flex gap-1 ml-2">
-          <button disabled className="p-1.5 rounded-md text-zinc-600 cursor-not-allowed" title="Undo (coming soon)">
+          <button
+            type="button"
+            disabled={!editor.canUndo}
+            onClick={editor.undo}
+            className="p-1.5 rounded-md text-zinc-300 hover:text-white disabled:text-zinc-600 disabled:cursor-not-allowed"
+            title="Undo"
+          >
             <Undo2 className="w-4 h-4" />
           </button>
-          <button disabled className="p-1.5 rounded-md text-zinc-600 cursor-not-allowed" title="Redo (coming soon)">
+          <button
+            type="button"
+            disabled={!editor.canRedo}
+            onClick={editor.redo}
+            className="p-1.5 rounded-md text-zinc-300 hover:text-white disabled:text-zinc-600 disabled:cursor-not-allowed"
+            title="Redo"
+          >
             <Redo2 className="w-4 h-4" />
           </button>
         </div>
@@ -146,10 +161,21 @@ export function ClipEditorPage() {
         <div className="flex-1" />
 
         <button
-          disabled
-          className="px-3 py-1.5 rounded-lg border border-white/20 text-sm text-zinc-300 cursor-not-allowed opacity-60"
+          type="button"
+          disabled={!editor.isDirty || editor.isSaving}
+          onClick={() =>
+            editor.save().then(
+              () => toast.success('Saved'),
+              (e) => toast.error(`Save failed: ${e}`),
+            )
+          }
+          className="px-3 py-1.5 rounded-lg border border-white/20 text-sm text-zinc-300 hover:text-white hover:border-white/40 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
         >
-          Save changes
+          {editor.isSaving
+            ? 'Saving…'
+            : editor.isDirty
+              ? 'Save changes'
+              : 'Saved'}
         </button>
 
         <a
@@ -278,31 +304,39 @@ export function ClipEditorPage() {
 
       {/* Bottom timeline */}
       <div
-        className="h-14 flex items-center gap-4 px-4 border-t border-white/8 flex-shrink-0"
+        className="px-4 pt-3 pb-4 border-t border-white/8 flex-shrink-0 flex flex-col gap-3"
         style={{ background: 'var(--sidebar-bg)' }}
       >
-        <button
-          onClick={togglePlay}
-          className="p-1.5 rounded-md text-zinc-300 hover:text-white hover:bg-white/10 transition-colors"
-        >
-          {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-        </button>
+        <div className="flex items-center gap-4">
+          <button
+            onClick={togglePlay}
+            className="p-1.5 rounded-md text-zinc-300 hover:text-white hover:bg-white/10 transition-colors"
+          >
+            {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+          </button>
 
-        <span className="text-xs text-zinc-400 font-mono whitespace-nowrap">
-          {formatVideoTime(currentTime)} / {formatVideoTime(duration)}
-        </span>
+          <span className="text-xs text-zinc-400 font-mono whitespace-nowrap">
+            {formatVideoTime(currentTime)} / {formatVideoTime(duration)}
+          </span>
 
-        <input
-          type="range"
-          min={0}
-          max={duration || 1}
-          step={0.01}
-          value={currentTime}
-          onChange={(e) => {
-            const v = videoRef.current
-            if (v) v.currentTime = Number(e.target.value)
-          }}
-          className="flex-1 h-1 accent-white cursor-pointer"
+          <input
+            type="range"
+            min={0}
+            max={duration || 1}
+            step={0.01}
+            value={currentTime}
+            onChange={(e) => {
+              const v = videoRef.current
+              if (v) v.currentTime = Number(e.target.value)
+            }}
+            className="flex-1 h-1 accent-white cursor-pointer"
+          />
+        </div>
+
+        <MultiTrackTimeline
+          timeline={editor.timeline}
+          duration={Math.max(duration, 1)}
+          onChange={editor.setTimeline}
         />
       </div>
     </div>
