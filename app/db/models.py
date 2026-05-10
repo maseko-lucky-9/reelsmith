@@ -78,6 +78,7 @@ class BrandTemplate(Base):
     caption_style: Mapped[dict | None] = mapped_column(JSON, nullable=True, default=dict)
     intro_clip_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     outro_clip_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    vocabulary: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_now
     )
@@ -254,6 +255,30 @@ class CaptionStyle(Base):
     primary_color: Mapped[str] = mapped_column(String(16), nullable=False, default="#ffffff")
     highlight_color: Mapped[str | None] = mapped_column(String(16), nullable=True)
     stroke_color: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now
+    )
+
+
+class BrandTemplateFont(Base):
+    """Per-role typography for a brand template (W2.8)."""
+
+    __tablename__ = "brand_template_fonts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    brand_template_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey(
+            "brand_templates.id",
+            ondelete="CASCADE",
+            name="fk_brand_template_fonts_template",
+        ),
+        nullable=False,
+        index=True,
+    )
+    role: Mapped[str] = mapped_column(String(32), nullable=False)  # heading|body|caption
+    family: Mapped[str] = mapped_column(String(128), nullable=False)
+    path: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_now
     )
