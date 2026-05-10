@@ -19,6 +19,7 @@ from app.domain.events import Event, EventType
 from app.routers import (
     ai_hook,
     brand_templates,
+    bulk_export,
     captions,
     clip_edits,
     clips,
@@ -204,6 +205,7 @@ def create_app() -> FastAPI:
     app.include_router(ai_hook.router)
     app.include_router(enhance_speech.router)
     app.include_router(reprompt.router)
+    app.include_router(bulk_export.router)
 
     # Serve the built React app in production (YTVIDEO_SERVE_FRONTEND=true).
     if settings.serve_frontend:
