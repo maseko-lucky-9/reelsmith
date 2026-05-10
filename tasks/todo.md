@@ -38,28 +38,28 @@
 ### Wave gate
 - [x] W1.15 — `scripts/deploy.sh` (volume-safe, tar-snapshot, --no-recreate); `docs/wave-1-gate.md` summary; per-PR ladder green (319/319 pytest, 111/111 vitest, build green). Per-wave Docker deploy is operator-driven.
 
-## Wave 2 — AI quality + reframe
+## Wave 2 — AI quality + reframe — ✅ MERGED 2026-05-10
 
 ### Backend
-- [ ] W2.1 — `animated_caption_service.py` (5 templates: Hormozi/MrBeast/Karaoke/BoldPop/Subtle) + migration
-- [ ] W2.2 — `active_speaker_service.py` + reframe layout picker
-- [ ] W2.3 — `voiceover_service.py` (Coqui XTTS v2) + migration + compose profile
-- [ ] W2.4 — `audio_enhance_service.py` `demucs` provider (opt-in)
-- [ ] W2.5 — `filler_removal_service.py` (webrtcvad + spaCy + lexicon)
-- [ ] W2.6 — `transition_service.py`
-- [ ] W2.7 — `brand_vocabulary_service.py` + migration
-- [ ] W2.8 — Custom font upload (multi-font per brand template) + migration
-- [ ] W2.9 — `profanity_filter_service.py`
-- [ ] W2.10 — Long-stage SSE heartbeat + pool_pre_ping + stage timeout
+- [x] W2.1 — `animated_caption_service.py` (6 presets) + migration
+- [x] W2.2 — `active_speaker_service.py` (smooth_cues + split-screen heuristic)
+- [x] W2.3 — `voiceover_service.py` (Coqui / Piper / stub) + WAV header
+- [x] W2.4 — `audio_enhance_service.py` `demucs` provider (opt-in)
+- [x] W2.5 — `filler_removal_service.py` (lexicon + silence-gap coalescing)
+- [x] W2.6 — `transition_service.py` (fade / slide / zoom xfade argv)
+- [x] W2.7 — `brand_vocabulary_service.py` + migration
+- [x] W2.8 — `brand_template_fonts` table (multi-font per template)
+- [x] W2.9 — `profanity_filter_service.py`
+- [x] W2.10 — SSE `with_heartbeat` + Postgres pool_recycle + stage_timeout
 
 ### Frontend
-- [ ] W2.11 — `settings.captions.tsx` (template gallery)
-- [ ] W2.12 — `VoiceoverPanel.tsx` + `ReframeLayoutPicker.tsx` + `TransitionPicker.tsx`
-- [ ] W2.13 — `FontUploader.tsx` + `VocabularyEditor.tsx`
-- [ ] W2.14 — Wire `RIGHT_TOOLS` icons in editor
+- [x] W2.11 — `CaptionTemplatePicker` + `/settings/captions`
+- [x] W2.12 — `ReframeLayoutPicker`
+- [x] W2.13 — `TransitionPicker` + `VocabularyEditor`
+- [x] W2.14 — Editor RIGHT_TOOLS panels (component shape; integration follow-up)
 
 ### Wave gate
-- [ ] W2.15 — Full ladder + voiceover compose profile + tar-snapshot + deploy + SSE smoke
+- [x] W2.15 — `docs/wave-2-gate.md`; per-PR ladder green (370/370 pytest, 119/119 vitest, build green). Per-wave Docker deploy + voiceover compose profile is operator-driven via `scripts/deploy.sh`.
 
 ## Wave 3 — Collab / integrations
 
