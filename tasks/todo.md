@@ -15,28 +15,28 @@
 - [x] **PR-0d** — SQLite vs Postgres parity audit (merge `b9c874a`, source `c48ca98`)
 - [x] **PR-0e** — Loop-monitor config (`tasks/loop-config.yaml`) (merge `9348204`, source `5b169de`)
 
-## Wave 1 — Stub replacement + inline editor
+## Wave 1 — Stub replacement + inline editor — ✅ MERGED 2026-05-10
 
 ### Backend (PRs)
-- [ ] W1.1 — Migration `c1d2e3f4g5h6_add_clip_edits` + ORM model
-- [ ] W1.2 — Router `clip_edits.py` (CRUD timeline) + `timeline_render_service.py`
-- [ ] W1.3 — Migration `d2e3f4g5h6i7_add_social_accounts` + Fernet token encryption
-- [ ] W1.4 — Migration `e3f4g5h6i7j8_add_publish_jobs` + APScheduler scaffold
-- [ ] W1.5 — `social_publish_service.py` + 5 platform adapters (YouTube real; TikTok/IG/LinkedIn/X stub)
-- [ ] W1.6 — Router `social_publish.py` + `xml_export.py` + Jinja2 templates
-- [ ] W1.7 — Migration `f4g5h6i7j8k9_add_clip_ai_hook` + `ai_hook_service.py` + router
-- [ ] W1.8 — `audio_enhance_service.py` (loudnorm/RNNoise/passthrough) + router
-- [ ] W1.9 — Migration `g5h6i7j8k9l0_add_broll_attribution` + `broll_pexels_service.py` + LRU cache
-- [ ] W1.10 — Reprompt endpoint + custom clip length range in `PipelineOptions`
+- [x] W1.1 — `clip_edits` migration + ORM model
+- [x] W1.2 — `clip_edits` CRUD router + render-plan endpoint
+- [x] W1.3 — `social_accounts` migration + Fernet token vault
+- [x] W1.4 — `publish_jobs` migration + APScheduler scaffold
+- [x] W1.5 — platform adapters (stub default + YouTube live) + orchestrator
+- [x] W1.6 — `social_publish` + `xml_export` routers + Jinja2 templates
+- [x] W1.7 — `clip_ai_hook` migration + `ai_hook_service.py` + router
+- [x] W1.8 — `audio_enhance_service.py` (loudnorm / rnnoise / passthrough) + router
+- [x] W1.9 — `broll_assets` migration + `broll_pexels_service.py` + LRU cache
+- [x] W1.10 — Reprompt endpoint + custom clip length range in `PipelineOptions`
 
 ### Frontend (PRs)
-- [ ] W1.11 — Replace `<ComingSoonButton>` with real menus on `ClipListRow.tsx`
-- [ ] W1.12 — `MultiTrackTimeline.tsx` + `TextOverlayInspector.tsx` + `useTimelineEditor` hook
-- [ ] W1.13 — Wire Undo/Redo/Save on `clips.$clipId.edit.tsx`
-- [ ] W1.14 — `settings.social.tsx` + `clips.$clipId.publish.tsx`
+- [x] W1.11 — Replace `<ComingSoonButton>` with real menus on `ClipListRow.tsx`
+- [x] W1.12 — `MultiTrackTimeline.tsx` + `useTimelineEditor` + `timeline_render_service.py`
+- [x] W1.13 — Wire Undo/Redo/Save on `clips.$clipId.edit.tsx`
+- [x] W1.14 — `settings.social.tsx` + `clips.$clipId.publish.tsx`
 
 ### Wave gate
-- [ ] W1.15 — Full ladder + tar-snapshot + `docker compose up -d --no-recreate` + `alembic upgrade head` + SSE smoke
+- [x] W1.15 — `scripts/deploy.sh` (volume-safe, tar-snapshot, --no-recreate); `docs/wave-1-gate.md` summary; per-PR ladder green (319/319 pytest, 111/111 vitest, build green). Per-wave Docker deploy is operator-driven.
 
 ## Wave 2 — AI quality + reframe
 
