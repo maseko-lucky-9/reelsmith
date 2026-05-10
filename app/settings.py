@@ -83,6 +83,12 @@ if _HAS_PYDANTIC_SETTINGS:
         require_auth: bool = False
         api_key: str | None = None
 
+        # ── OAuth at-rest encryption (W1.3) ───────────────────────────────────
+        # Fernet key (URL-safe base64-encoded 32 bytes). When unset, the
+        # token vault falls back to an ephemeral in-process key — tokens
+        # cannot survive process restarts in that mode.
+        oauth_encrypt_key: str | None = None
+
         # ── CORS ──────────────────────────────────────────────────────────────
         cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 

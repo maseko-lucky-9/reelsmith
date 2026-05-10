@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -150,3 +150,35 @@ class ClipEdit(Base):
     )
 
     clip: Mapped[ClipRecord] = relationship("ClipRecord", back_populates="edit")
+
+
+class SocialAccount(Base):
+    """OAuth identity for a publishing platform (W1.3).
+
+    Tokens are Fernet-encrypted at rest. Refresh handled by
+    ``social_publish_service`` with ``SELECT … FOR UPDATE`` to
+    serialise concurrent refreshes.
+    """
+
+    __tablename__ = "social_accounts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    platform: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    account_handle: Mapped[str] = mapped_column(String(255), nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    access_token_enc: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    refresh_token_enc: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    scopes: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    owner_id: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="local", index=True
+    )
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now, onupdate=_now
+    )
