@@ -6,14 +6,14 @@
 
 ---
 
-## Pre-flight (Wave 0)
+## Pre-flight (Wave 0) — ✅ MERGED to local main 2026-05-10
 
-- [x] **PR-INTRO** — ADR-003 + URP report + tasks/todo.md
-- [ ] **PR-0a** — Remove `streamlit==1.56.0` from `requirements.txt`
-- [ ] **PR-0b** — Snapshot test for `app/services/broll_service.py::find_broll` (locks behavior before W1 reorders stage)
-- [ ] **PR-0c** — gitleaks pre-commit + `.gitignore` audit
-- [ ] **PR-0d** — SQLite vs Postgres parity audit
-- [ ] **PR-0e** — Loop-monitor config (`tasks/loop-config.yaml`) — Ralph max-retry=3 per same-test failure
+- [x] **PR-INTRO** — ADR-003 + URP report + tasks/todo.md (merge `f886c8f`, source `7a71002`)
+- [x] **PR-0a** — Remove `streamlit==1.56.0` from `requirements.txt` (merge `673b347`, source `fe7f331`)
+- [x] **PR-0b** — Snapshot test for `app/services/broll_service.py::find_broll` (merge `e4d6693`, source `dba3606`) — 17/17 green
+- [x] **PR-0c** — gitleaks pre-commit + `.gitignore` audit (merge `b8824d5`, source `7def175`)
+- [x] **PR-0d** — SQLite vs Postgres parity audit (merge `b9c874a`, source `c48ca98`)
+- [x] **PR-0e** — Loop-monitor config (`tasks/loop-config.yaml`) (merge `9348204`, source `5b169de`)
 
 ## Wave 1 — Stub replacement + inline editor
 
