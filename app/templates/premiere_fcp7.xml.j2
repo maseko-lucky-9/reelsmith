@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE xmeml>
+<xmeml version="5">
+  <sequence id="reelsmith-{{ clip.id }}">
+    <name>{{ clip.title|e or 'ReelSmith Clip' }}</name>
+    <duration>{{ duration_frames }}</duration>
+    <rate>
+      <timebase>{{ fps }}</timebase>
+      <ntsc>FALSE</ntsc>
+    </rate>
+    <media>
+      <video>
+        <track>
+          <clipitem id="reelsmith-{{ clip.id }}-clip">
+            <name>{{ clip.title|e or 'clip' }}</name>
+            <duration>{{ duration_frames }}</duration>
+            <rate>
+              <timebase>{{ fps }}</timebase>
+              <ntsc>FALSE</ntsc>
+            </rate>
+            <start>0</start>
+            <end>{{ duration_frames }}</end>
+            <in>0</in>
+            <out>{{ duration_frames }}</out>
+            <file id="reelsmith-{{ clip.id }}-file">
+              <name>{{ filename|e }}</name>
+              <pathurl>file://{{ pathurl|e }}</pathurl>
+            </file>
+          </clipitem>
+        </track>
+      </video>
+    </media>
+  </sequence>
+</xmeml>

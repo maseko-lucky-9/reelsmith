@@ -26,9 +26,11 @@ from app.routers import (
     jobs,
     media,
     renders,
+    social_publish,
     subtitle_images,
     transcriptions,
     uploads,
+    xml_export,
 )
 from app.settings import settings
 from app.workers.orchestrator import run_orchestrator
@@ -194,6 +196,8 @@ def create_app() -> FastAPI:
     app.include_router(captions.router)
     app.include_router(subtitle_images.router)
     app.include_router(renders.router)
+    app.include_router(social_publish.router)
+    app.include_router(xml_export.router)
 
     # Serve the built React app in production (YTVIDEO_SERVE_FRONTEND=true).
     if settings.serve_frontend:
