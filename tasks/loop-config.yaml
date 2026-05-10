@@ -1,0 +1,167 @@
+# Ralph autonomous loop configuration for the OpusClip parity programme.
+#
+# Read by the loop-monitor before each PR attempt. Authoritative source
+# for retry budgets, escalation thresholds, and gate definitions.
+#
+# PR-0e · ADR-003 §pre-flight · Appendix A.5
+
+version: 1
+programme: opusclip-parity
+plan: ~/.claude/plans/reelsmith-if-missing-functionalities-compiled-llama.md
+adr: docs/decisions/003-opusclip-feature-parity.md
+
+# ── Retry / escalation budgets ──────────────────────────────────────────────
+
+retry:
+  # Max consecutive failures of the SAME test before escalating to user.
+  # Distinct from total retries — a flake that fails once then passes resets
+  # the counter. Implementation: loop_monitor compares the failing test
+  # nodeid + assertion fingerprint across attempts.
+  max_consecutive_same_test_failures: 3
+
+  # Max total attempts on a single PR before escalating.
+  max_pr_attempts: 5
+
+  # Cooldown between attempts (seconds). Avoids hammering CI.
+  attempt_cooldown_seconds: 30
+
+# ── Escalation contract ─────────────────────────────────────────────────────
+
+escalation:
+  channel: user_prompt
+  # When max_consecutive_same_test_failures hits, halt the loop and surface
+  # a structured report. The user resumes by editing tasks/todo.md or
+  # this file.
+  halt_on_escalation: true
+  # The loop appends a `flake_count` and `last_failure_fingerprint` field
+  # per task in tasks/todo.md when escalating.
+  annotate_todo: true
+
+# ── Per-PR gate (every PR before merge) ─────────────────────────────────────
+
+per_pr_gate:
+  steps:
+    - name: lint_python
+      cmd: "ruff check app/ tests/"
+    - name: lint_typescript
+      cmd: "pnpm --dir web lint"
+    - name: type_check_typescript
+      cmd: "pnpm --dir web tsc -b --noEmit"
+    - name: pytest_fast
+      cmd: "pytest -q -m 'not integration and not e2e and not playwright'"
+      timeout_seconds: 600
+    - name: vitest
+      cmd: "pnpm --dir web vitest run"
+      timeout_seconds: 600
+    - name: web_build
+      cmd: "pnpm --dir web build"
+      timeout_seconds: 900
+
+  # Reviewer pass — independent eye, runs out-of-context.
+  # Mitigates the CLAUDE.md "never self-approve" deviation (ADR-003).
+  reviewer:
+    tool: mcp__gemini-mcp__gemini_code_review
+    blocking: false   # advisory; does not gate merge unless severity=critical
+
+# ── Per-wave gate (run AFTER all wave PRs are merged) ───────────────────────
+
+per_wave_gate:
+  pre_deploy:
+    # Tar-snapshot the postgres volume before any deploy. NEVER -v.
+    - name: snapshot_postgres
+      cmd: |
+        ts=$(date +%Y%m%d-%H%M)
+        mkdir -p data/backups
+        docker run --rm \
+          -v reelsmith_postgres_data:/data:ro \
+          -v "$(pwd)/data/backups:/backup" \
+          busybox tar czf /backup/postgres-${ts}.tgz /data
+
+  steps:
+    - name: pytest_full
+      cmd: "pytest -q"
+      timeout_seconds: 1800
+    - name: pytest_integration
+      cmd: "pytest -m integration -q"
+      timeout_seconds: 1800
+    - name: pytest_e2e_wave
+      cmd: "pytest -m e2e -k 'wave${WAVE}' -q"
+      timeout_seconds: 1800
+    - name: playwright_wave
+      cmd: "pnpm --dir web playwright test --grep '@wave${WAVE}'"
+      timeout_seconds: 1800
+    - name: deploy_local
+      # NEVER -v. --no-recreate preserves volumes; explicit recreate only
+      # when migrations require it (set RECREATE=1 in env).
+      cmd: |
+        if [ "$RECREATE" = "1" ]; then
+          docker compose up -d
+        else
+          docker compose up -d --no-recreate
+        fi
+    - name: alembic_upgrade
+      cmd: "alembic upgrade head"
+    - name: smoke_health
+      cmd: "curl -fsS http://localhost:8000/api/health"
+    - name: smoke_sse
+      cmd: "scripts/smoke_sse.sh wave${WAVE}"
+      # Asserts the SSE stream emits the wave's expected events
+      # for a fixture URL with the wave's flags on.
+
+# ── Hard rails (programme-wide, never disabled) ─────────────────────────────
+
+guardrails:
+  forbidden_commands:
+    - "docker compose down -v"        # destroys postgres volume
+    - "git push --force"
+    - "git reset --hard origin"
+    - "rm -rf data/"
+    - "alembic downgrade base"
+
+  required_files_per_pr:
+    - "must reference ADR-003"
+    - "must update tasks/todo.md if completing a tracked item"
+
+  # Auto-tag every PR for downstream audit (Appendix A.14).
+  pr_label: ralph-autonomous
+
+# ── Wave overrides ──────────────────────────────────────────────────────────
+
+waves:
+  "1":
+    expected_events:
+      - "AudioEnhanced"
+      - "AiHookGenerated"
+      - "BRollApplied"
+      - "XmlExported"
+      - "PublishQueued"
+      - "PublishCompleted"
+      - "TimelineEdited"
+      - "TimelineRendered"
+    required_env:
+      - "YTVIDEO_BROLL_PROVIDER"
+      - "YTVIDEO_AUDIO_ENHANCE_PROVIDER"
+      - "YTVIDEO_AI_HOOK_ENABLED"
+
+  "2":
+    expected_events:
+      - "FillersRemoved"
+      - "VoiceoverGenerated"
+      - "AnimatedCaptionRendered"
+      - "TransitionsApplied"
+      - "BrandVocabApplied"
+    required_compose_profiles:
+      - "voiceover"
+    required_env:
+      - "YTVIDEO_VOICEOVER_PROVIDER"
+      - "YTVIDEO_REFRAME_PROVIDER"
+      - "YTVIDEO_FILLER_REMOVE_ENABLED"
+
+  "3":
+    expected_events:
+      - "ScheduledPostQueued"
+      - "WebhookDispatched"
+      - "BulkExportCompleted"
+      - "ShareLinkCreated"
+      - "AnalyticsRefreshed"
+    required_db: postgres   # SKIP LOCKED scheduler is Postgres-only
