@@ -57,6 +57,21 @@ def rnnoise_argv(in_path: str, out_path: str, *, model_path: str | None = None) 
     )
 
 
+def demucs_argv(
+    in_path: str, out_dir: str, *, model: str = "htdemucs", two_stems: str | None = "vocals"
+) -> tuple[str, ...]:
+    """demucs source-separation argv (W2.4 — opt-in heavy path).
+
+    With ``two_stems='vocals'`` demucs outputs vocals.wav + no_vocals.wav
+    under ``out_dir/<model>/<basename>/``.
+    """
+    argv: list[str] = ["demucs", "-n", model, "-o", out_dir]
+    if two_stems:
+        argv.extend(["--two-stems", two_stems])
+    argv.append(in_path)
+    return tuple(argv)
+
+
 # ── Public surface ───────────────────────────────────────────────────────────
 
 
@@ -85,6 +100,9 @@ def enhance(
         argv = loudnorm_argv(in_path, out_path)
     elif provider == "rnnoise":
         argv = rnnoise_argv(in_path, out_path, model_path=model_path)
+    elif provider == "demucs":
+        # demucs writes to a directory; treat out_path as the dir for this provider.
+        argv = demucs_argv(in_path, out_path)
     else:
         raise AudioEnhanceError(f"unknown audio enhance provider: {provider!r}")
 
