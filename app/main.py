@@ -19,6 +19,7 @@ from app.domain.events import Event, EventType
 from app.routers import (
     brand_templates,
     captions,
+    clip_edits,
     clips,
     downloads,
     folders,
@@ -183,6 +184,7 @@ def create_app() -> FastAPI:
 
     app.include_router(jobs.router)
     app.include_router(clips.router)
+    app.include_router(clip_edits.router)
     app.include_router(media.router)
     app.include_router(uploads.router)
     app.include_router(brand_templates.router)
