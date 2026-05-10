@@ -4,7 +4,10 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text
+from sqlalchemy import (
+    Boolean, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -279,6 +282,142 @@ class BrandTemplateFont(Base):
     role: Mapped[str] = mapped_column(String(32), nullable=False)  # heading|body|caption
     family: Mapped[str] = mapped_column(String(128), nullable=False)
     path: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now
+    )
+
+
+# ── Wave 3 — collab + integrations ─────────────────────────────────────────
+
+
+class Workspace(Base):
+    __tablename__ = "workspaces"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now
+    )
+
+
+class WorkspaceMember(Base):
+    __tablename__ = "workspace_members"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "user_id", name="uq_wm_workspace_user"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    workspace_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("workspaces.id", ondelete="CASCADE", name="fk_wm_workspace"),
+        nullable=False, index=True,
+    )
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)  # owner|editor|viewer
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now
+    )
+
+
+class ScheduledPost(Base):
+    __tablename__ = "scheduled_posts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    publish_job_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("publish_jobs.id", ondelete="CASCADE", name="fk_sp_publish"),
+        nullable=False,
+    )
+    scheduled_for: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="scheduled"
+    )
+    worker_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    locked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now, onupdate=_now
+    )
+
+
+class ClipAnalyticsSnapshot(Base):
+    __tablename__ = "clip_analytics_snapshots"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    clip_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("clips.id", ondelete="CASCADE", name="fk_cas_clip"),
+        nullable=False, index=True,
+    )
+    platform: Mapped[str] = mapped_column(String(32), nullable=False)
+    external_post_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    impressions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    views: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    watch_time_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    likes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    comments: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    shares: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now
+    )
+
+
+class ShareLink(Base):
+    __tablename__ = "share_links"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    clip_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("clips.id", ondelete="CASCADE", name="fk_sl_clip"),
+        nullable=False, index=True,
+    )
+    token: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revoked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now
+    )
+
+
+class Webhook(Base):
+    __tablename__ = "webhooks"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    events: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    secret_enc: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now
+    )
+
+
+class ApiToken(Base):
+    __tablename__ = "api_tokens"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    token_prefix: Mapped[str] = mapped_column(String(16), nullable=False)
+    workspace_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("workspaces.id", ondelete="CASCADE", name="fk_at_workspace"),
+        nullable=False, default="local",
+    )
+    revoked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_now
     )
