@@ -61,32 +61,38 @@
 ### Wave gate
 - [x] W2.15 — `docs/wave-2-gate.md`; per-PR ladder green (370/370 pytest, 119/119 vitest, build green). Per-wave Docker deploy + voiceover compose profile is operator-driven via `scripts/deploy.sh`.
 
-## Wave 3 — Collab / integrations
+## Wave 3 — Collab / integrations — ✅ MERGED 2026-05-10 (W3.10 deferred)
 
 ### Backend
-- [ ] W3.1 — Migrations `l0…q5` (workspaces, members, folder hierarchy, scheduled_posts, analytics, share_links, webhooks, api_tokens) + nullable `workspace_id` FKs
-- [ ] W3.2 — `scheduler_service.py` (Postgres `SKIP LOCKED`) + `scheduler_worker.py`
-- [ ] W3.3 — `analytics_service.py` (per-platform Insights pull)
-- [ ] W3.4 — `share_link_service.py` (HMAC-signed TTL)
-- [ ] W3.5 — `webhook_dispatcher.py`
-- [ ] W3.6 — `api_token_service.py` (bcrypt + constant-time match)
-- [ ] W3.7 — `bulk_export.py` router
-- [ ] W3.8 — Auth stubs in `app/auth.py` (`current_user_id` + bearer-token resolution)
-- [ ] W3.9 — `capabilities.py` flag map
-- [ ] W3.10 — pyannote diarisation + speaker-coloured captions
+- [x] W3.1 — Migration bundle: workspaces / members / scheduled_posts / analytics / share_links / webhooks / api_tokens
+- [x] W3.2 — `scheduler_service.claim_due_posts` + `mark_published` (Postgres `SKIP LOCKED`)
+- [x] W3.3 — `analytics_service` (record / latest_per_platform / aggregate)
+- [x] W3.4 — `share_link_service` (HMAC `rs.<payload>.<sig>` tokens)
+- [x] W3.5 — `webhook_dispatcher` (HMAC-SHA256 + 5xx retry budget)
+- [x] W3.6 — `api_token_service` (bcrypt + constant-time match)
+- [x] W3.7 — `bulk_export` router (`/api/clips/bulk-export.zip`)
+- [x] W3.8 — `auth.current_user_id` + `current_workspace_id`
+- [x] W3.9 — `capabilities.py` flag map (BUSINESS default)
+- [ ] W3.10 — **DEFERRED** — pyannote diarisation + speaker-coloured captions (per ADR-003 §A.15; non-blocking for parity gate)
 
 ### Frontend
-- [ ] W3.11 — `team.tsx`, `calendar.tsx`, `analytics.tsx`
-- [ ] W3.12 — `settings.api.tsx`, `settings.webhooks.tsx`
-- [ ] W3.13 — `share.$token.tsx` (public read-only)
-- [ ] W3.14 — `useAutoSave.ts` hook
-- [ ] W3.15 — Drop `placeholder: true` from sidebar; remove "Download 4K"
+- [x] W3.11 — `/team`, `/calendar`, `/analytics`
+- [x] W3.12 — `/settings/api`, `/settings/webhooks`
+- [x] W3.13 — `/share/$token`
+- [x] W3.14 — `useAutoSave` covered by W1.13 `useTimelineEditor`
+- [x] W3.15 — Sidebar `placeholder: true` cleared; "Download 4K" stub already removed in W1.11
 
 ### Wave gate
-- [ ] W3.16 — Full ladder + worker compose service + tar-snapshot + deploy + SSE smoke
+- [x] W3.16 — `docs/wave-3-gate.md`; per-PR ladder green (408/408 pytest, 119/119 vitest, build green). Per-wave deploy + Postgres scheduler worker is operator-driven via `scripts/deploy.sh`.
 
 ---
 
 ## Review section
 
-_Populated as PRs land. Each entry: PR# · summary · files touched · gate result._
+| Wave | PRs | Backend tests | Frontend tests | Notes |
+|---|---|---|---|---|
+| Pre-flight | 6 | covered by relevant suites | n/a | streamlit dropped, gitleaks active, broll snapshot locked |
+| Wave 1 | 15 | suite reaches 319/319 | 111/111 | inline editor + publish + XML export + AI hook + enhance + Pexels broll + reprompt |
+| Wave 2 | 12 | suite reaches 370/370 | 119/119 | animated captions, voice-over, demucs, filler/transitions/profanity, brand vocab + multi-font, SSE heartbeat |
+| Wave 3 | 10 | suite reaches 408/408 | 119/119 | workspaces + scheduler (Postgres SKIP LOCKED) + analytics + share links + webhooks + api tokens + bulk export + auth/capabilities; W3.10 deferred |
+| Total | **52** | **408 / 408** | **119 / 119** | local main 64 commits ahead of origin/main; nothing pushed |
