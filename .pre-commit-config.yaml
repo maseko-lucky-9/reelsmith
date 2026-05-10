@@ -1,0 +1,31 @@
+# Pre-commit configuration for ReelSmith.
+#
+# Install once:
+#   pip install pre-commit
+#   pre-commit install
+#
+# Run on demand:
+#   pre-commit run --all-files
+#
+# PR-0c · ADR-003 · auto-merge guardrail (Appendix A.17)
+
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+        name: gitleaks (secrets scan, staged files)
+        # gitleaks protect uses git diff --cached so it only scans staged content.
+        args: ["protect", "--staged", "--verbose", "--redact"]
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+        args: ["--markdown-linebreak-ext=md"]
+      - id: detect-private-key

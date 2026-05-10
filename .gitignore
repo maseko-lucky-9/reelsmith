@@ -33,3 +33,13 @@ web/playwright-report/
 .claude/settings.json
 .omc/
 .env
+.env.*
+!.env.example
+
+# Wave-1+ ephemeral data dirs (tar-snapshot via scripts/deploy.sh)
+data/social-stubs/
+data/broll-cache/
+data/backups/
+
+# OAuth token caches (Fernet-encrypted at rest, but never tracked)
+data/oauth-tokens/

@@ -1,0 +1,24 @@
+# gitleaks configuration for ReelSmith.
+#
+# PR-0c · ADR-003 · pre-flight stabilisation
+#
+# Defaults extend the upstream ruleset; allowlist below covers known
+# false-positive sources (test fixtures, .env.example placeholders).
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known false-positive paths and patterns"
+paths = [
+  '''(.*?)\.env\.example$''',
+  '''tests/.*?fixtures?/.*''',
+  '''docs/decisions/.*''',
+  '''docs/research/.*''',
+]
+regexes = [
+  # Placeholder tokens used in docs / examples
+  '''(?i)<your[_-]?[a-z_-]+>''',
+  '''(?i)example[_-]?(api[_-]?)?key''',
+  '''(?i)PLACEHOLDER''',
+]
