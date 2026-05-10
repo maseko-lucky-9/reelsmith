@@ -117,3 +117,36 @@ class ClipRecord(Base):
     chapter: Mapped[ChapterRecord | None] = relationship(
         "ChapterRecord", back_populates="clips"
     )
+    edit: Mapped["ClipEdit | None"] = relationship(
+        "ClipEdit", back_populates="clip", uselist=False, cascade="all, delete-orphan"
+    )
+
+
+class ClipEdit(Base):
+    """Inline-editor timeline state for a clip (W1.1).
+
+    One row per clip; ``timeline`` JSON holds the multi-track editor
+    state (video / caption / text-overlay tracks). ``version``
+    increments on each PATCH for optimistic concurrency and audit.
+    """
+
+    __tablename__ = "clip_edits"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    clip_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("clips.id", ondelete="CASCADE", name="fk_clip_edits_clip_id"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    timeline: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now, onupdate=_now
+    )
+
+    clip: Mapped[ClipRecord] = relationship("ClipRecord", back_populates="edit")
