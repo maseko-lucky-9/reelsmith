@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { Link } from '@tanstack/react-router'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { ThumbsUp, ThumbsDown, Play } from 'lucide-react'
@@ -12,18 +13,6 @@ interface ClipListRowProps {
 }
 
 const SCORE_KEYS = ['hook', 'flow', 'value', 'trend'] as const
-
-function ComingSoonButton({ label }: { label: string }) {
-  return (
-    <button
-      disabled
-      title="Coming soon"
-      className="w-full text-left text-xs px-2.5 py-1.5 rounded-md border border-white/8 text-zinc-500 cursor-not-allowed opacity-50"
-    >
-      {label}
-    </button>
-  )
-}
 
 export function ClipListRow({ clip, rank, jobId }: ClipListRowProps) {
   const queryClient = useQueryClient()
@@ -138,33 +127,98 @@ export function ClipListRow({ clip, rank, jobId }: ClipListRowProps) {
       </div>
 
       {/* Right action col */}
-      <div className="w-36 flex-shrink-0 flex flex-col gap-1.5">
-        <ComingSoonButton label="Publish on Social" />
-        <ComingSoonButton label="Export XML" />
-        <ComingSoonButton label="Download 4K" />
+      <ClipActionMenu clip={clip} jobId={jobId} />
+    </div>
+  )
+}
 
-        <a
-          href={`/api/clips/${clip.clip_id}/video`}
-          download
-          className="w-full text-left text-xs px-2.5 py-1.5 rounded-md border border-white/20 text-zinc-200 hover:text-white hover:border-white/40 transition-colors"
-        >
-          Download HD
-        </a>
+function ClipActionMenu({ clip, jobId }: { clip: ClipRecord; jobId: string }) {
+  const queryClient = useQueryClient()
+  const [busy, setBusy] = useState<string | null>(null)
+  const [hook, setHook] = useState<string | null>(null)
 
-        <Link
-          to="/clips/$clipId/edit"
-          params={{ clipId: clip.clip_id }}
-          className="w-full text-left text-xs px-2.5 py-1.5 rounded-md border border-white/20 text-zinc-200 hover:text-white hover:border-white/40 transition-colors block"
-        >
-          Edit clip
-        </Link>
+  const aiHookMutation = useMutation({
+    mutationFn: () => api.generateAiHook(clip.clip_id),
+    onMutate: () => setBusy('ai-hook'),
+    onSettled: () => setBusy(null),
+    onSuccess: (resp) => setHook(resp.hook || '(no hook generated)'),
+  })
 
-        <ComingSoonButton label="AI hook" />
-        <ComingSoonButton label="Enhance speech" />
-        <ComingSoonButton label="Add B-Roll" />
-        <ComingSoonButton label="9:16" />
-        <ComingSoonButton label="Duplicate" />
-      </div>
+  const enhanceMutation = useMutation({
+    mutationFn: () => api.enhanceSpeech(clip.clip_id),
+    onMutate: () => setBusy('enhance'),
+    onSettled: () => {
+      setBusy(null)
+      void queryClient.invalidateQueries({ queryKey: ['clips', jobId] })
+    },
+  })
+
+  const baseBtn =
+    'w-full text-left text-xs px-2.5 py-1.5 rounded-md border border-white/20 text-zinc-200 hover:text-white hover:border-white/40 transition-colors disabled:opacity-50 disabled:cursor-wait'
+
+  return (
+    <div className="w-36 flex-shrink-0 flex flex-col gap-1.5">
+      <Link
+        to="/clips/$clipId/publish"
+        params={{ clipId: clip.clip_id }}
+        className={`${baseBtn} block`}
+      >
+        Publish on Social
+      </Link>
+
+      <a
+        href={api.xmlExportUrl(clip.clip_id, 'premiere')}
+        download
+        className={baseBtn}
+      >
+        Export XML (Premiere)
+      </a>
+      <a
+        href={api.xmlExportUrl(clip.clip_id, 'davinci')}
+        download
+        className={baseBtn}
+      >
+        Export FCPXML (Resolve)
+      </a>
+
+      <a
+        href={`/api/clips/${clip.clip_id}/video`}
+        download
+        className={baseBtn}
+      >
+        Download HD
+      </a>
+
+      <Link
+        to="/clips/$clipId/edit"
+        params={{ clipId: clip.clip_id }}
+        className={`${baseBtn} block`}
+      >
+        Edit clip
+      </Link>
+
+      <button
+        type="button"
+        disabled={busy === 'ai-hook'}
+        onClick={() => aiHookMutation.mutate()}
+        className={baseBtn}
+      >
+        {busy === 'ai-hook' ? 'Generating…' : 'AI hook'}
+      </button>
+      {hook ? (
+        <p className="text-[10px] text-emerald-400 line-clamp-2 px-0.5" title={hook}>
+          {hook}
+        </p>
+      ) : null}
+
+      <button
+        type="button"
+        disabled={busy === 'enhance'}
+        onClick={() => enhanceMutation.mutate()}
+        className={baseBtn}
+      >
+        {busy === 'enhance' ? 'Enhancing…' : 'Enhance speech'}
+      </button>
     </div>
   )
 }

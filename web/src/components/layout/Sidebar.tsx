@@ -30,7 +30,7 @@ const CREATE_ITEMS: NavItem[] = [
 const POST_ITEMS: NavItem[] = [
   { label: 'Calendar', icon: Calendar, to: '#', placeholder: true },
   { label: 'Analytics', icon: BarChart2, to: '#', placeholder: true },
-  { label: 'Social accounts', icon: Share2, to: '#', placeholder: true },
+  { label: 'Social accounts', icon: Share2, to: '/settings/social' },
 ]
 
 export function Sidebar() {

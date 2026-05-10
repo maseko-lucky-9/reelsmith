@@ -6,6 +6,8 @@ import { clipDetailRoute } from './routes/clips.$clipId'
 import { workflowRoute } from './routes/workflow'
 import { clipEditRoute } from './routes/clips.$clipId.edit'
 import { brandTemplateRoute } from './routes/settings.brand'
+import { socialAccountsRoute } from './routes/settings.social'
+import { clipPublishRoute } from './routes/clips.$clipId.publish'
 
 export const routeTree = rootRoute.addChildren([
   indexRoute,
@@ -15,4 +17,6 @@ export const routeTree = rootRoute.addChildren([
   workflowRoute,
   clipEditRoute,
   brandTemplateRoute,
+  socialAccountsRoute,
+  clipPublishRoute,
 ])
