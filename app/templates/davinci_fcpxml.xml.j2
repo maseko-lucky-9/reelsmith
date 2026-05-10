@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.10">
+  <resources>
+    <format id="r1" name="FFVideoFormat1080p{{ fps }}" frameDuration="1/{{ fps }}s" width="1080" height="1920"/>
+    <asset id="r2" name="{{ clip.title|e or 'clip' }}" duration="{{ duration_seconds }}s" hasVideo="1" hasAudio="1" format="r1">
+      <media-rep kind="original-media" src="file://{{ pathurl|e }}"/>
+    </asset>
+  </resources>
+  <library>
+    <event name="ReelSmith Export">
+      <project name="{{ clip.title|e or 'ReelSmith Clip' }}">
+        <sequence format="r1" duration="{{ duration_seconds }}s">
+          <spine>
+            <asset-clip ref="r2" offset="0s" name="{{ clip.title|e or 'clip' }}" duration="{{ duration_seconds }}s"/>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>
