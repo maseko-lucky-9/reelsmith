@@ -256,6 +256,12 @@ export const api = {
     const q = new URLSearchParams({ clip_id: clipId })
     return apiFetch<PublishJob[]>(`/api/social/publish?${q}`)
   },
+
+  // ── Wave 3 — bulk export ─────────────────────────────────────────────────
+  bulkExportUrl: (clipIds: string[]) => {
+    const params = clipIds.map((i) => `ids=${encodeURIComponent(i)}`).join('&')
+    return `${BASE}/api/clips/bulk-export.zip?${params}`
+  },
 }
 
 // ── Wave 1 types ────────────────────────────────────────────────────────────

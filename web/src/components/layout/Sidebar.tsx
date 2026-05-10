@@ -28,8 +28,8 @@ const CREATE_ITEMS: NavItem[] = [
 ]
 
 const POST_ITEMS: NavItem[] = [
-  { label: 'Calendar', icon: Calendar, to: '#', placeholder: true },
-  { label: 'Analytics', icon: BarChart2, to: '#', placeholder: true },
+  { label: 'Calendar', icon: Calendar, to: '/calendar' },
+  { label: 'Analytics', icon: BarChart2, to: '/analytics' },
   { label: 'Social accounts', icon: Share2, to: '/settings/social' },
 ]
 
