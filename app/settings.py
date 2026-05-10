@@ -107,6 +107,16 @@ if _HAS_PYDANTIC_SETTINGS:
         pexels_api_key: str | None = None
         broll_cache_dir: str = "data/broll-cache"
 
+        # ── Long-stage hardening (W2.10) ──────────────────────────────────────
+        # Per-stage soft timeout in seconds. Workers respect this to abort
+        # runaway voice-over / demucs / animated-caption renders.
+        stage_timeout_seconds: int = 1800
+        # SSE keep-alive heartbeat interval. Sent as ': ping\n\n' so it's a
+        # comment frame the client ignores. 0 disables.
+        sse_keepalive_seconds: int = 15
+        # Connection pool recycle (Postgres only).
+        db_pool_recycle_seconds: int = 1800
+
         # ── CORS ──────────────────────────────────────────────────────────────
         cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 

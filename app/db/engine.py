@@ -9,7 +9,12 @@ def get_engine() -> AsyncEngine:
     global _engine
     if _engine is None:
         from app.settings import settings
-        _engine = create_async_engine(settings.db_url, echo=False, pool_pre_ping=True)
+        kwargs: dict = {"echo": False, "pool_pre_ping": True}
+        # SQLite (single-file/memory) doesn't accept pool_recycle on the
+        # default StaticPool / NullPool that aiosqlite uses.
+        if not settings.db_url.startswith("sqlite"):
+            kwargs["pool_recycle"] = getattr(settings, "db_pool_recycle_seconds", 1800)
+        _engine = create_async_engine(settings.db_url, **kwargs)
     return _engine
 
 
