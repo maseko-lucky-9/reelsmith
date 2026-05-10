@@ -109,6 +109,9 @@ class ClipRecord(Base):
     ai_hook_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     ai_hook_audio_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     broll_assets: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    caption_style: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="static"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_now
     )
@@ -235,4 +238,22 @@ class PublishJob(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_now, onupdate=_now
+    )
+
+
+class CaptionStyle(Base):
+    """Catalog of caption-style presets (W2.1)."""
+
+    __tablename__ = "caption_styles"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    animation_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    font_family: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    font_size: Mapped[int] = mapped_column(Integer, nullable=False, default=42)
+    primary_color: Mapped[str] = mapped_column(String(16), nullable=False, default="#ffffff")
+    highlight_color: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    stroke_color: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now
     )
