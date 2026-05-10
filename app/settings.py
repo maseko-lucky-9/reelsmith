@@ -103,6 +103,10 @@ if _HAS_PYDANTIC_SETTINGS:
         audio_enhance_provider: str = "loudnorm"
         audio_enhance_rnnoise_model: str | None = None
 
+        # ── B-Roll Pexels (W1.9) ──────────────────────────────────────────────
+        pexels_api_key: str | None = None
+        broll_cache_dir: str = "data/broll-cache"
+
         # ── CORS ──────────────────────────────────────────────────────────────
         cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
