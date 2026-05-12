@@ -1,0 +1,6 @@
+title: Reelsmith
+description: Personal short-form video workflow tool.
+theme: minima
+include:
+  - TERMS.md
+  - PRIVACY.md
