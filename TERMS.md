@@ -1,3 +1,9 @@
+---
+title: Terms of Service — Reelsmith
+permalink: /TERMS/
+layout: default
+---
+
 # Terms of Service — Reelsmith
 
 **Effective date:** 2026-05-12

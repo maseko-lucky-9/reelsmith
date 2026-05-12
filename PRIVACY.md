@@ -1,3 +1,9 @@
+---
+title: Privacy Policy — Reelsmith
+permalink: /PRIVACY/
+layout: default
+---
+
 # Privacy Policy — Reelsmith
 
 **Effective date:** 2026-05-12
