@@ -16,7 +16,8 @@ COLUMNS = [
 
 def write_manifest(clips: list[dict], export_dir: str) -> str:
     out_path = str(Path(export_dir) / "manifest.csv")
-    with open(out_path, "w", newline="", encoding="utf-8") as f:
+    tmp_path = out_path + ".tmp"
+    with open(tmp_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=COLUMNS, extrasaction="ignore")
         writer.writeheader()
         for clip in clips:
@@ -36,5 +37,6 @@ def write_manifest(clips: list[dict], export_dir: str) -> str:
                 "job_id": clip.get("job_id", ""),
             }
             writer.writerow(row)
+    os.replace(tmp_path, out_path)
     log.info("Manifest written to %s (%d rows)", out_path, len(clips))
     return out_path
