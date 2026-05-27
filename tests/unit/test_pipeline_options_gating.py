@@ -103,6 +103,16 @@ async def _run_pipeline(tmp_path, pipeline_options: PipelineOptions, monkeypatch
     monkeypatch.setattr(orch.render_service, "render_clip", _fake_render)
     monkeypatch.setattr(orch.subtitle_image_service, "render_to_path", _fake_render_to_path)
     monkeypatch.setattr(orch.settings, "max_parallel_chapters", 1)
+    # Avoid real network/ffmpeg calls for the new W1/W2 stages
+    monkeypatch.setattr(orch.ai_hook_service, "generate_hook", lambda *a, **k: "")
+    monkeypatch.setattr(
+        orch.audio_enhance_service, "enhance",
+        lambda in_path, out_path, **k: (
+            Path(out_path).parent.mkdir(parents=True, exist_ok=True),
+            Path(out_path).write_bytes(b"\x00"),
+            out_path,
+        )[-1],
+    )
 
     received: list[Event] = []
 
@@ -209,8 +219,13 @@ async def test_all_off_only_download_and_folder(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_all_on_identical_to_full_pipeline(tmp_path, monkeypatch):
-    """All toggles on → identical event chain to today's full pipeline (regression)."""
-    opts = PipelineOptions()  # all defaults = True
+    """All toggles on → identical event chain to today's full pipeline (regression).
+
+    Note: ai_hook and filler_removal default to False (opt-in per W1.7/W2.5),
+    so "all on" must turn them on explicitly. The original regression intent
+    is preserved: no STAGE_SKIPPED events when every gated stage is enabled.
+    """
+    opts = PipelineOptions(ai_hook=True, filler_removal=True)
     events, store = await _run_pipeline(tmp_path, opts, monkeypatch)
     types = [e.type for e in events]
 

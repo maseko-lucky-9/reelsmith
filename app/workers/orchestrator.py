@@ -14,10 +14,13 @@ from app.bus.job_store import JobStore
 from app.domain.events import Event, EventType
 from app.domain.models import ChapterArtifacts, JobState, PipelineOptions
 from app.services import (
+    ai_hook_service,
+    audio_enhance_service,
     caption_service,
     clip_service,
     download_service,
     export_service,
+    filler_removal_service,
     folder_service,
     manifest_service,
     ollama_service,
@@ -86,6 +89,8 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
     # Enforce dependency rules server-side regardless of what UI sent
     if not opts.transcription:
         opts.captions = False
+        opts.filler_removal = False
+        opts.ai_hook = False
     if not opts.render:
         opts.reframe = False
         opts.broll = False
@@ -328,6 +333,25 @@ async def _process_chapter(
              job_id, index, index, title, start, end, chapter_duration)
     chapter_t0 = time.perf_counter()
 
+    # TODO(orchestrator-wiring-wave-2): integrate the remaining W1-W3 services.
+    # The following services are imported in the codebase but not yet wired
+    # into _process_chapter — each needs a deliberate insertion point + UX
+    # design before it lands:
+    #   * voiceover_service             — TTS over captions; replaces or
+    #                                     augments the original audio track
+    #                                     after filler_removal.
+    #   * animated_caption_service      — burned-in animated subs; either
+    #                                     replaces the static subtitle_image
+    #                                     pass or feeds an additional render
+    #                                     overlay.
+    #   * transition_service            — clip-to-clip transitions when more
+    #                                     than one chapter exists; orchestrator
+    #                                     would need a post-chapter join pass.
+    #   * brand_vocabulary_service      — pronunciation / spelling overrides
+    #                                     applied to transcript before captions.
+    #   * profanity_filter_service      — bleep/redact pass on words/captions.
+    #   * active_speaker_service        — informs reframe; would slot in just
+    #                                     before render when reframe=True.
     opts = pipeline_options or PipelineOptions()
     tmp_dir = cleanup_root
     clip_path = str(tmp_dir / f"chapter_{index}.mp4")
@@ -378,6 +402,50 @@ async def _process_chapter(
                 audio_path,
             )
 
+    # ── Audio enhancement (W1.8 — gated on audio_enhance) ────────────────────
+    # Replace the on-disk audio with the enhanced output so downstream stages
+    # (transcription, render) consume the cleaned track. We only run when we
+    # actually have an audio file (i.e. render=True or transcription=True
+    # caused extract_chapter_to_disk to fire above).
+    if opts.audio_enhance and Path(audio_path).exists():
+        log.info(
+            "[%s] Chapter %d  enhancing audio  provider=%s",
+            job_id, index, settings.audio_enhance_provider,
+        )
+        step_t0 = time.perf_counter()
+        enhanced_audio_path = str(tmp_dir / f"chapter_{index}_enhanced.wav")
+        try:
+            await asyncio.to_thread(
+                audio_enhance_service.enhance,
+                audio_path,
+                enhanced_audio_path,
+                provider=settings.audio_enhance_provider,
+                model_path=settings.audio_enhance_rnnoise_model,
+            )
+            # Hand-off: subsequent stages should read the enhanced track.
+            audio_path = enhanced_audio_path
+            await store.upsert_chapter(
+                job_id, lambda c: setattr(c, "audio_path", enhanced_audio_path), index
+            )
+            log.info(
+                "[%s] Chapter %d  audio enhanced (%.2fs)  path=%s",
+                job_id, index, time.perf_counter() - step_t0, enhanced_audio_path,
+            )
+            # TODO: emit EventType.AUDIO_ENHANCED once events.py adds it.
+        except Exception as exc:  # noqa: BLE001
+            # Non-fatal: fall back to the original audio. Enhancement is
+            # quality-of-life and must never block the rest of the pipeline.
+            log.warning(
+                "[%s] Chapter %d  audio enhancement failed (%s); using original audio",
+                job_id, index, exc,
+            )
+    elif not opts.audio_enhance:
+        log.info("[%s] Chapter %d  skipping audio_enhance", job_id, index)
+        await _emit(
+            bus, EventType.STAGE_SKIPPED, job_id,
+            stage_id="audio_enhance", chapter_index=index,
+        )
+
     # ── Transcribe ────────────────────────────────────────────────────────────
     words = []
     text = ""
@@ -398,6 +466,42 @@ async def _process_chapter(
     else:
         log.info("[%s] Chapter %d  skipping transcription", job_id, index)
         await _emit(bus, EventType.STAGE_SKIPPED, job_id, stage_id="transcribe", chapter_index=index)
+
+    # ── Filler removal (W2.5 — gated on filler_removal + transcription) ──────
+    # Strip filler tokens from the word list so downstream caption/render
+    # stages operate on the cleaned transcript. We rebuild ``text`` to keep
+    # social-content + clip.transcript in sync with the trimmed words.
+    if opts.filler_removal and opts.transcription and words:
+        log.info("[%s] Chapter %d  removing fillers  before=%d", job_id, index, len(words))
+        step_t0 = time.perf_counter()
+        spans = [
+            filler_removal_service.WordSpan(text=w.word, start=w.start, end=w.end)
+            for w in words
+        ]
+        # plan_keep_intervals collapses the kept WordSpans into (start, end)
+        # intervals. For caption/render alignment we want the per-word list
+        # filtered, which we do here directly with the same allowlist.
+        allowlist = {f.lower() for f in filler_removal_service.DEFAULT_FILLERS}
+        kept_words = [
+            w for w in words
+            if not filler_removal_service._is_filler(w.word, allowlist)
+        ]
+        if kept_words:
+            words = kept_words
+            text = " ".join(w.word for w in words)
+            await store.upsert_chapter(
+                job_id, lambda c: setattr(c, "transcript", text), index
+            )
+        log.info(
+            "[%s] Chapter %d  filler removal done (%.2fs)  after=%d",
+            job_id, index, time.perf_counter() - step_t0, len(words),
+        )
+        # TODO: emit EventType.FILLERS_REMOVED once events.py adds it.
+    elif not opts.filler_removal:
+        await _emit(
+            bus, EventType.STAGE_SKIPPED, job_id,
+            stage_id="filler_removal", chapter_index=index,
+        )
 
     # ── Captions ──────────────────────────────────────────────────────────────
     captions_obj = None
@@ -547,6 +651,44 @@ async def _process_chapter(
         })
 
     await store.upsert_clip(job_id, clip_id, _init_clip)
+
+    # ── AI hook (W1.7 — gated on ai_hook + transcript) ───────────────────────
+    # Generate a single punchy opening line per clip and stash it on the
+    # clip record (DB column ``ai_hook_text``). Needs the transcript to be
+    # meaningful, so we skip silently when transcription was off or empty.
+    if opts.ai_hook and text.strip():
+        log.info("[%s] Chapter %d  generating AI hook  model=%s", job_id, index, settings.ollama_model)
+        step_t0 = time.perf_counter()
+        try:
+            hook = await asyncio.to_thread(
+                ai_hook_service.generate_hook,
+                text,
+                base_url=settings.ollama_base_url,
+                model=settings.ollama_model,
+                timeout=settings.ollama_timeout_seconds,
+                max_chars=getattr(settings, "ai_hook_max_chars", 80),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[%s] Chapter %d  ai_hook failed: %s", job_id, index, exc)
+            hook = ""
+
+        if hook:
+            def _set_hook(c: dict[str, Any]) -> None:
+                c["ai_hook_text"] = hook
+
+            await store.upsert_clip(job_id, clip_id, _set_hook)
+            log.info(
+                "[%s] Chapter %d  ai_hook done (%.2fs)  hook=%r",
+                job_id, index, time.perf_counter() - step_t0, hook,
+            )
+            # TODO: emit EventType.AI_HOOK_GENERATED once events.py adds it.
+        else:
+            log.info("[%s] Chapter %d  ai_hook returned empty; skipping", job_id, index)
+    elif not opts.ai_hook:
+        await _emit(
+            bus, EventType.STAGE_SKIPPED, job_id,
+            stage_id="ai_hook", chapter_index=index,
+        )
 
     # ── Social content ────────────────────────────────────────────────────────
     if settings.ollama_enabled:
