@@ -6,6 +6,11 @@
     <asset id="r2" name="{{ clip.title|e or 'clip' }}" duration="{{ duration_seconds }}s" hasVideo="1" hasAudio="1" format="r1">
       <media-rep kind="original-media" src="file://{{ pathurl|e }}"/>
     </asset>
+    {% if clip.captions_burnt_path %}
+    <asset id="r3" name="{{ clip.title|e or 'clip' }}-captions" duration="{{ duration_seconds }}s" hasVideo="1" hasAudio="0" format="r1">
+      <media-rep kind="original-media" src="file://{{ clip.captions_burnt_path|e }}"/>
+    </asset>
+    {% endif %}
   </resources>
   <library>
     <event name="ReelSmith Export">
@@ -14,6 +19,11 @@
           <spine>
             <asset-clip ref="r2" offset="0s" name="{{ clip.title|e or 'clip' }}" duration="{{ duration_seconds }}s"/>
           </spine>
+          {% if clip.captions_burnt_path %}
+          <spine>
+            <asset-clip ref="r3" offset="0s" name="{{ clip.title|e or 'clip' }}-captions" duration="{{ duration_seconds }}s"/>
+          </spine>
+          {% endif %}
         </sequence>
       </project>
     </event>
