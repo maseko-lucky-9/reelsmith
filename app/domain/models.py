@@ -26,6 +26,9 @@ class PipelineOptions(BaseModel):
     ai_hook: bool = False
     # W1.8 — speech enhancement stage (additive; default on).
     audio_enhance: bool = True
+    # W2.5 — filler / silence removal on the transcribed word list (opt-in).
+    # Operates on transcription output, so requires ``transcription=True``.
+    filler_removal: bool = False
 
 
 ChapterStatus = Literal[
