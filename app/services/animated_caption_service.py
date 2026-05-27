@@ -20,7 +20,12 @@ import logging
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
+from typing import TYPE_CHECKING, Callable, Iterable, Sequence
+
+from app.domain.events import EventType, emit_from_sync
+
+if TYPE_CHECKING:  # pragma: no cover - import only for typing
+    from app.bus.event_bus import AsyncEventBus
 
 log = logging.getLogger(__name__)
 
@@ -331,6 +336,8 @@ def burn_animated_captions(
     style: str = "hormozi",
     *,
     invoker: Callable[[Sequence[str]], None] | None = None,
+    bus: "AsyncEventBus | None" = None,
+    job_id: str | None = None,
 ) -> str:
     """Burn styled captions onto ``clip_path`` and write to ``output_path``.
 
@@ -380,6 +387,10 @@ def burn_animated_captions(
             raise AnimatedCaptionBurnError(
                 f"ffmpeg: no output produced at {output_path}"
             )
+        emit_from_sync(
+            bus, job_id, EventType.ANIMATED_CAPTION_RENDERED,
+            {"style": style, "clip_path": clip_path, "output_path": output_path},
+        )
         return output_path
     finally:
         try:

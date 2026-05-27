@@ -20,7 +20,12 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import TYPE_CHECKING, Iterable, Sequence
+
+from app.domain.events import EventType, emit_from_sync
+
+if TYPE_CHECKING:  # pragma: no cover - import only for typing
+    from app.bus.event_bus import AsyncEventBus
 
 log = logging.getLogger(__name__)
 
@@ -82,11 +87,19 @@ def enhance(
     provider: str = "loudnorm",
     model_path: str | None = None,
     invoker: callable = None,  # type: ignore[assignment]
+    bus: "AsyncEventBus | None" = None,
+    job_id: str | None = None,
 ) -> str:
     """Apply ``provider`` to ``in_path`` -> ``out_path``. Returns ``out_path``.
 
     ``invoker`` is the callable that actually runs the argv; production
     uses ``_invoke``, tests inject a recorder.
+
+    ``bus`` + ``job_id`` are optional. When both are provided AND the
+    caller is on the asyncio event-loop thread, an ``AUDIO_ENHANCED``
+    event is scheduled. Sync callers invoked via ``asyncio.to_thread``
+    (e.g. the orchestrator) won't see the emit — that caller emits
+    separately. Legacy callers (no bus) are unaffected.
     """
     if not Path(in_path).is_file():
         raise FileNotFoundError(f"audio in not found: {in_path}")
@@ -94,6 +107,10 @@ def enhance(
     if provider == "passthrough":
         Path(out_path).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(in_path, out_path)
+        emit_from_sync(
+            bus, job_id, EventType.AUDIO_ENHANCED,
+            {"provider": provider, "input": in_path, "output": out_path},
+        )
         return out_path
 
     if provider == "loudnorm":
@@ -108,6 +125,10 @@ def enhance(
 
     invoke = invoker or _invoke
     invoke(argv)
+    emit_from_sync(
+        bus, job_id, EventType.AUDIO_ENHANCED,
+        {"provider": provider, "input": in_path, "output": out_path},
+    )
     return out_path
 
 

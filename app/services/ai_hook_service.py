@@ -8,10 +8,15 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import TYPE_CHECKING
 
 import httpx
 
+from app.domain.events import EventType, emit_from_sync
 from app.settings import settings
+
+if TYPE_CHECKING:  # pragma: no cover - import only for typing
+    from app.bus.event_bus import AsyncEventBus
 
 log = logging.getLogger(__name__)
 
@@ -31,11 +36,18 @@ def generate_hook(
     model: str | None = None,
     timeout: int | None = None,
     max_chars: int | None = None,
+    bus: "AsyncEventBus | None" = None,
+    job_id: str | None = None,
 ) -> str:
     """Return a hook string. Empty string on failure.
 
     Pure function for unit-testing — accepts overrides; tests inject a
     mock httpx layer.
+
+    ``bus`` + ``job_id`` are optional. When both provided AND a non-empty
+    hook is generated, an ``AI_HOOK_GENERATED`` event is scheduled on
+    the running loop (best-effort; sync caller path described in
+    ``app.domain.events.emit_from_sync``).
     """
     if not getattr(settings, "ai_hook_enabled", True):
         return ""
@@ -66,4 +78,8 @@ def generate_hook(
         return ""
     if len(hook) > max_chars:
         hook = hook[: max_chars - 1].rstrip() + "…"
+    emit_from_sync(
+        bus, job_id, EventType.AI_HOOK_GENERATED,
+        {"hook": hook, "model": model, "transcript_len": len(transcript)},
+    )
     return hook

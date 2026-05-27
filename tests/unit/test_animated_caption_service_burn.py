@@ -7,12 +7,15 @@ gated behind ``@pytest.mark.integration``.
 """
 from __future__ import annotations
 
+import asyncio
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from app.bus.event_bus import AsyncEventBus
+from app.domain.events import EventType
 from app.services import animated_caption_service as svc
 
 
@@ -207,6 +210,75 @@ def test_burn_subprocess_failure_propagates(tmp_path: Path, sample_srt: Path):
             style="hormozi",
             invoker=fake,
         )
+
+
+# ── Event-bus emit tests ─────────────────────────────────────────────────────
+
+
+async def test_burn_emits_animated_caption_rendered(tmp_path: Path, sample_srt: Path):
+    """When bus + job_id are passed, ANIMATED_CAPTION_RENDERED is published."""
+    out = tmp_path / "out.mp4"
+
+    def fake(argv):
+        out.write_bytes(b"\x00")
+
+    bus = AsyncEventBus()
+    received = []
+
+    async def collect():
+        async for ev in bus.subscribe(types=[EventType.ANIMATED_CAPTION_RENDERED]):
+            received.append(ev)
+            return
+
+    consumer = asyncio.create_task(collect())
+    await asyncio.sleep(0)
+
+    svc.burn_animated_captions(
+        clip_path="/tmp/in.mp4",
+        srt_path=str(sample_srt),
+        output_path=str(out),
+        style="hormozi",
+        invoker=fake,
+        bus=bus,
+        job_id="job-cap",
+    )
+    await asyncio.wait_for(consumer, timeout=1.0)
+
+    assert received[0].type is EventType.ANIMATED_CAPTION_RENDERED
+    assert received[0].job_id == "job-cap"
+    assert received[0].payload["style"] == "hormozi"
+    assert received[0].payload["output_path"] == str(out)
+
+
+async def test_burn_no_emit_on_failure(tmp_path: Path, sample_srt: Path):
+    """When ffmpeg produces no output, no event is published."""
+    def fake(argv):
+        pass  # produce nothing
+
+    bus = AsyncEventBus()
+    received = []
+
+    async def collect():
+        async for ev in bus.subscribe(types=[EventType.ANIMATED_CAPTION_RENDERED]):
+            received.append(ev)
+            return
+
+    consumer = asyncio.create_task(collect())
+    await asyncio.sleep(0)
+
+    with pytest.raises(svc.AnimatedCaptionBurnError):
+        svc.burn_animated_captions(
+            clip_path="/tmp/in.mp4",
+            srt_path=str(sample_srt),
+            output_path=str(tmp_path / "missing.mp4"),
+            style="hormozi",
+            invoker=fake,
+            bus=bus,
+            job_id="job-cap",
+        )
+    await asyncio.sleep(0.05)
+    assert received == []
+    consumer.cancel()
 
 
 def test_burn_argv_includes_input_and_output_paths(tmp_path: Path, sample_srt: Path):

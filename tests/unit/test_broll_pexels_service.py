@@ -4,11 +4,14 @@ httpx.MockTransport for the network layer; tmp_path for the cache.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 
 import httpx
 import pytest
 
+from app.bus.event_bus import AsyncEventBus
+from app.domain.events import EventType
 from app.services import broll_pexels_service as svc
 
 
@@ -117,3 +120,64 @@ def test_search_http_error_raises(tmp_path):
     with _client(handler) as http:
         with pytest.raises(svc.PexelsError):
             svc.search("sunset", "KEY", cache_dir=tmp_path, http=http)
+
+
+# ── Event-bus emit tests ─────────────────────────────────────────────────────
+
+
+async def test_fetch_asset_emits_broll_applied(tmp_path):
+    def handler(req):
+        if "search" in req.url.path:
+            return httpx.Response(200, json={"videos": [_VIDEO_FIXTURE]})
+        return httpx.Response(200, content=b"video-bytes")
+
+    bus = AsyncEventBus()
+    received = []
+
+    async def collect():
+        async for ev in bus.subscribe(types=[EventType.BROLL_APPLIED]):
+            received.append(ev)
+            return
+
+    consumer = asyncio.create_task(collect())
+    await asyncio.sleep(0)
+
+    with _client(handler) as http:
+        out = svc.fetch_asset(
+            "sunset", "KEY", cache_dir=tmp_path, http=http,
+            bus=bus, job_id="job-br",
+        )
+    await asyncio.wait_for(consumer, timeout=1.0)
+
+    assert out is not None
+    assert received[0].type is EventType.BROLL_APPLIED
+    assert received[0].job_id == "job-br"
+    assert received[0].payload["asset_id"] == "1234"
+    assert received[0].payload["source"] == "pexels"
+    assert received[0].payload["query"] == "sunset"
+
+
+async def test_fetch_asset_no_emit_when_no_results(tmp_path):
+    def handler(req):
+        return httpx.Response(200, json={"videos": []})
+
+    bus = AsyncEventBus()
+    received = []
+
+    async def collect():
+        async for ev in bus.subscribe(types=[EventType.BROLL_APPLIED]):
+            received.append(ev)
+            return
+
+    consumer = asyncio.create_task(collect())
+    await asyncio.sleep(0)
+
+    with _client(handler) as http:
+        out = svc.fetch_asset(
+            "noresults", "KEY", cache_dir=tmp_path, http=http,
+            bus=bus, job_id="job-br",
+        )
+    await asyncio.sleep(0.05)
+    assert out is None
+    assert received == []
+    consumer.cancel()

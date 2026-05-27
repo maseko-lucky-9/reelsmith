@@ -12,7 +12,12 @@ service unless they want crossfade-style transitions.
 """
 from __future__ import annotations
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+from app.domain.events import EventType, emit_from_sync
+
+if TYPE_CHECKING:  # pragma: no cover - import only for typing
+    from app.bus.event_bus import AsyncEventBus
 
 TransitionKind = Literal["fade", "slide-left", "slide-right", "zoom"]
 SUPPORTED: tuple[TransitionKind, ...] = ("fade", "slide-left", "slide-right", "zoom")
@@ -26,15 +31,31 @@ _FFMPEG: dict[TransitionKind, str] = {
 }
 
 
-def xfade_filter(kind: TransitionKind, *, duration: float, offset: float) -> str:
+def xfade_filter(
+    kind: TransitionKind,
+    *,
+    duration: float,
+    offset: float,
+    bus: "AsyncEventBus | None" = None,
+    job_id: str | None = None,
+) -> str:
     """Return the ``-filter_complex`` argument fragment for a single
-    crossfade between two inputs labelled [0:v] and [1:v]."""
+    crossfade between two inputs labelled [0:v] and [1:v].
+
+    When ``bus`` + ``job_id`` are provided AND the filter spec is built
+    successfully, a ``TRANSITIONS_APPLIED`` event is scheduled.
+    """
     if kind not in _FFMPEG:
         raise ValueError(f"unknown transition: {kind!r}; pick one of {SUPPORTED}")
     if duration <= 0:
         raise ValueError("transition duration must be > 0")
     name = _FFMPEG[kind]
-    return (
+    spec = (
         f"[0:v][1:v]xfade=transition={name}:"
         f"duration={duration:.3f}:offset={offset:.3f}[v]"
     )
+    emit_from_sync(
+        bus, job_id, EventType.TRANSITIONS_APPLIED,
+        {"kind": kind, "duration": duration, "offset": offset},
+    )
+    return spec

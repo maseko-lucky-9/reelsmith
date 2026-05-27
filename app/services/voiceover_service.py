@@ -23,7 +23,12 @@ import os
 import shutil
 import struct
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import TYPE_CHECKING, Callable, Sequence
+
+from app.domain.events import EventType, emit_from_sync
+
+if TYPE_CHECKING:  # pragma: no cover - import only for typing
+    from app.bus.event_bus import AsyncEventBus
 
 log = logging.getLogger(__name__)
 
@@ -89,18 +94,28 @@ def synthesize(
     model: str = "tts_models/multilingual/multi-dataset/xtts_v2",
     voice: str | None = None,
     invoker: Callable[[Sequence[str], str], None] | None = None,
+    bus: "AsyncEventBus | None" = None,
+    job_id: str | None = None,
 ) -> str:
     """Render ``text`` to a WAV at ``out_path``. Returns the path.
 
     For the ``piper`` provider ``invoker`` receives ``(argv, stdin_text)``
     so tests can inspect both dimensions. For all other providers the
     second argument is an empty string and can be ignored.
+
+    ``bus`` + ``job_id`` are optional. When both are provided, a
+    ``VOICEOVER_GENERATED`` event is scheduled on success.
     """
     if not text.strip():
         raise VoiceoverError("empty text")
 
     if provider == "stub":
-        return _stub_synth(text, out_path)
+        result = _stub_synth(text, out_path)
+        emit_from_sync(
+            bus, job_id, EventType.VOICEOVER_GENERATED,
+            {"provider": provider, "output": out_path, "text_len": len(text)},
+        )
+        return result
 
     if provider == "coqui":
         argv = _coqui_argv(text, out_path, model=model, voice=voice)
@@ -108,6 +123,10 @@ def synthesize(
         run(argv, "")
         if not Path(out_path).is_file():
             raise VoiceoverError("coqui: no output produced")
+        emit_from_sync(
+            bus, job_id, EventType.VOICEOVER_GENERATED,
+            {"provider": provider, "output": out_path, "text_len": len(text), "voice": voice},
+        )
         return out_path
 
     if provider == "piper":
@@ -125,6 +144,10 @@ def synthesize(
         run(argv, text)
         if not Path(out_path).is_file():
             raise VoiceoverError("piper: no output produced")
+        emit_from_sync(
+            bus, job_id, EventType.VOICEOVER_GENERATED,
+            {"provider": provider, "output": out_path, "text_len": len(text)},
+        )
         return out_path
 
     raise VoiceoverError(f"unknown voiceover provider: {provider!r}")

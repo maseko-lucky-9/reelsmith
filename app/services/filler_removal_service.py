@@ -12,7 +12,12 @@ clips.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
+
+from app.domain.events import EventType, emit_from_sync
+
+if TYPE_CHECKING:  # pragma: no cover - import only for typing
+    from app.bus.event_bus import AsyncEventBus
 
 DEFAULT_FILLERS: tuple[str, ...] = (
     "um", "uh", "uhm", "ah", "er", "erm",
@@ -38,12 +43,18 @@ def plan_keep_intervals(
     filler_words: Iterable[str] = DEFAULT_FILLERS,
     max_silence_seconds: float = 0.6,
     pad_seconds: float = 0.05,
+    bus: "AsyncEventBus | None" = None,
+    job_id: str | None = None,
 ) -> list[tuple[float, float]]:
     """Return the (start, end) intervals to KEEP after dropping fillers + long silences.
 
     Adjacent kept words are merged. Each retained span is padded by
     ``pad_seconds`` on either side, clamped against the next/prev
     boundary.
+
+    When ``bus`` + ``job_id`` are provided AND at least one filler word
+    is removed, a ``FILLERS_REMOVED`` event is scheduled with the
+    word-drop count.
     """
     allowlist = {f.lower() for f in filler_words}
     word_list = sorted(list(words), key=lambda w: w.start)
@@ -51,6 +62,7 @@ def plan_keep_intervals(
         return []
 
     keepers: list[WordSpan] = [w for w in word_list if not _is_filler(w.text, allowlist)]
+    dropped = len(word_list) - len(keepers)
     if not keepers:
         return []
 
@@ -75,6 +87,11 @@ def plan_keep_intervals(
         pe = min(next_start, e + pad_seconds)
         if pe > ps:
             padded.append((round(ps, 4), round(pe, 4)))
+    if dropped > 0:
+        emit_from_sync(
+            bus, job_id, EventType.FILLERS_REMOVED,
+            {"words_dropped": dropped, "intervals_kept": len(padded)},
+        )
     return padded
 
 
