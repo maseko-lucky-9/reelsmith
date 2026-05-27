@@ -30,7 +30,10 @@ web/playwright-report/
 
 # Root-level screenshots from planning/testing sessions
 /*.png
-.claude/settings.json
+
+# Local Claude Code agent settings (machine-specific)
+.claude/
+
 .omc/
 .env
 .env.*
