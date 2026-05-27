@@ -11,7 +11,7 @@ from typing import Any
 
 from typing import Awaitable, Callable
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -194,5 +194,47 @@ async def list_publish_for_clip(
         .order_by(PublishJob.created_at.desc())
     )
     return [_job_to_dict(pj) for pj in res.scalars().all()]
+
+
+def _job_summary(pj: PublishJob, platform: str | None) -> dict[str, Any]:
+    """Return the T-05 list representation (id, clip_id, status, schedule_at,
+    posted_at, platform, external_url, error)."""
+    return {
+        "id": pj.id,
+        "clip_id": pj.clip_id,
+        "status": pj.status,
+        "schedule_at": pj.schedule_at.isoformat() if pj.schedule_at else None,
+        "posted_at": pj.posted_at.isoformat() if pj.posted_at else None,
+        "platform": platform,
+        "external_url": pj.external_post_url,
+        "error": pj.error,
+    }
+
+
+@router.get("/jobs")
+async def list_jobs(
+    status: list[str] = Query(default=None),
+    clip_id: str | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+):
+    """List publish jobs with optional multi-valued status filter and clip_id filter.
+
+    - ``?status=pending&status=queued`` returns jobs in either status.
+    - Absence of ``status`` returns all statuses.
+    - ``?clip_id=<id>`` restricts to a specific clip.
+    - Empty result set returns ``[]`` with 200.
+    """
+    stmt = (
+        select(PublishJob, SocialAccount.platform)
+        .join(SocialAccount, PublishJob.social_account_id == SocialAccount.id, isouter=True)
+        .order_by(PublishJob.created_at.desc())
+    )
+    if status:
+        stmt = stmt.where(PublishJob.status.in_(status))
+    if clip_id is not None:
+        stmt = stmt.where(PublishJob.clip_id == clip_id)
+
+    rows = (await session.execute(stmt)).all()
+    return [_job_summary(pj, platform) for pj, platform in rows]
 
 

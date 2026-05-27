@@ -5,9 +5,12 @@ Two formats supported:
 * ``premiere_fcp7`` — Adobe Premiere Pro xmeml v5 (Final Cut 7 XML).
 * ``davinci_fcpxml`` — DaVinci Resolve FCPXML 1.10.
 
-Both are single-clip placeholders that point at the rendered MP4.
-Multi-track / overlay export ships in W2 once the inline editor
-multi-track surface lands.
+``premiere_fcp7`` is a single-clip placeholder pointing at the rendered MP4.
+
+``davinci_fcpxml`` emits a multi-track stub when ``clip.captions_burnt_path``
+is set: a primary ``<spine>`` for the main video asset and a second
+``<spine>`` for the burnt-captions overlay.  Legacy clips (no captions path)
+render as single-track.
 """
 from __future__ import annotations
 

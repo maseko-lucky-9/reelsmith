@@ -116,6 +116,7 @@ class ClipRecord(Base):
     caption_style: Mapped[str] = mapped_column(
         String(32), nullable=False, default="static"
     )
+    captions_burnt_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_now
     )

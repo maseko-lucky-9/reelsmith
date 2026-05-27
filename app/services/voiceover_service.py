@@ -10,10 +10,17 @@ Behind ``YTVIDEO_VOICEOVER_PROVIDER``:
 
 The Coqui path is opt-in via the ``voiceover`` compose profile and
 expects the model already pulled to ``YTVIDEO_COQUI_MODEL``.
+
+The Piper path requires:
+    - ``piper`` binary on PATH (YTVIDEO_PIPER_MODEL must be set)
+    - ``YTVIDEO_PIPER_MODEL`` env var pointing to the .onnx model file
+    - Text is fed on stdin; argv is ``["piper", "--model", <path>, "--output_file", <out>]``
 """
 from __future__ import annotations
 
 import logging
+import os
+import shutil
 import struct
 from pathlib import Path
 from typing import Callable, Sequence
@@ -65,6 +72,15 @@ def _coqui_argv(
     return tuple(argv)
 
 
+def _piper_argv(out_path: str, *, model: str) -> tuple[str, ...]:
+    """Build the argv for the ``piper`` TTS CLI.
+
+    Text is fed via stdin; the binary reads stdin and writes a WAV to
+    ``--output_file``.  Model path comes from ``YTVIDEO_PIPER_MODEL``.
+    """
+    return ("piper", "--model", model, "--output_file", out_path)
+
+
 def synthesize(
     text: str,
     out_path: str,
@@ -72,33 +88,53 @@ def synthesize(
     provider: str = "stub",
     model: str = "tts_models/multilingual/multi-dataset/xtts_v2",
     voice: str | None = None,
-    invoker: Callable[[Sequence[str]], None] | None = None,
+    invoker: Callable[[Sequence[str], str], None] | None = None,
 ) -> str:
-    """Render ``text`` to a WAV at ``out_path``. Returns the path."""
+    """Render ``text`` to a WAV at ``out_path``. Returns the path.
+
+    For the ``piper`` provider ``invoker`` receives ``(argv, stdin_text)``
+    so tests can inspect both dimensions. For all other providers the
+    second argument is an empty string and can be ignored.
+    """
     if not text.strip():
         raise VoiceoverError("empty text")
 
     if provider == "stub":
         return _stub_synth(text, out_path)
 
-    if provider in ("coqui", "piper"):
-        if provider == "piper":
-            argv = ("piper", "--text", text, "--output_file", out_path)
-        else:
-            argv = _coqui_argv(text, out_path, model=model, voice=voice)
+    if provider == "coqui":
+        argv = _coqui_argv(text, out_path, model=model, voice=voice)
         run = invoker or _invoke
-        run(argv)
+        run(argv, "")
         if not Path(out_path).is_file():
-            raise VoiceoverError(f"{provider}: no output produced")
+            raise VoiceoverError("coqui: no output produced")
+        return out_path
+
+    if provider == "piper":
+        if shutil.which("piper") is None:
+            raise VoiceoverError(
+                "piper binary not found on PATH — install piper-tts or add it to PATH"
+            )
+        piper_model = os.environ.get("YTVIDEO_PIPER_MODEL", "").strip()
+        if not piper_model:
+            raise VoiceoverError(
+                "YTVIDEO_PIPER_MODEL is not set — provide a path to the .onnx model file"
+            )
+        argv = _piper_argv(out_path, model=piper_model)
+        run = invoker or _invoke
+        run(argv, text)
+        if not Path(out_path).is_file():
+            raise VoiceoverError("piper: no output produced")
         return out_path
 
     raise VoiceoverError(f"unknown voiceover provider: {provider!r}")
 
 
-def _invoke(argv: Sequence[str]) -> None:
+def _invoke(argv: Sequence[str], stdin_text: str = "") -> None:
     import subprocess
     log.info("voiceover: %s", " ".join(argv))
-    proc = subprocess.run(argv, capture_output=True)
+    input_bytes = stdin_text.encode() if stdin_text else None
+    proc = subprocess.run(argv, input=input_bytes, capture_output=True)
     if proc.returncode != 0:
         raise VoiceoverError(
             f"voiceover failed (rc={proc.returncode}): "

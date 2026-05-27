@@ -1,7 +1,9 @@
 """Unit tests for voiceover_service (W2.3)."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -45,7 +47,7 @@ def test_coqui_invokes_subprocess(tmp_path):
     out = tmp_path / "vo.wav"
     captured = []
 
-    def fake(argv):
+    def fake(argv, stdin_text=""):
         captured.append(tuple(argv))
         Path(out).write_bytes(b"fake")
 
@@ -57,7 +59,7 @@ def test_coqui_invokes_subprocess(tmp_path):
 def test_coqui_missing_output_raises(tmp_path):
     out = tmp_path / "vo.wav"
 
-    def fake(argv):
+    def fake(argv, stdin_text=""):
         # produce nothing
         pass
 
@@ -65,14 +67,65 @@ def test_coqui_missing_output_raises(tmp_path):
         svc.synthesize("hi", str(out), provider="coqui", invoker=fake)
 
 
-def test_piper_argv(tmp_path):
-    out = tmp_path / "vo.wav"
-    captured = []
+# ── Piper provider tests ──────────────────────────────────────────────────────
 
-    def fake(argv):
-        captured.append(tuple(argv))
+
+def test_piper_argv_shape(tmp_path, monkeypatch):
+    """piper is invoked with --model / --output_file; text goes via stdin."""
+    out = tmp_path / "vo.wav"
+    captured_argv: list[tuple[str, ...]] = []
+    captured_stdin: list[str] = []
+
+    monkeypatch.setenv("YTVIDEO_PIPER_MODEL", "/models/en_US-lessac-medium.onnx")
+
+    def fake(argv, stdin_text=""):
+        captured_argv.append(tuple(argv))
+        captured_stdin.append(stdin_text)
         Path(out).write_bytes(b"fake")
 
-    svc.synthesize("hi", str(out), provider="piper", invoker=fake)
-    assert captured[0][0] == "piper"
-    assert "--text" in captured[0]
+    with mock.patch("shutil.which", return_value="/usr/bin/piper"):
+        svc.synthesize("hello piper", str(out), provider="piper", invoker=fake)
+
+    assert len(captured_argv) == 1
+    argv = captured_argv[0]
+    assert argv[0] == "piper"
+    assert "--model" in argv
+    model_idx = argv.index("--model")
+    assert argv[model_idx + 1] == "/models/en_US-lessac-medium.onnx"
+    assert "--output_file" in argv
+    out_idx = argv.index("--output_file")
+    assert argv[out_idx + 1] == str(out)
+    # text must NOT appear in argv — it goes on stdin
+    assert "--text" not in argv
+    assert captured_stdin[0] == "hello piper"
+
+
+def test_piper_missing_binary_raises(tmp_path, monkeypatch):
+    """When piper binary is absent, VoiceoverError with 'piper' in message."""
+    monkeypatch.setenv("YTVIDEO_PIPER_MODEL", "/models/en_US-lessac-medium.onnx")
+
+    with mock.patch("shutil.which", return_value=None):
+        with pytest.raises(svc.VoiceoverError, match="piper"):
+            svc.synthesize("hello", str(tmp_path / "vo.wav"), provider="piper")
+
+
+def test_piper_missing_model_env_raises(tmp_path, monkeypatch):
+    """When YTVIDEO_PIPER_MODEL is unset, VoiceoverError before invocation."""
+    monkeypatch.delenv("YTVIDEO_PIPER_MODEL", raising=False)
+
+    with mock.patch("shutil.which", return_value="/usr/bin/piper"):
+        with pytest.raises(svc.VoiceoverError, match="YTVIDEO_PIPER_MODEL"):
+            svc.synthesize("hello", str(tmp_path / "vo.wav"), provider="piper")
+
+
+def test_piper_missing_output_raises(tmp_path, monkeypatch):
+    """When piper produces no file, VoiceoverError is raised."""
+    monkeypatch.setenv("YTVIDEO_PIPER_MODEL", "/models/en_US-lessac-medium.onnx")
+
+    def fake(argv, stdin_text=""):
+        # produce nothing
+        pass
+
+    with mock.patch("shutil.which", return_value="/usr/bin/piper"):
+        with pytest.raises(svc.VoiceoverError):
+            svc.synthesize("hello", str(tmp_path / "vo.wav"), provider="piper", invoker=fake)
