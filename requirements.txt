@@ -6,6 +6,7 @@ pydantic==2.13.3
 pydantic-settings==2.14.0
 httpx==0.28.1
 asgi-lifespan==2.1.0
+python-multipart==0.0.20
 
 # Database
 sqlalchemy[asyncio]==2.0.41
