@@ -1,8 +1,12 @@
 """Unit tests for timeline_render_service.build_render_plan (W1.12)."""
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
+from app.bus.event_bus import AsyncEventBus
+from app.domain.events import EventType
 from app.services.timeline_render_service import (
     TimelineError,
     build_render_plan,
@@ -90,6 +94,44 @@ def test_non_list_items_rejected():
             _tl({"kind": "video", "items": "nope"}),
             _BASE,
         )
+
+
+# ── Event-bus emit tests ─────────────────────────────────────────────────────
+
+
+async def test_build_render_plan_emits_timeline_edited():
+    bus = AsyncEventBus()
+    received = []
+
+    async def collect():
+        async for ev in bus.subscribe(types=[EventType.TIMELINE_EDITED]):
+            received.append(ev)
+            return
+
+    consumer = asyncio.create_task(collect())
+    await asyncio.sleep(0)
+
+    plan = build_render_plan(
+        _tl({"kind": "video", "items": [{"start": 0, "end": 10}]}),
+        _BASE,
+        bus=bus, job_id="job-tl",
+    )
+    await asyncio.wait_for(consumer, timeout=1.0)
+
+    assert plan.duration == 10
+    assert received[0].type is EventType.TIMELINE_EDITED
+    assert received[0].job_id == "job-tl"
+    assert received[0].payload["video_items"] == 1
+    assert received[0].payload["duration"] == 10
+
+
+def test_build_render_plan_without_bus_works():
+    """Legacy callers (no bus) still get a plan."""
+    plan = build_render_plan(
+        _tl({"kind": "video", "items": [{"start": 0, "end": 5}]}),
+        _BASE,
+    )
+    assert plan.duration == 5
 
 
 def test_to_dict_round_trip():

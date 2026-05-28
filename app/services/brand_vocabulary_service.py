@@ -11,7 +11,12 @@ case pattern of the source token).
 from __future__ import annotations
 
 import re
-from typing import Mapping
+from typing import TYPE_CHECKING, Mapping
+
+from app.domain.events import EventType, emit_from_sync
+
+if TYPE_CHECKING:  # pragma: no cover - import only for typing
+    from app.bus.event_bus import AsyncEventBus
 
 
 def _preserve_case(source: str, replacement: str) -> str:
@@ -26,7 +31,19 @@ def _preserve_case(source: str, replacement: str) -> str:
     return replacement
 
 
-def apply_vocabulary(text: str, vocabulary: Mapping[str, str] | None) -> str:
+def apply_vocabulary(
+    text: str,
+    vocabulary: Mapping[str, str] | None,
+    *,
+    bus: "AsyncEventBus | None" = None,
+    job_id: str | None = None,
+) -> str:
+    """Replace vocabulary tokens with case-preserving substitutions.
+
+    When ``bus`` + ``job_id`` are provided AND at least one substitution
+    is made, a ``BRAND_VOCAB_APPLIED`` event is scheduled with the
+    substitution count.
+    """
     if not text or not vocabulary:
         return text
 
@@ -38,10 +55,19 @@ def apply_vocabulary(text: str, vocabulary: Mapping[str, str] | None) -> str:
     )
 
     lower_map = {k.lower(): v for k, v in vocabulary.items()}
+    count = 0
 
     def _sub(m: re.Match[str]) -> str:
+        nonlocal count
+        count += 1
         src = m.group(0)
         target = lower_map[src.lower()]
         return _preserve_case(src, target)
 
-    return pattern.sub(_sub, text)
+    result = pattern.sub(_sub, text)
+    if count > 0:
+        emit_from_sync(
+            bus, job_id, EventType.BRAND_VOCAB_APPLIED,
+            {"substitutions": count, "vocab_size": len(vocabulary)},
+        )
+    return result

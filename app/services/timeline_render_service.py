@@ -33,7 +33,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from app.domain.events import EventType, emit_from_sync
+
+if TYPE_CHECKING:  # pragma: no cover - import only for typing
+    from app.bus.event_bus import AsyncEventBus
 
 log = logging.getLogger(__name__)
 
@@ -92,8 +97,19 @@ def _f(value: Any, *, name: str) -> float:
         raise TimelineError(f"{name}: expected number, got {value!r}") from exc
 
 
-def build_render_plan(timeline: dict[str, Any], base_clip_path: str) -> RenderPlan:
-    """Validate and shape a timeline JSON into a RenderPlan."""
+def build_render_plan(
+    timeline: dict[str, Any],
+    base_clip_path: str,
+    *,
+    bus: "AsyncEventBus | None" = None,
+    job_id: str | None = None,
+) -> RenderPlan:
+    """Validate and shape a timeline JSON into a RenderPlan.
+
+    When ``bus`` + ``job_id`` are provided, a ``TIMELINE_EDITED`` event
+    is scheduled on the successful build (mirrors the UI editor's
+    save → timeline-shaped lifecycle).
+    """
     if not isinstance(timeline, dict) or "tracks" not in timeline:
         raise TimelineError("timeline missing 'tracks' key")
     tracks = timeline.get("tracks") or []
@@ -160,13 +176,33 @@ def build_render_plan(timeline: dict[str, Any], base_clip_path: str) -> RenderPl
                     f"{kind_name}[{idx}]: end ({it.end}) must be > start ({it.start})"
                 )
 
-    return RenderPlan(
+    plan = RenderPlan(
         duration=duration, video=video, captions=captions, overlays=overlays
     )
+    emit_from_sync(
+        bus, job_id, EventType.TIMELINE_EDITED,
+        {
+            "duration": plan.duration,
+            "video_items": len(plan.video),
+            "caption_items": len(plan.captions),
+            "overlay_items": len(plan.overlays),
+        },
+    )
+    return plan
 
 
-def render_with_moviepy(plan: RenderPlan, output_path: str) -> str:  # pragma: no cover
-    """Write a real composited mp4. Heavy; not exercised in unit tests."""
+def render_with_moviepy(
+    plan: RenderPlan,
+    output_path: str,
+    *,
+    bus: "AsyncEventBus | None" = None,
+    job_id: str | None = None,
+) -> str:  # pragma: no cover
+    """Write a real composited mp4. Heavy; not exercised in unit tests.
+
+    Emits ``TIMELINE_RENDERED`` when ``bus`` + ``job_id`` are provided
+    and rendering succeeds.
+    """
     from moviepy.editor import (
         CompositeVideoClip, TextClip, VideoFileClip, concatenate_videoclips,
     )
@@ -192,4 +228,8 @@ def render_with_moviepy(plan: RenderPlan, output_path: str) -> str:  # pragma: n
         CompositeVideoClip([base, *overlay_clips]) if overlay_clips else base
     )
     composed.write_videofile(output_path, codec="libx264", audio_codec="aac")
+    emit_from_sync(
+        bus, job_id, EventType.TIMELINE_RENDERED,
+        {"output_path": output_path, "duration": plan.duration},
+    )
     return output_path

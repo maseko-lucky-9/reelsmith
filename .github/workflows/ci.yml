@@ -35,6 +35,12 @@ jobs:
       - name: Run unit + contract tests
         run: pytest
 
+      - name: Apply database migrations
+        env:
+          YTVIDEO_DB_URL: postgresql+asyncpg://reelsmith:reelsmith@localhost:5432/reelsmith
+          YTVIDEO_JOB_STORE: sql
+        run: alembic upgrade head
+
       - name: Run integration tests
         env:
           YTVIDEO_DB_URL: postgresql+asyncpg://reelsmith:reelsmith@localhost:5432/reelsmith

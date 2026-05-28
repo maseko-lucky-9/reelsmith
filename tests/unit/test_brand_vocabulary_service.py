@@ -13,8 +13,12 @@ Covers the case-preserving replacement engine in apply_vocabulary:
 """
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
+from app.bus.event_bus import AsyncEventBus
+from app.domain.events import EventType
 from app.services.brand_vocabulary_service import apply_vocabulary
 
 
@@ -122,3 +126,60 @@ def test_apply_vocabulary_empty_source_returns_empty():
 def test_apply_vocabulary_empty_source_with_empty_vocab():
     result = apply_vocabulary("", {})
     assert result == ""
+
+
+# ── Event-bus emit tests ─────────────────────────────────────────────────────
+
+
+async def test_apply_vocabulary_emits_when_substitutions_happen():
+    bus = AsyncEventBus()
+    received = []
+
+    async def collect():
+        async for ev in bus.subscribe(types=[EventType.BRAND_VOCAB_APPLIED]):
+            received.append(ev)
+            return
+
+    consumer = asyncio.create_task(collect())
+    await asyncio.sleep(0)
+
+    out = apply_vocabulary(
+        "OpusClip rocks, OPUSCLIP rules",
+        {"OpusClip": "ReelSmith"},
+        bus=bus, job_id="job-bv",
+    )
+    await asyncio.wait_for(consumer, timeout=1.0)
+
+    assert "ReelSmith" in out and "REELSMITH" in out
+    assert received[0].type is EventType.BRAND_VOCAB_APPLIED
+    assert received[0].job_id == "job-bv"
+    assert received[0].payload["substitutions"] == 2
+    assert received[0].payload["vocab_size"] == 1
+
+
+async def test_apply_vocabulary_no_emit_when_no_match():
+    bus = AsyncEventBus()
+    received = []
+
+    async def collect():
+        async for ev in bus.subscribe(types=[EventType.BRAND_VOCAB_APPLIED]):
+            received.append(ev)
+            return
+
+    consumer = asyncio.create_task(collect())
+    await asyncio.sleep(0)
+
+    out = apply_vocabulary(
+        "no matches here", {"OpusClip": "ReelSmith"},
+        bus=bus, job_id="job-bv",
+    )
+    await asyncio.sleep(0.05)
+    assert out == "no matches here"
+    assert received == []
+    consumer.cancel()
+
+
+def test_apply_vocabulary_without_bus_still_works():
+    """Legacy callers keep working."""
+    out = apply_vocabulary("OpusClip", {"OpusClip": "ReelSmith"})
+    assert out == "ReelSmith"

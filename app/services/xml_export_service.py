@@ -16,11 +16,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from app.db.models import ClipRecord
+from app.domain.events import EventType, emit_from_sync
+
+if TYPE_CHECKING:  # pragma: no cover - import only for typing
+    from app.bus.event_bus import AsyncEventBus
 
 ExportFormat = Literal["premiere_fcp7", "davinci_fcpxml"]
 
@@ -41,7 +45,14 @@ class XmlExport:
     body: str
 
 
-def render(clip: ClipRecord, fmt: ExportFormat, *, fps: int = 30) -> XmlExport:
+def render(
+    clip: ClipRecord,
+    fmt: ExportFormat,
+    *,
+    fps: int = 30,
+    bus: "AsyncEventBus | None" = None,
+    job_id: str | None = None,
+) -> XmlExport:
     if not clip.output_path:
         raise ValueError(f"clip {clip.id!r} has no output_path; render first")
     duration_seconds = max(0.0, float((clip.end or 0) - (clip.start or 0)))
@@ -57,12 +68,12 @@ def render(clip: ClipRecord, fmt: ExportFormat, *, fps: int = 30) -> XmlExport:
             pathurl=pathurl,
             filename=filename,
         )
-        return XmlExport(
+        out = XmlExport(
             filename=f"{clip.id}.xml",
             content_type="application/xml",
             body=body,
         )
-    if fmt == "davinci_fcpxml":
+    elif fmt == "davinci_fcpxml":
         body = _env.get_template("davinci_fcpxml.xml.j2").render(
             clip=clip,
             fps=fps,
@@ -70,9 +81,16 @@ def render(clip: ClipRecord, fmt: ExportFormat, *, fps: int = 30) -> XmlExport:
             pathurl=pathurl,
             filename=filename,
         )
-        return XmlExport(
+        out = XmlExport(
             filename=f"{clip.id}.fcpxml",
             content_type="application/xml",
             body=body,
         )
-    raise ValueError(f"unsupported xml export format: {fmt!r}")
+    else:
+        raise ValueError(f"unsupported xml export format: {fmt!r}")
+
+    emit_from_sync(
+        bus, job_id, EventType.XML_EXPORTED,
+        {"clip_id": clip.id, "format": fmt, "filename": out.filename, "bytes": len(out.body)},
+    )
+    return out

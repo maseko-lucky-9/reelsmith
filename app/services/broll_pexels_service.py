@@ -24,9 +24,14 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
+
+from app.domain.events import EventType, emit_from_sync
+
+if TYPE_CHECKING:  # pragma: no cover - import only for typing
+    from app.bus.event_bus import AsyncEventBus
 
 log = logging.getLogger(__name__)
 
@@ -117,11 +122,17 @@ def fetch_asset(
     *,
     cache_dir: str | Path | None = None,
     http: httpx.Client | None = None,
+    bus: "AsyncEventBus | None" = None,
+    job_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Search Pexels for ``query`` and return the first downloadable asset.
 
     Returns a dict suitable for ``clips.broll_assets`` or None when no
     results match. Downloads the video bytes into the local cache.
+
+    When ``bus`` + ``job_id`` are provided AND an asset is successfully
+    resolved, a ``BROLL_APPLIED`` event is scheduled. No emit fires
+    when the search returns nothing (no asset to attribute).
     """
     body = search(query, api_key, cache_dir=cache_dir, http=http)
     videos = body.get("videos") or []
@@ -148,7 +159,7 @@ def fetch_asset(
             if http is None:
                 client.close()
 
-    return {
+    asset = {
         "source": "pexels",
         "asset_id": asset_id,
         "url": file["link"],
@@ -158,3 +169,13 @@ def fetch_asset(
         "page_url": video.get("url", f"https://www.pexels.com/video/{asset_id}/"),
         "duration": video.get("duration", 0),
     }
+    emit_from_sync(
+        bus, job_id, EventType.BROLL_APPLIED,
+        {
+            "source": "pexels",
+            "asset_id": asset_id,
+            "query": query,
+            "local_path": str(local),
+        },
+    )
+    return asset

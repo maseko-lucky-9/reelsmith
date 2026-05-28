@@ -1,8 +1,12 @@
 """Unit tests for W2.5 + W2.6 + W2.9."""
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
+from app.bus.event_bus import AsyncEventBus
+from app.domain.events import EventType
 from app.services import (
     filler_removal_service as filler,
     profanity_filter_service as prof,
@@ -131,3 +135,92 @@ def test_profanity_word_boundary():
     # 'shit' should not match in 'shittake'.
     out = prof.filter_text("shittake mushroom", mode="default")
     assert "shittake" in out  # untouched
+
+
+# ── Event-bus emit tests ─────────────────────────────────────────────────────
+
+
+async def test_filler_emits_when_words_dropped():
+    words = [
+        filler.WordSpan("Hello", 0.0, 0.5),
+        filler.WordSpan("um", 0.5, 0.7),
+        filler.WordSpan("world", 0.7, 1.2),
+    ]
+    bus = AsyncEventBus()
+    received = []
+
+    async def collect():
+        async for ev in bus.subscribe(types=[EventType.FILLERS_REMOVED]):
+            received.append(ev)
+            return
+
+    consumer = asyncio.create_task(collect())
+    await asyncio.sleep(0)
+
+    filler.plan_keep_intervals(words, bus=bus, job_id="job-fl")
+    await asyncio.wait_for(consumer, timeout=1.0)
+
+    assert received[0].type is EventType.FILLERS_REMOVED
+    assert received[0].job_id == "job-fl"
+    assert received[0].payload["words_dropped"] == 1
+
+
+async def test_filler_no_emit_when_nothing_dropped():
+    words = [
+        filler.WordSpan("Hello", 0.0, 0.5),
+        filler.WordSpan("world", 0.5, 1.2),
+    ]
+    bus = AsyncEventBus()
+    received = []
+
+    async def collect():
+        async for ev in bus.subscribe(types=[EventType.FILLERS_REMOVED]):
+            received.append(ev)
+            return
+
+    consumer = asyncio.create_task(collect())
+    await asyncio.sleep(0)
+
+    filler.plan_keep_intervals(words, bus=bus, job_id="job-fl")
+    await asyncio.sleep(0.05)
+    assert received == []
+    consumer.cancel()
+
+
+def test_filler_without_bus_works():
+    """Legacy callers (no bus) still work."""
+    words = [
+        filler.WordSpan("Hello", 0.0, 0.5),
+        filler.WordSpan("um", 0.5, 0.7),
+    ]
+    out = filler.plan_keep_intervals(words)
+    assert out  # returns intervals as before
+
+
+async def test_xfade_filter_emits_transitions_applied():
+    bus = AsyncEventBus()
+    received = []
+
+    async def collect():
+        async for ev in bus.subscribe(types=[EventType.TRANSITIONS_APPLIED]):
+            received.append(ev)
+            return
+
+    consumer = asyncio.create_task(collect())
+    await asyncio.sleep(0)
+
+    out = trans.xfade_filter("fade", duration=0.5, offset=4.5,
+                             bus=bus, job_id="job-tr")
+    await asyncio.wait_for(consumer, timeout=1.0)
+
+    assert "transition=fade" in out
+    assert received[0].type is EventType.TRANSITIONS_APPLIED
+    assert received[0].job_id == "job-tr"
+    assert received[0].payload["kind"] == "fade"
+    assert received[0].payload["duration"] == 0.5
+
+
+def test_xfade_filter_without_bus_works():
+    """Legacy callers (no bus) still get the spec string."""
+    out = trans.xfade_filter("fade", duration=0.5, offset=4.5)
+    assert "transition=fade" in out

@@ -1,12 +1,15 @@
 """Unit tests for voiceover_service (W2.3)."""
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 from unittest import mock
 
 import pytest
 
+from app.bus.event_bus import AsyncEventBus
+from app.domain.events import EventType
 from app.services import voiceover_service as svc
 
 
@@ -129,3 +132,66 @@ def test_piper_missing_output_raises(tmp_path, monkeypatch):
     with mock.patch("shutil.which", return_value="/usr/bin/piper"):
         with pytest.raises(svc.VoiceoverError):
             svc.synthesize("hello", str(tmp_path / "vo.wav"), provider="piper", invoker=fake)
+
+
+# ── Event-bus emit tests ─────────────────────────────────────────────────────
+
+
+async def test_synthesize_stub_emits_voiceover_generated(tmp_path):
+    out = tmp_path / "vo.wav"
+    bus = AsyncEventBus()
+    received = []
+
+    async def collect():
+        async for ev in bus.subscribe(types=[EventType.VOICEOVER_GENERATED]):
+            received.append(ev)
+            return
+
+    consumer = asyncio.create_task(collect())
+    await asyncio.sleep(0)
+
+    svc.synthesize(
+        "hello world", str(out), provider="stub",
+        bus=bus, job_id="job-vo",
+    )
+    await asyncio.wait_for(consumer, timeout=1.0)
+
+    assert received[0].type is EventType.VOICEOVER_GENERATED
+    assert received[0].job_id == "job-vo"
+    assert received[0].payload["provider"] == "stub"
+    assert received[0].payload["output"] == str(out)
+    assert received[0].payload["text_len"] == len("hello world")
+
+
+async def test_synthesize_coqui_emits(tmp_path):
+    out = tmp_path / "vo.wav"
+
+    def fake(argv, stdin_text=""):
+        Path(out).write_bytes(b"fake")
+
+    bus = AsyncEventBus()
+    received = []
+
+    async def collect():
+        async for ev in bus.subscribe(types=[EventType.VOICEOVER_GENERATED]):
+            received.append(ev)
+            return
+
+    consumer = asyncio.create_task(collect())
+    await asyncio.sleep(0)
+
+    svc.synthesize(
+        "hi", str(out), provider="coqui", invoker=fake,
+        bus=bus, job_id="job-vo2", voice="speaker_1",
+    )
+    await asyncio.wait_for(consumer, timeout=1.0)
+    assert received[0].payload["provider"] == "coqui"
+    assert received[0].payload["voice"] == "speaker_1"
+
+
+def test_synthesize_without_bus_works(tmp_path):
+    """Legacy callers keep working."""
+    out = tmp_path / "vo.wav"
+    result = svc.synthesize("hello", str(out), provider="stub")
+    assert result == str(out)
+    assert out.exists()

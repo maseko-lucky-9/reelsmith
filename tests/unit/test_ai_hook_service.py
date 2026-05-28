@@ -1,11 +1,14 @@
 """Unit tests for ai_hook_service (W1.7)."""
 from __future__ import annotations
 
+import asyncio
 import json
 
 import httpx
 import pytest
 
+from app.bus.event_bus import AsyncEventBus
+from app.domain.events import EventType
 from app.services import ai_hook_service
 
 
@@ -71,3 +74,71 @@ def test_generate_hook_disabled(monkeypatch):
     monkeypatch.setattr(ai_hook_service.settings, "ai_hook_enabled", False)
     out = ai_hook_service.generate_hook("t")
     assert out == ""
+
+
+# ── Event-bus emit tests ─────────────────────────────────────────────────────
+
+
+async def test_generate_hook_emits_event_on_success(monkeypatch):
+    _patch_httpx(
+        monkeypatch,
+        response_json={"response": json.dumps({"hook": "Punchy line."})},
+    )
+
+    bus = AsyncEventBus()
+    received = []
+
+    async def collect():
+        async for ev in bus.subscribe(types=[EventType.AI_HOOK_GENERATED]):
+            received.append(ev)
+            return
+
+    consumer = asyncio.create_task(collect())
+    await asyncio.sleep(0)
+
+    out = ai_hook_service.generate_hook(
+        "the transcript", base_url="http://o", model="m", timeout=5,
+        bus=bus, job_id="job-h",
+    )
+    await asyncio.wait_for(consumer, timeout=1.0)
+
+    assert out == "Punchy line."
+    assert received[0].type is EventType.AI_HOOK_GENERATED
+    assert received[0].job_id == "job-h"
+    assert received[0].payload["hook"] == "Punchy line."
+    assert received[0].payload["model"] == "m"
+
+
+async def test_generate_hook_no_emit_when_no_hook(monkeypatch):
+    _patch_httpx(monkeypatch, response_json={"response": json.dumps({"hook": ""})})
+
+    bus = AsyncEventBus()
+    received = []
+
+    async def collect():
+        async for ev in bus.subscribe(types=[EventType.AI_HOOK_GENERATED]):
+            received.append(ev)
+            return
+
+    consumer = asyncio.create_task(collect())
+    await asyncio.sleep(0)
+
+    out = ai_hook_service.generate_hook(
+        "x", base_url="http://o", model="m", timeout=5,
+        bus=bus, job_id="job-h",
+    )
+    # Give the loop a chance — there should be NO event.
+    await asyncio.sleep(0.05)
+    assert out == ""
+    assert received == []
+    consumer.cancel()
+
+
+def test_generate_hook_no_bus_still_works(monkeypatch):
+    """Legacy callers (no bus) keep working — no event emitted."""
+    _patch_httpx(
+        monkeypatch,
+        response_json={"response": json.dumps({"hook": "Hello"})},
+    )
+    out = ai_hook_service.generate_hook("t", base_url="http://o", model="m", timeout=5)
+    assert out == "Hello"
