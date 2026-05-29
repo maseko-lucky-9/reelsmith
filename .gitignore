@@ -31,6 +31,9 @@ web/playwright-report/
 # Root-level screenshots from planning/testing sessions
 /*.png
 
+# Relocated dev/QA screenshots (local portfolio artifacts, not committed)
+/artifacts/
+
 # Local Claude Code agent settings (machine-specific)
 .claude/
 
