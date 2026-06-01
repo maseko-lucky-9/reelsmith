@@ -31,11 +31,15 @@ def _default_font_path() -> str | None:
 
 if _HAS_PYDANTIC_SETTINGS:
 
+    # Anchor .env to the project root (app/settings.py → app/ → project root),
+    # so the path is CWD-independent regardless of where uvicorn is launched from.
+    _ENV_FILE = str(Path(__file__).resolve().parent.parent / ".env")
+
     class Settings(BaseSettings):
         model_config = SettingsConfigDict(
             env_prefix="YTVIDEO_",
             extra="ignore",
-            env_file=".env",
+            env_file=_ENV_FILE,
             env_file_encoding="utf-8",
         )
 
