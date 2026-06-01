@@ -7,9 +7,18 @@ after every test so nothing leaks between runs.
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 
 import pytest
+
+# Override settings that would otherwise be loaded from .env before app.settings
+# is imported. env vars take precedence over env_file in pydantic-settings v2,
+# so these setdefaults ensure tests run with predictable defaults regardless of
+# any local .env file present in the developer's working directory.
+os.environ.setdefault("YTVIDEO_OLLAMA_ENABLED", "false")
+os.environ.setdefault("YTVIDEO_SEGMENT_PROVIDER", "chapter")
+os.environ.setdefault("YTVIDEO_JOB_STORE", "memory")
 
 import app.compat  # noqa: F401 — PIL.Image.ANTIALIAS shim for MoviePy 1.0.3
 

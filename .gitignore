@@ -53,3 +53,6 @@ data/oauth-tokens/
 # RuVector memory graph artifacts (local agent state)
 agentdb.rvf
 agentdb.rvf.lock
+
+# Live-run checkpoint (session state, not source)
+tasks/reelsmith-live-run-state.json
