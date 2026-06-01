@@ -32,7 +32,12 @@ def _default_font_path() -> str | None:
 if _HAS_PYDANTIC_SETTINGS:
 
     class Settings(BaseSettings):
-        model_config = SettingsConfigDict(env_prefix="YTVIDEO_", extra="ignore")
+        model_config = SettingsConfigDict(
+            env_prefix="YTVIDEO_",
+            extra="ignore",
+            env_file=".env",
+            env_file_encoding="utf-8",
+        )
 
         # ── Database ──────────────────────────────────────────────────────────
         db_url: str = "sqlite+aiosqlite:///./reelsmith.db"
