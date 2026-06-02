@@ -2,6 +2,10 @@
 
 Handles the ``upload://`` URL scheme. No download needed — the file is
 already on disk. Duration and title are probed from the file itself.
+
+Security: the file path embedded in upload:// is validated to be strictly
+inside the configured uploads root and restricted to video extensions,
+preventing path traversal / arbitrary file read.
 """
 from __future__ import annotations
 
@@ -10,6 +14,11 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from app.services.platforms.base import Chapter, DownloadResult
+
+# Must match the directory used by app/routers/uploads.py.
+# Resolved once at import time so symlink games can't move the goalposts.
+_UPLOAD_ROOT = Path("/tmp/yt/uploads").resolve()
+_ALLOWED_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 
 
 def _probe_duration(path: str) -> float:
@@ -40,10 +49,26 @@ class UploadAdapter:
         return isinstance(url, str) and url.startswith("upload://")
 
     def download(self, url: str, destination_folder: str) -> DownloadResult:
-        # Strip the upload:// scheme to get the real fs path
         parsed = urlparse(url)
-        file_path = parsed.path  # e.g. /tmp/yt/uploads/uuid.mp4
+        raw_path = parsed.path  # e.g. /tmp/yt/uploads/uuid.mp4
 
+        # Resolve to absolute path and confirm it stays inside _UPLOAD_ROOT.
+        # Path.resolve() follows symlinks, neutralising ../.. traversal.
+        candidate = Path(raw_path).resolve()
+        try:
+            candidate.relative_to(_UPLOAD_ROOT)
+        except ValueError:
+            raise PermissionError(
+                f"upload path escapes uploads directory: {raw_path!r}"
+            )
+
+        # Restrict to expected video extensions.
+        if candidate.suffix.lower() not in _ALLOWED_SUFFIXES:
+            raise PermissionError(
+                f"upload extension not allowed: {candidate.suffix!r}"
+            )
+
+        file_path = str(candidate)
         if not os.path.isfile(file_path):
             raise FileNotFoundError(f"Uploaded file not found: {file_path}")
 
