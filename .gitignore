@@ -60,3 +60,4 @@ tasks/reelsmith-live-run-state.json
 # TikTok cookie adapter temp files
 data/tiktok-cookies/
 *.cookie
+app/vendor/tiktok_uploader/tiktok-signature/node_modules/
