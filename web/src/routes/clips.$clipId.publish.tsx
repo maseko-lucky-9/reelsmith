@@ -1,10 +1,11 @@
 /**
  * /clips/$clipId/publish — schedule or immediately publish a clip
- * to a connected social account (W1.14).
+ * to a connected social account (W1.14 + TikTok confirmation summary + PUBLISH_* toasts).
  */
 import { createRoute, useParams, Link } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { toast } from 'sonner'
 import { rootRoute } from './root'
 import { api } from '@/api/client'
 import type { PublishJob } from '@/api/client'
@@ -14,6 +15,44 @@ export const clipPublishRoute = createRoute({
   path: '/clips/$clipId/publish',
   component: ClipPublishPage,
 })
+
+/**
+ * Poll an in-flight publish job and fire sonner toasts on status transitions.
+ * Uses react-query's select to detect changes without re-renders.
+ */
+function usePublishToasts(publishId: string | null) {
+  const prevStatusRef = useRef<string | null>(null)
+
+  useQuery({
+    queryKey: ['publish-job-watch', publishId],
+    queryFn: () => api.getPublish(publishId!),
+    enabled: publishId !== null,
+    refetchInterval: (query) => {
+      const data = query.state.data as PublishJob | undefined
+      if (!data) return 2000
+      if (['published', 'posted_unverified', 'failed', 'cancelled'].includes(data.status))
+        return false
+      return 2000
+    },
+    select(data) {
+      const prev = prevStatusRef.current
+      const next = data.status
+      if (prev !== next) {
+        prevStatusRef.current = next
+        if (next === 'queued') {
+          toast.info('Queued for posting')
+        } else if (next === 'posted_unverified') {
+          toast.success('Posted! (unverified — check profile)')
+        } else if (next === 'published') {
+          toast.success('Published successfully!')
+        } else if (next === 'failed') {
+          toast.error(`Publish failed: ${data.error ?? 'unknown error'}`)
+        }
+      }
+      return data
+    },
+  })
+}
 
 function ClipPublishPage() {
   const { clipId } = useParams({ from: '/clips/$clipId/publish' })
@@ -39,11 +78,42 @@ function ClipPublishPage() {
   const [hashtagsRaw, setHashtagsRaw] = useState('')
   const [scheduleAt, setScheduleAt] = useState('')
 
-  // Hydrate defaults from the clip once it loads.
+  // Track the most recently submitted publish job ID for toast polling.
+  const [activePublishId, setActivePublishId] = useState<string | null>(null)
+  usePublishToasts(activePublishId)
+
+  // Hydrate title from clip once it loads (existing behaviour).
   useMemo(() => {
-    if (clipQuery.data && !title)
-      setTitle(clipQuery.data.title ?? '')
+    if (clipQuery.data && !title) setTitle(clipQuery.data.title ?? '')
   }, [clipQuery.data, title])
+
+  // Prefill description from clip.summary on first load.
+  const descriptionHydrated = useRef(false)
+  useEffect(() => {
+    if (clipQuery.data && !descriptionHydrated.current) {
+      descriptionHydrated.current = true
+      if (clipQuery.data.summary) setDescription(clipQuery.data.summary)
+    }
+  }, [clipQuery.data])
+
+  // Prefill hashtags from clip.hashtags on first load.
+  const hashtagsHydrated = useRef(false)
+  useEffect(() => {
+    if (clipQuery.data && !hashtagsHydrated.current) {
+      hashtagsHydrated.current = true
+      const tags = clipQuery.data.hashtags
+      if (tags && tags.length > 0) {
+        setHashtagsRaw(tags.map((t) => (t.startsWith('#') ? t : `#${t}`)).join(' '))
+      }
+    }
+  }, [clipQuery.data])
+
+  const parsedHashtags = hashtagsRaw
+    .split(/[,\s]+/)
+    .map((h) => h.replace(/^#/, '').trim())
+    .filter(Boolean)
+
+  const selectedAccount = (accountsQuery.data ?? []).find((a) => a.id === accountId)
 
   const createMutation = useMutation({
     mutationFn: () =>
@@ -52,14 +122,16 @@ function ClipPublishPage() {
         social_account_id: accountId,
         title: title || undefined,
         description: description || undefined,
-        hashtags: hashtagsRaw
-          .split(/[,\s]+/)
-          .map((h) => h.replace(/^#/, '').trim())
-          .filter(Boolean),
+        hashtags: parsedHashtags,
         schedule_at: scheduleAt || undefined,
       }),
-    onSuccess: () =>
-      void queryClient.invalidateQueries({ queryKey: ['publish-jobs', clipId] }),
+    onSuccess: (data) => {
+      setActivePublishId(data.id)
+      void queryClient.invalidateQueries({ queryKey: ['publish-jobs', clipId] })
+    },
+    onError: (err: Error) => {
+      toast.error(`Failed to submit: ${err.message}`)
+    },
   })
 
   const accounts = accountsQuery.data ?? []
@@ -156,6 +228,45 @@ function ClipPublishPage() {
           />
         </label>
 
+        {/* Confirmation summary — shown when an account is selected */}
+        {accountId && selectedAccount ? (
+          <div className="rounded-md border border-white/10 bg-zinc-900/50 p-4 space-y-1.5 text-sm">
+            <p className="text-xs uppercase tracking-wide text-zinc-400 mb-2 font-semibold">
+              Review before publishing
+            </p>
+            <div className="flex gap-2">
+              <span className="text-zinc-500 w-20 shrink-0">Platform</span>
+              <span className="capitalize">{selectedAccount.platform}</span>
+            </div>
+            <div className="flex gap-2">
+              <span className="text-zinc-500 w-20 shrink-0">Account</span>
+              <span>{selectedAccount.account_handle}</span>
+            </div>
+            <div className="flex gap-2 items-start">
+              <span className="text-zinc-500 w-20 shrink-0">Caption</span>
+              <span className="text-zinc-300 break-all">
+                {description
+                  ? description.slice(0, 200) + (description.length > 200 ? '…' : '')
+                  : <em className="text-zinc-600 not-italic">none</em>}
+              </span>
+            </div>
+            <div className="flex gap-2">
+              <span className="text-zinc-500 w-20 shrink-0">Hashtags</span>
+              <span className="text-zinc-300">
+                {parsedHashtags.length > 0
+                  ? `${parsedHashtags.length} tag${parsedHashtags.length !== 1 ? 's' : ''}`
+                  : <em className="text-zinc-600 not-italic">none</em>}
+              </span>
+            </div>
+            {scheduleAt ? (
+              <div className="flex gap-2">
+                <span className="text-zinc-500 w-20 shrink-0">Scheduled</span>
+                <span>{new Date(scheduleAt).toLocaleString()}</span>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
         <button
           type="button"
           disabled={!accountId || createMutation.isPending}
@@ -182,14 +293,14 @@ function ClipPublishPage() {
               <li key={j.id} className="py-2.5 text-sm flex items-center gap-3">
                 <span
                   className={
-                    j.status === 'published'
+                    j.status === 'published' || j.status === 'posted_unverified'
                       ? 'text-emerald-400'
                       : j.status === 'failed'
                         ? 'text-red-400'
                         : 'text-zinc-300'
                   }
                 >
-                  {j.status}
+                  {j.status === 'posted_unverified' ? 'posted (unverified)' : j.status}
                 </span>
                 <span className="text-zinc-400">— {j.title || '(no title)'}</span>
                 {j.external_post_url ? (

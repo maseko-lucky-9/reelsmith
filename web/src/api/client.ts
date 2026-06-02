@@ -52,6 +52,7 @@ export interface ClipRecord {
   thumbnail_path: string | null
   title: string | null
   summary: string | null
+  hashtags?: string[] | null
   virality_score: number | null
   score_breakdown: Record<string, number> | null
   transcript: Record<string, unknown> | null
@@ -119,6 +120,13 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(`${res.status} ${text}`)
   }
   return res.json() as Promise<T>
+}
+
+/** Upload helper — does NOT set Content-Type (browser sets multipart boundary automatically). */
+async function apiUpload(path: string, formData: FormData): Promise<Response> {
+  const res = await fetch(`${BASE}${path}`, { method: 'POST', body: formData })
+  if (!res.ok) throw new Error(await res.text())
+  return res
 }
 
 export const api = {
@@ -262,6 +270,30 @@ export const api = {
     const params = clipIds.map((i) => `ids=${encodeURIComponent(i)}`).join('&')
     return `${BASE}/api/clips/bulk-export.zip?${params}`
   },
+
+  // ── TikTok — direct upload ───────────────────────────────────────────────
+  /** POST /api/uploads — multipart upload of a local video file. */
+  uploadVideo: async (file: File): Promise<{ job_id: string; upload_path: string; status: string }> => {
+    const fd = new FormData()
+    fd.append('file', file)
+    const res = await apiUpload('/api/uploads', fd)
+    return res.json() as Promise<{ job_id: string; upload_path: string; status: string }>
+  },
+
+  // ── TikTok — connect account ─────────────────────────────────────────────
+  /** POST /api/social/tiktok/connect — connect via cookie-JSON export. */
+  // TODO: gen:api after backend lands
+  connectTikTok: (body: { account_handle: string; cookies_json: string; display_name?: string }) =>
+    apiFetch<SocialAccount>('/api/social/tiktok/connect', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  // ── TikTok — capabilities ────────────────────────────────────────────────
+  /** GET /api/social/tiktok/capabilities — server feature flags. */
+  // TODO: gen:api after backend lands
+  getTikTokCapabilities: () =>
+    apiFetch<TikTokCapabilities>('/api/social/tiktok/capabilities'),
 }
 
 // ── Wave 1 types ────────────────────────────────────────────────────────────
@@ -358,6 +390,7 @@ export interface PublishJob {
     | 'queued'
     | 'posting'
     | 'published'
+    | 'posted_unverified'
     | 'failed'
     | 'cancelled'
   schedule_at: string | null
@@ -367,4 +400,10 @@ export interface PublishJob {
   error: string | null
   attempts: number
   created_at: string
+}
+
+/** TikTok server capabilities — TODO: gen:api after backend lands */
+export interface TikTokCapabilities {
+  has_stable_key: boolean
+  sidecar_configured: boolean
 }

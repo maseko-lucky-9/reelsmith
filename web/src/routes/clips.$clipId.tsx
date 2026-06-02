@@ -92,6 +92,13 @@ function VideoPanel({ clip }: { clip: ClipRecord }) {
         >
           Edit clip →
         </Link>
+        <Link
+          to="/clips/$clipId/publish"
+          params={{ clipId: clip.clip_id }}
+          className="text-sm px-3 py-1.5 rounded-lg border border-white/20 text-zinc-200 hover:text-white hover:border-white/40 transition-colors"
+        >
+          Post to TikTok →
+        </Link>
       </div>
 
       {/* Word-synced transcript */}

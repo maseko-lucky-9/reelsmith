@@ -15,10 +15,12 @@ import { analyticsRoute } from './routes/analytics'
 import { apiSettingsRoute } from './routes/settings.api'
 import { webhooksSettingsRoute } from './routes/settings.webhooks'
 import { shareRoute } from './routes/share.$token'
+import { uploadsNewRoute } from './routes/uploads.new'
 
 export const routeTree = rootRoute.addChildren([
   indexRoute,
   jobsNewRoute,
+  uploadsNewRoute,
   jobDetailRoute,
   clipDetailRoute,
   workflowRoute,
