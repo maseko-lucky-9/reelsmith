@@ -109,6 +109,20 @@ if _HAS_PYDANTIC_SETTINGS:
         scheduler_poll_seconds: int = 30
         scheduler_max_concurrent: int = 3
 
+        # ── TikTok cookie adapter ─────────────────────────────────────────────
+        # Set YTVIDEO_SOCIAL_PROVIDER_TIKTOK=cookie to activate.
+        # YTVIDEO_OAUTH_ENCRYPT_KEY must be a stable Fernet key or cookies
+        # die on process restart (generate: python -c "from cryptography.fernet
+        # import Fernet; print(Fernet.generate_key().decode())").
+        tiktok_cookies_dir: str = "data/tiktok-cookies"
+        tiktok_profile_url_base: str = "https://www.tiktok.com/@"
+        tiktok_node_bin: str = "node"
+        tiktok_session_ttl_days: int = 21
+        # ── TikTok n8n sidecar (interchangeable path) ─────────────────────────
+        # Set YTVIDEO_SOCIAL_PROVIDER_TIKTOK=n8n to activate.
+        # e.g. http://tiktok-sidecar.n8n-live.svc.cluster.local:8000/api/upload
+        tiktok_sidecar_url: str | None = None
+
         # ── AI Hook (W1.7) ────────────────────────────────────────────────────
         ai_hook_enabled: bool = True
         ai_hook_max_chars: int = 80

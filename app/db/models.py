@@ -8,7 +8,7 @@ from sqlalchemy import (
     Boolean, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text,
     UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import JSON, UUID
+from sqlalchemy.dialects.postgresql import JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -196,8 +196,11 @@ class SocialAccount(Base):
 
 
 # Status state machine for PublishJob (W1.4).
+# "posted_unverified" (W-TikTok): cookie-driven posts the sidecar can't
+# confirm synchronously — surfaced so the operator can verify manually.
 PUBLISH_JOB_STATUSES: tuple[str, ...] = (
-    "pending", "queued", "posting", "published", "failed", "cancelled",
+    "pending", "queued", "posting", "published", "posted_unverified",
+    "failed", "cancelled",
 )
 
 
@@ -226,7 +229,7 @@ class PublishJob(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     hashtags: Mapped[list | None] = mapped_column(JSON, nullable=True)
     status: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="pending", index=True
+        String(32), nullable=False, default="pending", index=True
     )
     schedule_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True

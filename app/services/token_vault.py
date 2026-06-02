@@ -69,6 +69,17 @@ def decrypt(ciphertext: bytes) -> str:
         raise ValueError("invalid OAuth token ciphertext") from e
 
 
+def has_stable_key() -> bool:
+    """True when YTVIDEO_OAUTH_ENCRYPT_KEY is set in the environment (non-empty).
+
+    Returns False when the vault is using the ephemeral in-process fallback key.
+    Call this before storing cookies — ephemeral mode means tokens die on
+    restart. Reads the same source as ``_resolve_key`` (the raw environment,
+    NOT app.settings) so the two never disagree.
+    """
+    return bool(os.environ.get("YTVIDEO_OAUTH_ENCRYPT_KEY", "").strip())
+
+
 def reset_for_tests() -> None:
     """Drop cached Fernet + ephemeral key. Tests only."""
     global _EPHEMERAL_KEY
