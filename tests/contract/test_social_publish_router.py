@@ -355,6 +355,11 @@ async def test_tiktok_connect_412_when_no_encrypt_key(monkeypatch):
     returns False, triggering the 412 security gate.
     """
     monkeypatch.delenv("YTVIDEO_OAUTH_ENCRYPT_KEY", raising=False)
+    # Also clear settings.oauth_encrypt_key — pydantic-settings reads .env into
+    # settings fields (not os.environ), so delenv alone isn't enough now that
+    # has_stable_key() checks both sources.
+    from app.settings import settings as _settings
+    monkeypatch.setattr(_settings, "oauth_encrypt_key", None)
     token_vault.reset_for_tests()
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
