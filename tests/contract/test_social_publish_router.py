@@ -1,7 +1,7 @@
 """Contract tests for /api/social/* (W1.6)."""
 from __future__ import annotations
 
-from pathlib import Path
+import json
 
 import httpx
 import pytest
@@ -342,3 +342,63 @@ async def test_list_jobs_no_status_filter_returns_all(social_client):
     assert r.status_code == 200
     # Both jobs (queued + pending) should be present
     assert len(r.json()) >= 2
+
+
+# ── T-06: POST /api/social/tiktok/connect — 412 when no stable key ───────────
+
+
+async def test_tiktok_connect_412_when_no_encrypt_key(monkeypatch):
+    """POST /api/social/tiktok/connect returns 412 when YTVIDEO_OAUTH_ENCRYPT_KEY unset.
+
+    The autouse _vault_key fixture sets the key for all tests in this module.
+    This test explicitly removes it and resets the vault so has_stable_key()
+    returns False, triggering the 412 security gate.
+    """
+    monkeypatch.delenv("YTVIDEO_OAUTH_ENCRYPT_KEY", raising=False)
+    token_vault.reset_for_tests()
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def _override():
+        async with factory() as session:
+            yield session
+
+    from app.routers.social_publish import get_publish_runner
+    from app.services.social_publish_service import run_publish_job
+
+    async def _runner_override():
+        async def _run(pj_id: str):
+            async with factory() as session:
+                await run_publish_job(session, pj_id)
+
+        return _run
+
+    app = create_app()
+    app.dependency_overrides[get_session] = _override
+    app.dependency_overrides[get_publish_runner] = _runner_override
+
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.post(
+                "/api/social/tiktok/connect",
+                json={
+                    "account_handle": "@test",
+                    "cookies_json": json.dumps(
+                        [
+                            {"name": "sessionid", "value": "abc"},
+                            {"name": "tt-target-idc", "value": "useast2a"},
+                        ]
+                    ),
+                },
+            )
+
+        assert resp.status_code == 412
+        assert "YTVIDEO_OAUTH_ENCRYPT_KEY" in resp.json()["detail"]
+    finally:
+        await engine.dispose()
+        token_vault.reset_for_tests()

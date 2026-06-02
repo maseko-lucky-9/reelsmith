@@ -319,3 +319,63 @@ async def test_completed_event_not_emitted_on_failure(factory, monkeypatch, tmp_
     assert EventType.PUBLISH_COMPLETED not in bus.types(), (
         f"PUBLISH_COMPLETED was unexpectedly emitted on failure: {bus.types()}"
     )
+
+
+@_requires_bus
+@pytest.mark.asyncio
+async def test_emits_failed_on_decrypt_error(factory, monkeypatch, tmp_path):
+    """PUBLISH_FAILED emitted when token_vault.decrypt raises ValueError.
+
+    Seeds the token with key A, then resets the vault so it generates a new
+    ephemeral key B, making the stored ciphertext unreadable — triggering the
+    decrypt-fail branch in social_publish_service.py.
+    """
+    key_a = Fernet.generate_key().decode()
+    monkeypatch.setenv("YTVIDEO_OAUTH_ENCRYPT_KEY", key_a)
+    output = tmp_path / "clip.mp4"
+    output.write_bytes(b"x")
+
+    pj_id = await _seed(factory, output_path=str(output))
+
+    # Switch to a different key so the stored ciphertext is unreadable
+    key_b = Fernet.generate_key().decode()
+    monkeypatch.setenv("YTVIDEO_OAUTH_ENCRYPT_KEY", key_b)
+    token_vault.reset_for_tests()
+
+    bus = FakeBus()
+
+    async with factory() as session:
+        pj = await run_publish_job(session, pj_id, bus=bus)
+
+    await asyncio.sleep(0)
+
+    assert pj.status == "failed"
+    assert EventType.PUBLISH_FAILED in bus.types(), (
+        f"Expected PUBLISH_FAILED for decrypt error, got {bus.types()}"
+    )
+
+
+@_requires_bus
+@pytest.mark.asyncio
+async def test_emits_failed_on_unsupported_platform(factory, monkeypatch, tmp_path):
+    """PUBLISH_FAILED emitted when the platform has no live adapter."""
+    monkeypatch.setenv("YTVIDEO_OAUTH_ENCRYPT_KEY", Fernet.generate_key().decode())
+    # Ensure we use the stub provider (not a per-platform real override) so
+    # "unsupported_xyz" hits the UnsupportedPlatformError branch.
+    monkeypatch.delenv("YTVIDEO_SOCIAL_PROVIDER", raising=False)
+    output = tmp_path / "clip.mp4"
+    output.write_bytes(b"x")
+
+    pj_id = await _seed(factory, output_path=str(output), platform="unsupported_xyz")
+    bus = FakeBus()
+
+    # No adapter= override — let the service call get_adapter("unsupported_xyz")
+    async with factory() as session:
+        pj = await run_publish_job(session, pj_id, bus=bus)
+
+    await asyncio.sleep(0)
+
+    assert pj.status == "failed"
+    assert EventType.PUBLISH_FAILED in bus.types(), (
+        f"Expected PUBLISH_FAILED for unsupported platform, got {bus.types()}"
+    )

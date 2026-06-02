@@ -38,6 +38,14 @@ _requires_adapter = pytest.mark.skipif(
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
+def _valid_cookie_token_list() -> str:
+    """Return a minimal valid cookie blob (JSON list-of-dicts) accepted by the adapter."""
+    return json.dumps([
+        {"name": "sessionid", "value": "abc123", "domain": ".tiktok.com"},
+        {"name": "tt-target-idc", "value": "useast2a", "domain": ".tiktok.com"},
+    ])
+
+
 def _make_request(
     *,
     access_token: str = "",
@@ -373,3 +381,54 @@ async def test_no_token_in_error_message(tmp_path, access_token, clip_exists):
         )
     # Specific secret value must not appear
     assert "SUPER_SECRET_SESSION_VALUE" not in msg
+
+
+# ── List-format cookie blob ───────────────────────────────────────────────────
+
+
+@_requires_adapter
+@pytest.mark.asyncio
+async def test_list_format_cookie_success(tmp_path):
+    """List-of-dicts cookie format publishes successfully."""
+    from app.services.social.tiktok import TikTokCookieAdapter
+
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"fake-mp4")
+
+    fake = FakeUploader(return_value=True)
+    adapter = TikTokCookieAdapter(uploader=fake)
+
+    req = _make_request(
+        access_token=_valid_cookie_token_list(),
+        clip_path=str(clip),
+    )
+    result = await adapter.publish(req)
+
+    assert isinstance(result, PublishResult)
+    assert result.external_post_id.startswith("tiktok_")
+
+
+@_requires_adapter
+@pytest.mark.asyncio
+async def test_list_format_missing_sessionid_raises(tmp_path):
+    """List-of-dicts format with missing sessionid raises."""
+    from app.services.social.tiktok import TikTokCookieAdapter
+
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"fake-mp4")
+
+    # List-format token without sessionid
+    token = json.dumps([{"name": "tt-target-idc", "value": "useast2a"}])
+
+    fake = FakeUploader(return_value=True)
+    adapter = TikTokCookieAdapter(uploader=fake)
+
+    req = _make_request(
+        access_token=token,
+        clip_path=str(clip),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await adapter.publish(req)
+
+    assert "cookie expired" in str(exc_info.value).lower()

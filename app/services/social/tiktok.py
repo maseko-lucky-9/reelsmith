@@ -118,9 +118,11 @@ class TikTokCookieAdapter:
         async with _SEMAPHORE, lock:
             cookie_file = cookies_dir / f"tiktok_session-{handle}.cookie"
             try:
-                # Write pickle in 0o600 — same format the vendored lib expects
-                with open(cookie_file, "wb") as fh:
-                    os.chmod(fh.fileno(), 0o600)
+                # Create owner-only atomically: use os.open so the mode is set
+                # at creation time (no TOCTOU window between open and chmod).
+                cookies_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+                fd = os.open(cookie_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "wb") as fh:
                     pickle.dump(cookie_list, fh)
 
                 ok = await asyncio.to_thread(
