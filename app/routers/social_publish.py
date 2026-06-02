@@ -52,7 +52,7 @@ async def get_publish_runner(request: Request) -> PublishRunner:
 
     return _run
 
-router = APIRouter(prefix="/api/social", tags=["social-publish"])
+router = APIRouter(prefix="/social", tags=["social-publish"])
 
 
 class PublishCreate(BaseModel):
