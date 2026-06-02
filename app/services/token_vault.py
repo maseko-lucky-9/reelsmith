@@ -24,9 +24,23 @@ _LOCK = threading.Lock()
 _EPHEMERAL_KEY: bytes | None = None
 
 
+def _configured_key() -> str:
+    """Return the raw key string from os.environ OR pydantic settings (whichever is set)."""
+    from_env = os.environ.get("YTVIDEO_OAUTH_ENCRYPT_KEY", "").strip()
+    if from_env:
+        return from_env
+    # pydantic-settings reads .env into settings fields but NOT into os.environ,
+    # so we also check settings.oauth_encrypt_key as a fallback.
+    try:
+        from app.settings import settings as _s  # lazy — avoids circular at module load
+        return (_s.oauth_encrypt_key or "").strip()
+    except Exception:
+        return ""
+
+
 def _resolve_key() -> bytes:
     global _EPHEMERAL_KEY
-    configured = os.environ.get("YTVIDEO_OAUTH_ENCRYPT_KEY", "").strip()
+    configured = _configured_key()
     if configured:
         return configured.encode("utf-8")
 
@@ -77,7 +91,7 @@ def has_stable_key() -> bool:
     restart. Reads the same source as ``_resolve_key`` (the raw environment,
     NOT app.settings) so the two never disagree.
     """
-    return bool(os.environ.get("YTVIDEO_OAUTH_ENCRYPT_KEY", "").strip())
+    return bool(_configured_key())
 
 
 def reset_for_tests() -> None:
