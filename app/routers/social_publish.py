@@ -6,31 +6,49 @@ default stub provider writes a JSON descriptor.
 """
 from __future__ import annotations
 
-from datetime import datetime
+import json
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from typing import Awaitable, Callable
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+)
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import current_user_id
 from app.db.models import ClipRecord, PublishJob, SocialAccount
 from app.db.session import get_session, get_session_factory
+from app.services import token_vault
 from app.services.social_publish_service import run_publish_job
+from app.settings import settings
 
 PublishRunner = Callable[[str], Awaitable[None]]
 
 
-async def get_publish_runner() -> PublishRunner:
+async def get_publish_runner(request: Request) -> PublishRunner:
     """FastAPI dep — returns an async runner bound to the global session
-    factory. Tests override this to bind to an in-memory engine."""
+    factory and the app's event bus. Tests override this to bind to an
+    in-memory engine.
+
+    The runner threads ``app.state.event_bus`` into ``run_publish_job`` so
+    publish lifecycle events reach SSE subscribers. ``getattr`` guards the
+    rare case where the bus isn't on state yet (e.g. before lifespan).
+    """
     factory = get_session_factory()
+    bus = getattr(request.app.state, "event_bus", None)
 
     async def _run(publish_job_id: str) -> None:
         async with factory() as session:
-            await run_publish_job(session, publish_job_id)
+            await run_publish_job(session, publish_job_id, bus=bus)
 
     return _run
 
@@ -54,6 +72,16 @@ class SocialAccountCreate(BaseModel):
     refresh_token: str | None = None
     expires_at: datetime | None = None
     scopes: list[str] | None = None
+
+
+class TikTokConnect(BaseModel):
+    account_handle: str
+    cookies_json: str  # JSON-serialised list of cookie dicts (DevTools export)
+    display_name: str | None = None
+
+
+# Minimum cookies required to drive an authenticated TikTok session.
+_REQUIRED_TIKTOK_COOKIES: tuple[str, ...] = ("sessionid", "tt-target-idc")
 
 
 def _account_to_dict(a: SocialAccount) -> dict[str, Any]:
@@ -103,7 +131,6 @@ async def list_accounts(session: AsyncSession = Depends(get_session)):
 async def create_account(
     body: SocialAccountCreate, session: AsyncSession = Depends(get_session)
 ):
-    from app.services import token_vault
     from app.services.social import supported_platforms
 
     if body.platform not in supported_platforms():
@@ -135,6 +162,89 @@ async def delete_account(account_id: str, session: AsyncSession = Depends(get_se
         raise HTTPException(status_code=404, detail="account not found")
     await session.delete(a)
     await session.commit()
+
+
+# ── TikTok cookie connect ────────────────────────────────────────────────────
+
+
+@router.post("/tiktok/connect", status_code=201)
+async def tiktok_connect(
+    body: TikTokConnect,
+    session: AsyncSession = Depends(get_session),
+    owner_id: str = Depends(current_user_id),
+):
+    """Store a TikTok cookie session as a SocialAccount.
+
+    Cookies are exported from browser DevTools as a JSON list of cookie
+    dicts. We require a stable encryption key (otherwise the encrypted
+    cookies die on the next restart) and validate that the session-critical
+    cookies are present before persisting.
+    """
+    # Refuse to store cookies under an ephemeral key — they would be lost on
+    # restart, silently breaking publishing later.
+    if not token_vault.has_stable_key():
+        raise HTTPException(
+            status_code=412,
+            detail=(
+                "YTVIDEO_OAUTH_ENCRYPT_KEY is not set. Generate a stable key "
+                'with: python -c "from cryptography.fernet import Fernet; '
+                'print(Fernet.generate_key().decode())" and add it to .env as '
+                "YTVIDEO_OAUTH_ENCRYPT_KEY=<key>"
+            ),
+        )
+
+    try:
+        cookies = json.loads(body.cookies_json)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422, detail=f"cookies_json is not valid JSON: {exc}"
+        )
+
+    if not isinstance(cookies, list):
+        raise HTTPException(
+            status_code=422,
+            detail="cookies_json must be a JSON array of cookie objects",
+        )
+
+    present = {
+        c.get("name")
+        for c in cookies
+        if isinstance(c, dict) and c.get("name")
+    }
+    missing = [name for name in _REQUIRED_TIKTOK_COOKIES if name not in present]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "cookies_json is missing required TikTok cookies: "
+                + ", ".join(missing)
+            ),
+        )
+
+    ttl_days = getattr(settings, "tiktok_session_ttl_days", 30)
+    expires_at = datetime.now(timezone.utc) + timedelta(days=ttl_days)
+
+    account = SocialAccount(
+        platform="tiktok",
+        account_handle=body.account_handle,
+        display_name=body.display_name,
+        access_token_enc=token_vault.encrypt(body.cookies_json),
+        expires_at=expires_at,
+        owner_id=owner_id,
+    )
+    session.add(account)
+    await session.commit()
+    await session.refresh(account)
+    return _account_to_dict(account)
+
+
+@router.get("/tiktok/capabilities")
+async def tiktok_capabilities():
+    """Read-only capability probe for the TikTok connect flow."""
+    return {
+        "has_stable_key": token_vault.has_stable_key(),
+        "sidecar_configured": bool(getattr(settings, "tiktok_sidecar_url", None)),
+    }
 
 
 # ── Publish jobs ────────────────────────────────────────────────────────────
