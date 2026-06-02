@@ -56,3 +56,7 @@ agentdb.rvf.lock
 
 # Live-run checkpoint (session state, not source)
 tasks/reelsmith-live-run-state.json
+
+# TikTok cookie adapter temp files
+data/tiktok-cookies/
+*.cookie

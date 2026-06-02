@@ -38,6 +38,17 @@ def get_adapter(platform: str) -> PlatformAdapter:
         from app.services.social.youtube import YouTubeAdapter
         return YouTubeAdapter()
 
+    # TikTok — two live providers: cookie-session (in-app) and n8n sidecar.
+    if platform == "tiktok":
+        if provider == "cookie":
+            from app.services.social.tiktok import TikTokCookieAdapter
+
+            return TikTokCookieAdapter()
+        if provider == "n8n":
+            from app.services.social.n8n_tiktok import N8nTikTokAdapter
+
+            return N8nTikTokAdapter()
+
     # Live adapter not yet implemented for this platform → fall back to stub
     # so the dashboard still works while operators complete app review.
     return StubAdapter(platform=platform)
