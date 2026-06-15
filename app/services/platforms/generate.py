@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from urllib.parse import urlparse
@@ -40,19 +41,52 @@ _AUDIO_TAIL_HEADROOM_SECONDS = 2.0
 
 
 def _probe_duration(path: str) -> float:
-    """Return media duration in seconds via ffprobe, or 0 on failure."""
+    """Return media duration in seconds, CI-safe.
+
+    Prefers MoviePy (which uses ``imageio-ffmpeg``'s bundled ffmpeg and works in
+    CI where a system ``ffprobe`` is absent). Handles both video containers and
+    audio-only files (e.g. wav voice-over). Only falls back to the ``ffprobe``
+    subprocess when MoviePy can't open the file AND a real ``ffprobe`` is on
+    PATH. Never silently returns ``0.0`` when a real duration is obtainable.
+    """
+    moviepy_err: Exception | None = None
     try:
-        result = subprocess.run(
-            [
-                "ffprobe", "-v", "quiet", "-print_format", "json",
-                "-show_format", path,
-            ],
-            capture_output=True, text=True, timeout=15,
-        )
-        info = json.loads(result.stdout)
-        return float(info.get("format", {}).get("duration", 0))
-    except Exception:
-        return 0.0
+        from moviepy.editor import AudioFileClip, VideoFileClip
+
+        try:
+            clip = VideoFileClip(path)
+        except Exception:
+            # Audio-only container (wav VO) — VideoFileClip can't open it.
+            clip = AudioFileClip(path)
+        try:
+            return float(clip.duration)
+        finally:
+            try:
+                clip.close()
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception as e:  # noqa: BLE001
+        moviepy_err = e
+
+    # MoviePy could not read the file. Only now consider ffprobe, and only if a
+    # real one is installed (imageio-ffmpeg ships ffmpeg, NOT ffprobe).
+    if shutil.which("ffprobe") is not None:
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe", "-v", "quiet", "-print_format", "json",
+                    "-show_format", path,
+                ],
+                capture_output=True, text=True, timeout=15,
+            )
+            info = json.loads(result.stdout)
+            return float(info.get("format", {}).get("duration", 0))
+        except Exception:  # noqa: BLE001
+            pass
+
+    raise RuntimeError(
+        f"could not determine duration of {path!r}: {moviepy_err}"
+    )
 
 
 class GenerateAdapter:
@@ -199,6 +233,10 @@ class GenerateAdapter:
                 preset="ultrafast",
                 logger=None,
             )
+            # Derive duration from the in-memory clip rather than re-opening the
+            # written file with ffprobe — MoviePy's clip duration is authoritative
+            # and works in CI (no system ffprobe required).
+            result_duration = float(video.duration)
         finally:
             for c in opened:
                 try:
@@ -206,7 +244,7 @@ class GenerateAdapter:
                 except Exception:  # noqa: BLE001
                     pass
 
-        return _probe_duration(out_path)
+        return result_duration
 
     def extract_chapters(self, info: dict) -> list[Chapter]:
         return []

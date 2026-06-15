@@ -6,7 +6,6 @@ torch), and the no-silent-fallback contract on the real ``ltx`` provider.
 """
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 
@@ -15,34 +14,29 @@ import pytest
 from app.services import ltx_producer as svc
 
 
-def _ffprobe(path: str) -> dict:
-    result = subprocess.run(
-        [
-            "ffprobe", "-v", "quiet", "-print_format", "json",
-            "-show_format", "-show_streams", path,
-        ],
-        capture_output=True, text=True,
-    )
-    return json.loads(result.stdout)
-
-
 # ── stub provider ─────────────────────────────────────────────────────────────
 
 
 def test_stub_shot_produces_decodable_1080x1920_mp4(tmp_path):
+    """Stub renders a decodable 1080x1920 mp4 of the requested length.
+
+    Reads back via MoviePy (imageio-ffmpeg's bundled ffmpeg) so the check works
+    in CI where a system ``ffprobe`` is absent.
+    """
+    from moviepy.editor import VideoFileClip
+
     out = str(tmp_path / "shot.mp4")
     result = svc.generate_shot("a quiet city street", 2.0, out, provider="stub")
     assert result == out
 
-    info = _ffprobe(out)
-    video_streams = [s for s in info["streams"] if s["codec_type"] == "video"]
-    assert video_streams, "no video stream in stub mp4"
-    stream = video_streams[0]
-    assert int(stream["width"]) == 1080
-    assert int(stream["height"]) == 1920
-
-    duration = float(info["format"]["duration"])
-    assert duration == pytest.approx(2.0, abs=0.25)
+    clip = VideoFileClip(out)
+    try:
+        width, height = clip.size  # MoviePy returns [w, h]
+        assert int(width) == 1080
+        assert int(height) == 1920
+        assert clip.duration == pytest.approx(2.0, abs=0.25)
+    finally:
+        clip.close()
 
 
 def test_stub_unknown_provider_raises(tmp_path):

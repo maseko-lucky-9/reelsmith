@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -78,12 +77,18 @@ def _write_brief(brief_dir: Path, brief_id: str, **overrides) -> None:
 
 
 def _has_audio_stream(path: str) -> bool:
-    result = subprocess.run(
-        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", path],
-        capture_output=True, text=True,
-    )
-    streams = json.loads(result.stdout).get("streams", [])
-    return any(s.get("codec_type") == "audio" for s in streams)
+    """True if the mp4 carries an audio track.
+
+    Uses MoviePy (imageio-ffmpeg's bundled ffmpeg) rather than a raw ``ffprobe``
+    subprocess so the check works in CI where a system ``ffprobe`` is absent.
+    """
+    from moviepy.editor import VideoFileClip
+
+    clip = VideoFileClip(path)
+    try:
+        return clip.audio is not None and clip.audio.duration > 0
+    finally:
+        clip.close()
 
 
 # ── download() — happy path with stub producers ───────────────────────────────
