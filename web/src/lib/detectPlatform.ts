@@ -2,9 +2,17 @@
 // Mirror of `app/services/platforms/__init__.py` — keep regex hosts in sync.
 // `upload://` is preserved as a passthrough for internal uploaded videos.
 
-export type PlatformId = 'youtube' | 'facebook' | 'tiktok' | 'instagram' | 'upload' | 'unsupported'
+export type PlatformId =
+  | 'youtube'
+  | 'facebook'
+  | 'tiktok'
+  | 'instagram'
+  | 'upload'
+  | 'generate'
+  | 'unsupported'
 
-const HOSTS: Record<Exclude<PlatformId, 'upload' | 'unsupported'>, string[]> = {
+// `generate` (AI generation mode) and `upload` are not URL-derived hosts.
+const HOSTS: Record<Exclude<PlatformId, 'upload' | 'generate' | 'unsupported'>, string[]> = {
   youtube: ['youtube.com', 'youtu.be'],
   facebook: ['facebook.com', 'fb.watch'],
   tiktok: ['tiktok.com'],
@@ -17,6 +25,7 @@ const LABELS: Record<PlatformId, string> = {
   tiktok: 'TikTok',
   instagram: 'Instagram',
   upload: 'Upload',
+  generate: 'Generate',
   unsupported: 'Unsupported',
 }
 
@@ -34,8 +43,9 @@ function escapeRegex(s: string): string {
 export function detectPlatform(url: string): PlatformId {
   if (!url) return 'unsupported'
   if (url.startsWith('upload://')) return 'upload'
+  if (url.startsWith('generate://')) return 'generate'
   for (const [id, hosts] of Object.entries(HOSTS) as [
-    Exclude<PlatformId, 'upload' | 'unsupported'>,
+    Exclude<PlatformId, 'upload' | 'generate' | 'unsupported'>,
     string[],
   ][]) {
     if (hostMatches(url, hosts)) return id

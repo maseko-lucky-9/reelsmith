@@ -1,0 +1,14 @@
+# Heavy ML deps for the REAL generate:// providers only.
+# These power YTVIDEO_LTX_PROVIDER=ltx (AI b-roll) and
+# YTVIDEO_GENERATE_TTS_PROVIDER=voicebox-style local models.
+#
+# NOT included in base requirements.txt and NOT installed in CI — the default
+# stub providers need none of these. Install separately on a GPU/MPS host:
+#
+#   pip install -r requirements-generate.txt
+#
+# Runtime prerequisite (not pip): Apple Silicon (MPS) or CUDA for the ltx path.
+torch>=2.2
+diffusers>=0.27
+transformers>=4.40
+safetensors>=0.4

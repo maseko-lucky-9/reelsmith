@@ -36,6 +36,10 @@ describe('detectPlatform', () => {
     expect(detectPlatform('upload:///tmp/x.mp4')).toBe('upload')
   })
 
+  it('detects generate scheme', () => {
+    expect(detectPlatform('generate://abc123')).toBe('generate')
+  })
+
   it.each([
     'https://eviltiktok.com/foo',
     'https://youtube.com.attacker.io/watch',
@@ -68,6 +72,8 @@ describe('detectPlatform', () => {
     expect(platformLabel('facebook')).toBe('Facebook')
     expect(platformLabel('tiktok')).toBe('TikTok')
     expect(platformLabel('instagram')).toBe('Instagram')
+    expect(platformLabel('upload')).toBe('Upload')
+    expect(platformLabel('generate')).toBe('Generate')
     expect(platformLabel('unsupported')).toBe('Unsupported')
   })
 })

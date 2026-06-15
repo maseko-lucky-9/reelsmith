@@ -108,6 +108,32 @@ export interface CreateJobResponse {
   status: string
 }
 
+/** One AI-generated shot — a prompt plus a target duration in seconds. */
+export interface GenerateShot {
+  prompt: string
+  seconds: number
+}
+
+/**
+ * Payload for POST /api/generate (AI generation mode). Generate jobs share the
+ * same job lifecycle and pipeline events as POST /api/jobs, so the response
+ * reuses CreateJobResponse and the job detail timeline works unchanged.
+ */
+export interface GenerateBriefRequest {
+  title: string
+  script: string
+  shots: GenerateShot[]
+  voice_profile?: string
+  music_url?: string
+}
+
+/** Response from POST /api/generate. Backend returns brief_id alongside job_id. */
+export interface GenerateBriefResponse {
+  job_id: string
+  brief_id: string
+  status?: string
+}
+
 const BASE = ''
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -144,6 +170,13 @@ export const api = {
 
   createJob: (req: CreateJobRequest) =>
     apiFetch<CreateJobResponse>('/api/jobs', { method: 'POST', body: JSON.stringify(req) }),
+
+  /** POST /api/generate — AI generation mode. Returns { job_id, brief_id }. */
+  postGenerate: (body: GenerateBriefRequest) =>
+    apiFetch<GenerateBriefResponse>('/api/generate', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
 
   previewVideo: (url: string) => {
     const q = new URLSearchParams({ url })

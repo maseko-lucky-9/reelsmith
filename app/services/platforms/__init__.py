@@ -15,6 +15,7 @@ from app.services.platforms.base import (
     PlatformAdapter,
 )
 from app.services.platforms.facebook import FacebookAdapter
+from app.services.platforms.generate import GenerateAdapter
 from app.services.platforms.instagram import InstagramAdapter
 from app.services.platforms.tiktok import TikTokAdapter
 from app.services.platforms.upload import UploadAdapter
@@ -28,7 +29,8 @@ class UnsupportedPlatformError(ValueError):
 
 
 _ADAPTERS: list[type[PlatformAdapter]] = [
-    UploadAdapter,   # must be first — matches upload:// before URL-based adapters
+    UploadAdapter,    # scheme adapter — matches upload:// before URL-based adapters
+    GenerateAdapter,  # scheme adapter — matches generate:// before URL-based adapters
     YouTubeAdapter,
     FacebookAdapter,
     TikTokAdapter,
@@ -54,6 +56,7 @@ __all__ = [
     "Chapter",
     "DownloadResult",
     "FacebookAdapter",
+    "GenerateAdapter",
     "InstagramAdapter",
     "PlatformAdapter",
     "TikTokAdapter",

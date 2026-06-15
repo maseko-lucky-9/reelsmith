@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useRouterState } from '@tanstack/react-router'
 import {
   Home,
+  Sparkles,
   LayoutTemplate,
   FolderOpen,
   Calendar,
@@ -23,6 +24,7 @@ interface NavItem {
 
 const CREATE_ITEMS: NavItem[] = [
   { label: 'Home', icon: Home, to: '/' },
+  { label: 'Generate', icon: Sparkles, to: '/generate/new' },
   { label: 'Brand template', icon: LayoutTemplate, to: '/settings/brand' },
   { label: 'Asset library', icon: FolderOpen, to: '/', placeholder: true },
 ]
