@@ -23,23 +23,32 @@ from scripts import ltx_smoke, voicebox_smoke
 # ── Gate A: NOT_CONFIGURED path ───────────────────────────────────────────────
 
 
-def test_ltx_smoke_empty_model_path_returns_not_configured():
-    """An explicit empty --model-path short-circuits to exit 2."""
-    assert ltx_smoke.main(["--model-path", ""]) == ltx_smoke.EXIT_NOT_CONFIGURED
+def test_ltx_smoke_empty_fork_python_returns_not_configured():
+    """An explicit empty --ltx-python short-circuits to exit 2."""
+    assert ltx_smoke.main(["--ltx-python", ""]) == ltx_smoke.EXIT_NOT_CONFIGURED
 
 
 def test_ltx_smoke_unconfigured_settings_returns_not_configured(monkeypatch):
-    """With settings' ltx_model_path empty, the gate exits 2 (no overrides)."""
+    """With the fork settings empty, the gate exits 2 (no overrides)."""
     from app.settings import settings as app_settings
 
-    monkeypatch.setattr(app_settings, "ltx_model_path", "", raising=False)
+    monkeypatch.setattr(app_settings, "ltx_python", "", raising=False)
+    monkeypatch.setattr(app_settings, "ltx_inference_script", "", raising=False)
+    monkeypatch.setattr(app_settings, "ltx_pipeline_config", "", raising=False)
     assert ltx_smoke.main([]) == ltx_smoke.EXIT_NOT_CONFIGURED
 
 
-def test_ltx_smoke_nonexistent_weights_returns_not_configured(tmp_path):
-    """A model path that does not exist on disk is NOT_CONFIGURED, not a crash."""
-    missing = str(tmp_path / "no-such-weights")
-    assert ltx_smoke.main(["--model-path", missing]) == ltx_smoke.EXIT_NOT_CONFIGURED
+def test_ltx_smoke_nonexistent_fork_paths_returns_not_configured(tmp_path):
+    """Fork paths that don't exist on disk are NOT_CONFIGURED, not a crash."""
+    missing = str(tmp_path / "no-such-file")
+    rc = ltx_smoke.main(
+        [
+            "--ltx-python", missing,
+            "--inference-script", missing,
+            "--pipeline-config", missing,
+        ]
+    )
+    assert rc == ltx_smoke.EXIT_NOT_CONFIGURED
 
 
 # ── Gate A: black-frame helper (pure, unit-testable) ──────────────────────────
@@ -222,6 +231,30 @@ def test_importing_smoke_scripts_does_not_import_torch():
     assert "OK" in proc.stdout
 
 
-def test_torch_not_in_sys_modules_after_import():
-    """In-process guard: importing the modules here didn't pull in torch."""
-    assert "torch" not in sys.modules
+def test_smoke_scripts_have_no_import_time_torch_dependency():
+    """The smoke scripts must not import torch at module load.
+
+    Checked in a fresh interpreter that imports ONLY the two smoke scripts, so
+    the verdict is immune to torch being pulled into this session's
+    ``sys.modules`` by an unrelated test that legitimately exercises a
+    torch-backed runtime path (whisper / demucs / face detection). A bare
+    in-process ``"torch" not in sys.modules`` check is a false-positive trap in
+    any environment where torch is installed.
+    """
+    code = (
+        "import sys; "
+        "assert 'torch' not in sys.modules; "  # clean baseline
+        "import scripts.ltx_smoke, scripts.voicebox_smoke; "
+        "assert 'torch' not in sys.modules, "
+        "'a smoke script imported torch at module load'; "
+        "print('OK')"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, (
+        f"subprocess failed:\nstdout={proc.stdout}\nstderr={proc.stderr}"
+    )
+    assert "OK" in proc.stdout
