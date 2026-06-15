@@ -1,6 +1,7 @@
 import { rootRoute } from './routes/root'
 import { indexRoute } from './routes/index'
 import { jobsNewRoute } from './routes/jobs.new'
+import { generateNewRoute } from './routes/generate.new'
 import { jobDetailRoute } from './routes/jobs.$jobId'
 import { clipDetailRoute } from './routes/clips.$clipId'
 import { workflowRoute } from './routes/workflow'
@@ -20,6 +21,7 @@ import { uploadsNewRoute } from './routes/uploads.new'
 export const routeTree = rootRoute.addChildren([
   indexRoute,
   jobsNewRoute,
+  generateNewRoute,
   uploadsNewRoute,
   jobDetailRoute,
   clipDetailRoute,

@@ -26,6 +26,7 @@ from app.routers import (
     downloads,
     enhance_speech,
     folders,
+    generate,
     jobs,
     media,
     renders,
@@ -189,6 +190,7 @@ def create_app() -> FastAPI:
         return JSONResponse(status_code=400, content={"detail": str(exc), "url": exc.url})
 
     app.include_router(jobs.router)
+    app.include_router(generate.router)
     app.include_router(clips.router)
     app.include_router(clip_edits.router)
     app.include_router(media.router)

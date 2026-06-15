@@ -68,6 +68,8 @@ describe('detectPlatform', () => {
     expect(platformLabel('facebook')).toBe('Facebook')
     expect(platformLabel('tiktok')).toBe('TikTok')
     expect(platformLabel('instagram')).toBe('Instagram')
+    expect(platformLabel('upload')).toBe('Upload')
+    expect(platformLabel('generate')).toBe('Generate')
     expect(platformLabel('unsupported')).toBe('Unsupported')
   })
 })

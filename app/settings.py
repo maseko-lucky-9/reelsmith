@@ -136,6 +136,22 @@ if _HAS_PYDANTIC_SETTINGS:
         pexels_api_key: str | None = None
         broll_cache_dir: str = "data/broll-cache"
 
+        # ── Generate mode (Stage 1) ───────────────────────────────────────────
+        # Text brief → AI b-roll + TTS voice-over → assembled mp4 → existing
+        # pipeline. Defaults keep the feature OFF and both producers on STUB so
+        # importing settings and running CI is unchanged. Real providers
+        # (ltx / voicebox) need requirements-generate.txt and a GPU/MPS host.
+        generate_enabled: bool = False
+        generate_brief_dir: str = "data/generate-briefs"
+        ltx_provider: str = "stub"  # "stub" | "ltx"
+        ltx_model_path: str = ""
+        ltx_use_mps: bool = True
+        ltx_num_frames: int = 121
+        generate_tts_provider: str = "stub"  # "stub" | "voicebox"
+        voicebox_endpoint: str = ""
+        voicebox_api_key: str | None = None
+        generate_voice_profile: str = ""
+
         # ── Bulk export (W3.7) ────────────────────────────────────────────────
         bulk_export_max_clips: int = 200
 
@@ -194,6 +210,17 @@ else:  # Fallback: pydantic-settings not yet installed
         score_weights = '{"hook":0.30,"value":0.25,"emotion":0.15,"audio":0.15,"trend":0.15}'
         reframe_provider = "letterbox"
         broll_provider = "none"
+        # ── Generate mode (Stage 1) ───────────────────────────────────────────
+        generate_enabled = False
+        generate_brief_dir = "data/generate-briefs"
+        ltx_provider = "stub"
+        ltx_model_path = ""
+        ltx_use_mps = True
+        ltx_num_frames = 121
+        generate_tts_provider = "stub"
+        voicebox_endpoint = ""
+        voicebox_api_key = None
+        generate_voice_profile = ""
         max_upload_mb = 500
         retention_days = 30
         retention_sweep_minutes = 60
