@@ -53,7 +53,8 @@ const RUNNING_JOB = {
 async function installMocks(page: Page) {
   await page.route('**/api/generate', async (route) => {
     await route.fulfill({
-      status: 200,
+      // Matches the real router (app/routers/generate.py declares status_code=202).
+      status: 202,
       contentType: 'application/json',
       body: JSON.stringify({ job_id: JOB_ID, brief_id: BRIEF_ID, status: 'pending' }),
     })

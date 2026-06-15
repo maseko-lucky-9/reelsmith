@@ -33,6 +33,11 @@ _BRIEF_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 # this, AUDIO_TAIL_EPSILON_SECONDS clamping in clip_service drops trailing words.
 _TRAILING_PAD_SECONDS = 1.5
 
+# When the VO is the longer track, the video tail must clear the audio by at
+# least AUDIO_TAIL_EPSILON_SECONDS (1.0s in clip_service) plus a safety margin so
+# probe_safe_end → min(v,a) - epsilon never clamps real speech. 2.0s = epsilon + 1.0s.
+_AUDIO_TAIL_HEADROOM_SECONDS = 2.0
+
 
 def _probe_duration(path: str) -> float:
     """Return media duration in seconds via ffprobe, or 0 on failure."""
@@ -108,9 +113,12 @@ class GenerateAdapter:
         shot_paths: list[str] = []
         for i, shot in enumerate(shots):
             shot_path = str(dest / f"shot_{i:03d}.mp4")
+            # Defensive clamp — the router validates shot.seconds to [0.1, 30.0],
+            # but briefs can be written out-of-band, so bound it here too.
+            seconds = max(0.1, min(30.0, float(shot.get("seconds", 2.0))))
             ltx_producer.generate_shot(
                 shot.get("prompt", ""),
-                float(shot.get("seconds", 2.0)),
+                seconds,
                 shot_path,
                 provider=settings.ltx_provider,
                 model_path=settings.ltx_model_path or None,
@@ -142,7 +150,6 @@ class GenerateAdapter:
         from moviepy.editor import (
             AudioFileClip,
             ColorClip,
-            CompositeAudioClip,
             VideoFileClip,
             concatenate_videoclips,
         )
@@ -161,9 +168,16 @@ class GenerateAdapter:
                 ).set_fps(24)
                 opened.append(base)
 
-            # Target = max(shots length, VO length) + trailing pad, so the
-            # spoken content always has headroom before the clip ends.
-            target = max(base.duration, audio_clip.duration) + _TRAILING_PAD_SECONDS
+            # The downstream pipeline runs probe_safe_end → min(v,a) - epsilon.
+            # When the VO is longer than the concatenated b-roll, the video must
+            # extend STRICTLY past the audio by at least epsilon + margin so the
+            # safe_end clamp can never truncate spoken content. Pad the VIDEO tail
+            # to audio_duration + _AUDIO_TAIL_HEADROOM_SECONDS; never shorten audio.
+            min_video_for_audio = audio_clip.duration + _AUDIO_TAIL_HEADROOM_SECONDS
+            target = max(
+                base.duration + _TRAILING_PAD_SECONDS,
+                min_video_for_audio,
+            )
 
             # Pad video to target by holding a trailing black frame.
             pad_tail = ColorClip(
@@ -174,6 +188,8 @@ class GenerateAdapter:
             video = concatenate_videoclips([base, pad_tail], method="compose")
             opened.append(video)
 
+            # Attach the VO without truncating speech (audio is never shortened;
+            # the video was extended above to keep it strictly longer than audio).
             video = video.set_audio(audio_clip)
             video.write_videofile(
                 out_path,

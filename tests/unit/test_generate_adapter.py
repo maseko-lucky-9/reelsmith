@@ -136,3 +136,38 @@ def test_download_unknown_brief_raises(tmp_path, monkeypatch):
 
     with pytest.raises(FileNotFoundError):
         GenerateAdapter().download("generate://missing", str(tmp_path / "dest"))
+
+
+# ── _assemble — VO longer than b-roll must not get truncated ──────────────────
+
+
+def test_assemble_audio_longer_than_broll_keeps_headroom(tmp_path):
+    """When the VO outlasts the concatenated b-roll, the assembled video must
+    extend strictly past the audio by ≥ AUDIO_TAIL_EPSILON_SECONDS so the
+    downstream probe_safe_end clamp can never truncate spoken content.
+    """
+    from app.services import ltx_producer, tts_service
+    from app.services.clip_service import AUDIO_TAIL_EPSILON_SECONDS
+
+    dest = tmp_path / "dest"
+    dest.mkdir(parents=True, exist_ok=True)
+
+    # 1.0s b-roll shot (stub) vs a much longer VO so audio is the longer track.
+    shot_path = str(dest / "shot.mp4")
+    ltx_producer.generate_shot("a city street", 1.0, shot_path, provider="stub")
+
+    vo_wav = str(dest / "vo.wav")
+    # ~120 chars → stub duration ≈ max(2.0, 120/15) = 8.0s of audio.
+    long_script = "Stay focused while you work. " * 5
+    tts_service.synthesize(long_script, vo_wav, provider="stub")
+
+    audio_dur = gen_mod._probe_duration(vo_wav)
+    assert audio_dur > 1.0  # sanity: audio really is the longer track
+
+    out_path = str(dest / "generated.mp4")
+    video_dur = GenerateAdapter()._assemble([shot_path], vo_wav, out_path)
+
+    assert Path(out_path).is_file()
+    # The returned (probed) clip duration must clear the audio by at least the
+    # epsilon, so min(video, audio) - epsilon ≥ audio - epsilon never drops words.
+    assert video_dur >= audio_dur + AUDIO_TAIL_EPSILON_SECONDS

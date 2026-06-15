@@ -35,12 +35,18 @@ def create_video_subfolder(
         video_url, download_path, platform_id,
     )
     fallback = f"{platform_id}_video"
-    try:
-        title = fetch_video_title(video_url)
-        slug = _slugify(title, fallback)
-    except Exception as e:
-        log.warning("Falling back to generic folder name (%s): %s", fallback, e)
+    # Only yt-dlp can resolve a title for real http(s) URLs. Internal schemes
+    # (generate://, upload://) would otherwise stall ~10s inside extract_info
+    # before the except fallback — skip straight to the generic slug for them.
+    if not video_url.startswith(("http://", "https://")):
         slug = fallback
+    else:
+        try:
+            title = fetch_video_title(video_url)
+            slug = _slugify(title, fallback)
+        except Exception as e:
+            log.warning("Falling back to generic folder name (%s): %s", fallback, e)
+            slug = fallback
 
     video_folder_path = os.path.join(download_path, slug)
     clips_folder_path = os.path.join(video_folder_path, "clips")

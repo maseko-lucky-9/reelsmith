@@ -43,6 +43,7 @@ function escapeRegex(s: string): string {
 export function detectPlatform(url: string): PlatformId {
   if (!url) return 'unsupported'
   if (url.startsWith('upload://')) return 'upload'
+  if (url.startsWith('generate://')) return 'generate'
   for (const [id, hosts] of Object.entries(HOSTS) as [
     Exclude<PlatformId, 'upload' | 'generate' | 'unsupported'>,
     string[],

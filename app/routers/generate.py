@@ -12,7 +12,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.domain.events import Event, EventType
 from app.domain.ids import new_job_id
@@ -23,16 +23,25 @@ router = APIRouter(prefix="/generate", tags=["generate"])
 
 
 class GenerateShot(BaseModel):
-    prompt: str
-    seconds: float = 2.0
+    prompt: str = Field(..., max_length=2_000)
+    seconds: float = Field(2.0, ge=0.1, le=30.0)
 
 
 class GenerateBriefRequest(BaseModel):
-    title: str
-    script: str
-    shots: list[dict] = Field(default_factory=list)
-    voice_profile: str = ""
-    music_url: str = ""
+    title: str = Field(..., max_length=200, min_length=1)
+    script: str = Field(..., max_length=10_000, min_length=1)
+    shots: list[GenerateShot] = Field(default_factory=list, max_length=50)
+    voice_profile: str = Field("", max_length=200)
+    music_url: str = Field("", max_length=2_000)
+
+    @field_validator("music_url")
+    @classmethod
+    def _validate_music_url(cls, v: str) -> str:
+        # Empty is allowed (no backing track); otherwise it must be a real
+        # http(s) URL — reject data:, file:, javascript:, etc. with 422.
+        if v and not v.startswith(("http://", "https://")):
+            raise ValueError("music_url must be empty or an http(s) URL")
+        return v
 
 
 class GenerateResponse(BaseModel):
@@ -68,7 +77,9 @@ async def create_generate_job(
         {
             "title": req.title,
             "script": req.script,
-            "shots": req.shots,
+            # Shots are validated models now; serialize to plain dicts so the
+            # brief JSON round-trips (the generate adapter reads dicts off disk).
+            "shots": [shot.model_dump() for shot in req.shots],
             "voice_profile": req.voice_profile,
             "music_url": req.music_url,
         },

@@ -65,6 +65,30 @@ def test_sanitises_emoji_and_special_chars(mock_ydl_cls, tmp_path):
     assert "Crazy" in name and "Reel" in name and "Part" in name
 
 
+@patch("app.services.folder_service.YoutubeDL")
+def test_generate_scheme_does_not_invoke_yt_dlp(mock_ydl_cls, tmp_path):
+    """generate:// URLs must skip yt-dlp entirely (no ~10s extract_info stall)."""
+    video_folder, clips_folder = create_video_subfolder(
+        str(tmp_path), "generate://x", "generate"
+    )
+
+    mock_ydl_cls.assert_not_called()
+    assert os.path.basename(video_folder) == "generate_video"
+    assert os.path.exists(video_folder)
+    assert os.path.exists(clips_folder)
+
+
+@patch("app.services.folder_service.YoutubeDL")
+def test_upload_scheme_does_not_invoke_yt_dlp(mock_ydl_cls, tmp_path):
+    """upload:// URLs share the same latent stall fix as generate://."""
+    video_folder, _ = create_video_subfolder(
+        str(tmp_path), "upload:///tmp/yt/uploads/x.mp4", "upload"
+    )
+
+    mock_ydl_cls.assert_not_called()
+    assert os.path.basename(video_folder) == "upload_video"
+
+
 @pytest.mark.integration
 def test_against_live_youtube(tmp_path):
     """Hits real YouTube; opt-in via -m integration."""
