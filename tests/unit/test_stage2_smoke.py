@@ -146,6 +146,27 @@ def test_voicebox_smoke_happy_path_with_injected_seams(tmp_path):
     assert rc == voicebox_smoke.EXIT_PASS
 
 
+def test_voicebox_smoke_synth_succeeds_but_invalid_wav_returns_fail(tmp_path):
+    """Health ok + synth returns bytes that aren't a valid WAV → exit 1.
+
+    The invoker returns a non-empty, non-WAV body so ``synthesize`` succeeds
+    (writes the bytes) but the ``wave`` validation rejects it.
+    """
+    def ok_probe(url, api_key, timeout):
+        return 200
+
+    def bad_invoker(endpoint, api_key, payload):
+        return b"not a wav"
+
+    out = str(tmp_path / "bad.wav")
+    rc = voicebox_smoke.main(
+        ["--endpoint", "http://example.test/synthesize", "--out", out],
+        health_probe=ok_probe,
+        invoker=bad_invoker,
+    )
+    assert rc == voicebox_smoke.EXIT_FAIL
+
+
 # ── Gate B: pure health-URL derivation ────────────────────────────────────────
 
 
@@ -159,6 +180,25 @@ def test_health_url_for_replaces_synthesize_suffix():
 def test_health_url_for_appends_health_when_no_suffix():
     assert voicebox_smoke.health_url_for("http://h:8080") == "http://h:8080/health"
     assert voicebox_smoke.health_url_for("http://h:8080/") == "http://h:8080/health"
+
+
+def test_redact_url_strips_userinfo_and_leaves_clean_urls():
+    """Credentials in the netloc are stripped; clean URLs are untouched."""
+    assert (
+        voicebox_smoke._redact_url("http://user:pass@h:8080/synthesize")
+        == "http://h:8080/synthesize"
+    )
+    # Userinfo without a port.
+    assert (
+        voicebox_smoke._redact_url("https://user:pass@voicebox.local/synthesize")
+        == "https://voicebox.local/synthesize"
+    )
+    # Clean URLs pass through unchanged.
+    assert (
+        voicebox_smoke._redact_url("http://h:8080/synthesize")
+        == "http://h:8080/synthesize"
+    )
+    assert voicebox_smoke._redact_url("http://h:8080") == "http://h:8080"
 
 
 # ── Import isolation: neither script may import torch at module load ──────────

@@ -184,9 +184,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     # ── Verify the output via MoviePy (no system ffprobe in CI). ──────────────
     from moviepy.editor import VideoFileClip
 
+    # Initialise report names up front so a mid-inspection raise (malformed /
+    # zero-byte mp4) still lands a clean EXIT_FAIL report, never a NameError.
     failures: list[str] = []
-    clip = VideoFileClip(out_path)
+    size: list[int] = [0, 0]
+    duration: float = 0.0
+    all_black: bool = True
+
+    clip = None
     try:
+        clip = VideoFileClip(out_path)
         size = list(clip.size)  # MoviePy returns [w, h]
         duration = float(clip.duration or 0.0)
 
@@ -205,8 +212,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         all_black = is_mostly_black(frames)
         if all_black:
             failures.append("all sampled frames are near-black")
+    except Exception as e:  # noqa: BLE001
+        failures.append(f"could not inspect output: {e}")
     finally:
-        clip.close()
+        if clip is not None:
+            clip.close()
 
     if args.max_seconds is not None and wall > args.max_seconds:
         failures.append(

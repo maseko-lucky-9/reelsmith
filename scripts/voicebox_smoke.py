@@ -26,6 +26,7 @@ import sys
 import wave
 from pathlib import Path
 from typing import Callable, Sequence
+from urllib.parse import urlsplit, urlunsplit
 
 EXIT_PASS = 0
 EXIT_FAIL = 1
@@ -33,6 +34,20 @@ EXIT_NOT_CONFIGURED = 2
 
 DEFAULT_TEXT = "This is a Voicebox brand-voice smoke test for ReelSmith."
 DEFAULT_TIMEOUT = 10.0
+
+
+def _redact_url(url: str) -> str:
+    """Strip any ``user:pass@`` userinfo from a URL's netloc for safe logging.
+
+    Leaves clean URLs unchanged. Only the host[:port] survives in the netloc,
+    so a credential embedded in the endpoint never reaches stdout/logs. The
+    actual request still uses the real (unredacted) endpoint.
+    """
+    parts = urlsplit(url)
+    if "@" not in parts.netloc:
+        return url
+    host = parts.netloc.rsplit("@", 1)[1]
+    return urlunsplit(parts._replace(netloc=host))
 
 
 def _bootstrap_path() -> None:
@@ -145,8 +160,8 @@ def main(
     probe = health_probe or _default_health_probe
     hurl = health_url_for(endpoint)
     print("Gate B: running Voicebox smoke...")
-    print(f"  endpoint      : {endpoint}")
-    print(f"  health url    : {hurl}")
+    print(f"  endpoint      : {_redact_url(endpoint)}")
+    print(f"  health url    : {_redact_url(hurl)}")
     print(f"  voice profile : {voice_profile or '(none)'}")
 
     # ── Health probe ──────────────────────────────────────────────────────────
@@ -189,7 +204,7 @@ def main(
 
     verdict = "PASS" if ok else "FAIL"
     print("── Gate B report ──────────────────────────────")
-    print(f"  endpoint     : {endpoint}")
+    print(f"  endpoint     : {_redact_url(endpoint)}")
     print("  health       : 200")
     print(f"  wav frames   : {nframes}")
     print(f"  wav duration : {duration:.2f}s")
