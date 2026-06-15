@@ -144,12 +144,28 @@ if _HAS_PYDANTIC_SETTINGS:
         generate_enabled: bool = False
         generate_brief_dir: str = "data/generate-briefs"
         ltx_provider: str = "stub"  # "stub" | "ltx"
+        # Legacy in-process knobs — retained for back-compat with smoke tooling
+        # and tests; the real ``ltx`` path is now a subprocess (see below) and
+        # does not use these.
         ltx_model_path: str = ""
         ltx_use_mps: bool = True
         ltx_num_frames: int = 121
+        # ── LTX subprocess path (real provider) ───────────────────────────────
+        # The LTX fork runs in its OWN venv (deps conflict with reelsmith's), so
+        # the ``ltx`` provider shells out to the fork's inference.py CLI rather
+        # than importing ltx_video in-process. All three must be set + exist on
+        # disk for the provider to run; otherwise it raises NOT_CONFIGURED.
+        ltx_python: str = ""  # interpreter inside the fork's venv
+        ltx_inference_script: str = ""  # path to the fork's inference.py
+        ltx_pipeline_config: str = ""  # path to the pipeline yaml
+        # Portrait reel defaults: height > width. Rounded to ÷32 at call time.
+        ltx_height: int = 1216
+        ltx_width: int = 704
+        ltx_frame_rate: int = 24
         generate_tts_provider: str = "stub"  # "stub" | "voicebox"
         voicebox_endpoint: str = ""
         voicebox_api_key: str | None = None
+        voicebox_engine: str = "kokoro"
         generate_voice_profile: str = ""
 
         # ── Bulk export (W3.7) ────────────────────────────────────────────────
@@ -217,9 +233,17 @@ else:  # Fallback: pydantic-settings not yet installed
         ltx_model_path = ""
         ltx_use_mps = True
         ltx_num_frames = 121
+        # ── LTX subprocess path (real provider) — see pydantic class above ────
+        ltx_python = ""
+        ltx_inference_script = ""
+        ltx_pipeline_config = ""
+        ltx_height = 1216
+        ltx_width = 704
+        ltx_frame_rate = 24
         generate_tts_provider = "stub"
         voicebox_endpoint = ""
         voicebox_api_key = None
+        voicebox_engine = "kokoro"
         generate_voice_profile = ""
         max_upload_mb = 500
         retention_days = 30

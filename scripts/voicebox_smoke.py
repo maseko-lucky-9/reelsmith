@@ -88,7 +88,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--api-key", default=None, help="Override YTVIDEO_VOICEBOX_API_KEY.")
     p.add_argument(
         "--voice-profile", default=None,
-        help="Override YTVIDEO_GENERATE_VOICE_PROFILE (the brand-voice id).",
+        help="Override YTVIDEO_GENERATE_VOICE_PROFILE (the brand-voice profile_id).",
+    )
+    p.add_argument(
+        "--engine", default=None,
+        help="Override YTVIDEO_VOICEBOX_ENGINE (TTS engine, e.g. kokoro).",
     )
     p.add_argument("--text", default=DEFAULT_TEXT, help="Sample sentence to synthesize.")
     p.add_argument("--out", default=None, help="Output WAV path (default: temp file).")
@@ -111,7 +115,11 @@ def _resolve_config(args: argparse.Namespace):
         args.voice_profile if args.voice_profile is not None
         else settings.generate_voice_profile
     )
-    return endpoint, api_key, voice_profile
+    engine = (
+        args.engine if args.engine is not None
+        else getattr(settings, "voicebox_engine", "kokoro")
+    )
+    return endpoint, api_key, voice_profile, engine
 
 
 def _validate_wav(path: str) -> tuple[bool, str, int, float]:
@@ -146,7 +154,7 @@ def main(
     _bootstrap_path()
     args = _build_parser().parse_args(argv)
 
-    endpoint, api_key, voice_profile = _resolve_config(args)
+    endpoint, api_key, voice_profile, engine = _resolve_config(args)
 
     # ── Pre-check: configured? ────────────────────────────────────────────────
     if not endpoint:
@@ -157,12 +165,19 @@ def main(
         )
         return EXIT_NOT_CONFIGURED
 
+    # The voicebox provider requires a non-empty profile_id. When the operator
+    # hasn't configured one, fall back to a placeholder so the gate can still
+    # exercise the synth path (the injected invoker / real sidecar decides what
+    # to do with it).
+    effective_profile = voice_profile or "smoke-profile"
+
     probe = health_probe or _default_health_probe
     hurl = health_url_for(endpoint)
     print("Gate B: running Voicebox smoke...")
     print(f"  endpoint      : {_redact_url(endpoint)}")
     print(f"  health url    : {_redact_url(hurl)}")
-    print(f"  voice profile : {voice_profile or '(none)'}")
+    print(f"  voice profile : {voice_profile or '(default: smoke-profile)'}")
+    print(f"  engine        : {engine}")
 
     # ── Health probe ──────────────────────────────────────────────────────────
     try:
@@ -193,7 +208,8 @@ def main(
             provider="voicebox",
             endpoint=endpoint,
             api_key=api_key,
-            voice_profile=voice_profile,
+            voice_profile=effective_profile,
+            engine=engine,
             invoker=invoker,
         )
     except Exception as e:  # noqa: BLE001
