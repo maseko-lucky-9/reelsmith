@@ -1,26 +1,27 @@
 #!/usr/bin/env python
-"""Gate A — LTX-Video 2B (MPS) smoke test for generate:// mode.
+"""Gate A — LTX-Video (subprocess) smoke test for generate:// mode.
 
 Runs the *real* ``ltx`` provider once and verifies the produced shot is a
-playable, correctly-sized, non-black clip. This is operator tooling: it does
-NOT change runtime behavior and is never exercised by CI (which has no torch
-and no LTX weights).
+playable, correctly-sized, non-black clip. The real provider shells out to the
+LTX fork's ``inference.py`` running in the fork's own venv. This is operator
+tooling: it does NOT change runtime behavior and is never exercised by CI
+(which has neither the LTX venv nor weights).
 
 Usage
 -----
-    python -m scripts.ltx_smoke [--model-path PATH] [--seconds N]
-                                [--width W] [--height H]
+    python -m scripts.ltx_smoke [--ltx-python PATH] [--inference-script PATH]
+                                [--pipeline-config PATH] [--seconds N]
+                                [--width W] [--height H] [--frame-rate FPS]
                                 [--max-seconds BUDGET] [--prompt TEXT]
                                 [--out PATH]
 
 Exit codes (shared legend with Gate B / the preflight orchestrator):
     0  PASS            — clip generated, dims/duration correct, not all-black
     1  FAIL            — black frames, wrong dims, zero duration, or over budget
-    2  NOT_CONFIGURED  — weights/torch not set up; nothing was run
+    2  NOT_CONFIGURED  — fork venv/script/config not set up; nothing was run
 
-The torch / MoviePy / settings imports are deferred into ``main`` so that
-importing this module (e.g. from a unit test) never pulls in torch and never
-trips the LTX provider's import guard.
+The MoviePy / settings imports are deferred into ``main`` so that importing
+this module (e.g. from a unit test) stays cheap and torch-free.
 """
 from __future__ import annotations
 
@@ -35,10 +36,13 @@ EXIT_PASS = 0
 EXIT_FAIL = 1
 EXIT_NOT_CONFIGURED = 2
 
-# Default reel dimensions (9:16) when settings don't specify.
-DEFAULT_WIDTH = 1080
-DEFAULT_HEIGHT = 1920
+# Default reel dimensions (portrait 9:16-ish; height > width) when settings
+# don't specify. These are rounded to the nearest multiple of 32 before use,
+# since LTX requires frame dims divisible by 32.
+DEFAULT_WIDTH = 704
+DEFAULT_HEIGHT = 1216
 DEFAULT_SECONDS = 3.0
+DEFAULT_FRAME_RATE = 24
 DEFAULT_PROMPT = "a calm sunrise over a quiet city skyline, slow drift"
 
 # Black-frame threshold: mean luma (0-255). Below this a frame is "near black".
@@ -78,19 +82,33 @@ def is_mostly_black(frames: Sequence, threshold: float = BLACK_LUMA_THRESHOLD) -
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="ltx_smoke",
-        description="Gate A — LTX-Video MPS smoke test for generate:// mode.",
+        description="Gate A — LTX-Video subprocess smoke test for generate:// mode.",
     )
     p.add_argument(
-        "--model-path",
+        "--ltx-python",
         default=None,
-        help="Override YTVIDEO_LTX_MODEL_PATH (path to the LTX 2B weights).",
+        help="Override YTVIDEO_LTX_PYTHON (interpreter inside the fork's venv).",
+    )
+    p.add_argument(
+        "--inference-script",
+        default=None,
+        help="Override YTVIDEO_LTX_INFERENCE_SCRIPT (path to the fork's inference.py).",
+    )
+    p.add_argument(
+        "--pipeline-config",
+        default=None,
+        help="Override YTVIDEO_LTX_PIPELINE_CONFIG (path to the pipeline yaml).",
     )
     p.add_argument(
         "--seconds", type=float, default=None,
         help=f"Clip length in seconds (default {DEFAULT_SECONDS}).",
     )
-    p.add_argument("--width", type=int, default=None, help="Expected frame width.")
-    p.add_argument("--height", type=int, default=None, help="Expected frame height.")
+    p.add_argument("--width", type=int, default=None, help="Requested frame width.")
+    p.add_argument("--height", type=int, default=None, help="Requested frame height.")
+    p.add_argument(
+        "--frame-rate", type=int, default=None,
+        help=f"Frame rate (default {DEFAULT_FRAME_RATE}).",
+    )
     p.add_argument(
         "--max-seconds", type=float, default=None,
         help="Wall-clock budget; exceeding it FAILS the gate (exit 1).",
@@ -107,48 +125,78 @@ def _resolve_config(args: argparse.Namespace):
     """Resolve effective config from CLI overrides then settings."""
     from app.settings import settings
 
-    model_path = args.model_path if args.model_path is not None else settings.ltx_model_path
+    ltx_python = (
+        args.ltx_python if args.ltx_python is not None else settings.ltx_python
+    )
+    inference_script = (
+        args.inference_script if args.inference_script is not None
+        else settings.ltx_inference_script
+    )
+    pipeline_config = (
+        args.pipeline_config if args.pipeline_config is not None
+        else settings.ltx_pipeline_config
+    )
     seconds = args.seconds if args.seconds is not None else DEFAULT_SECONDS
-    width = args.width if args.width is not None else DEFAULT_WIDTH
-    height = args.height if args.height is not None else DEFAULT_HEIGHT
-    use_mps = bool(getattr(settings, "ltx_use_mps", True))
-    return model_path, seconds, width, height, use_mps
-
-
-def _torch_importable() -> bool:
-    import importlib.util
-
-    return importlib.util.find_spec("torch") is not None
+    width = (
+        args.width if args.width is not None
+        else getattr(settings, "ltx_width", DEFAULT_WIDTH)
+    )
+    height = (
+        args.height if args.height is not None
+        else getattr(settings, "ltx_height", DEFAULT_HEIGHT)
+    )
+    frame_rate = (
+        args.frame_rate if args.frame_rate is not None
+        else getattr(settings, "ltx_frame_rate", DEFAULT_FRAME_RATE)
+    )
+    return ltx_python, inference_script, pipeline_config, seconds, width, height, frame_rate
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     _bootstrap_path()
     args = _build_parser().parse_args(argv)
 
-    model_path, seconds, width, height, use_mps = _resolve_config(args)
+    (
+        ltx_python,
+        inference_script,
+        pipeline_config,
+        seconds,
+        width,
+        height,
+        frame_rate,
+    ) = _resolve_config(args)
 
-    # ── Pre-check: are we configured to run the real model at all? ────────────
-    weights_present = bool(model_path) and Path(model_path).exists()
-    if not model_path or not _torch_importable() or not weights_present:
-        reasons = []
-        if not model_path:
-            reasons.append("YTVIDEO_LTX_MODEL_PATH is empty")
-        elif not weights_present:
-            reasons.append(f"weights path does not exist: {model_path}")
-        if not _torch_importable():
-            reasons.append("torch is not importable")
-        print("Gate A: NOT_CONFIGURED — LTX weights not configured.")
+    # ── Pre-check: is the fork venv + script + config configured? ─────────────
+    required = (
+        ("YTVIDEO_LTX_PYTHON", ltx_python),
+        ("YTVIDEO_LTX_INFERENCE_SCRIPT", inference_script),
+        ("YTVIDEO_LTX_PIPELINE_CONFIG", pipeline_config),
+    )
+    reasons = []
+    for env_name, value in required:
+        if not value:
+            reasons.append(f"{env_name} is empty")
+        elif not Path(value).exists():
+            reasons.append(f"{env_name} path does not exist: {value}")
+    if reasons:
+        print("Gate A: NOT_CONFIGURED — LTX fork subprocess not configured.")
         for r in reasons:
             print(f"  - {r}")
         print(
-            "  Fix: set YTVIDEO_LTX_MODEL_PATH to the LTX 2B weights dir and "
-            "run 'pip install -r requirements-generate.txt'."
+            "  Fix: set YTVIDEO_LTX_PYTHON to the fork venv interpreter, "
+            "YTVIDEO_LTX_INFERENCE_SCRIPT to its inference.py, and "
+            "YTVIDEO_LTX_PIPELINE_CONFIG to the pipeline yaml."
         )
         return EXIT_NOT_CONFIGURED
 
     # ── Run the real model. Defer compat+moviepy+producer imports to here. ────
     import app.compat  # noqa: F401  # PIL.Image.ANTIALIAS shim before MoviePy
     from app.services import ltx_producer
+
+    # The clip is sized to the ÷32-rounded request — assert against THESE, not
+    # hardcoded reel dims, since LTX only emits multiples of 32.
+    expected_width = ltx_producer.round_to_multiple_of_32(width)
+    expected_height = ltx_producer.round_to_multiple_of_32(height)
 
     if args.out:
         out_path = args.out
@@ -158,12 +206,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         out_path = str(Path(tempfile.gettempdir()) / "ltx_smoke_shot.mp4")
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
 
-    device = "mps" if use_mps else "cpu"
     print("Gate A: running LTX smoke...")
-    print(f"  model_path : {model_path}")
-    print(f"  device     : {device}")
-    print(f"  dims       : {width}x{height}")
-    print(f"  seconds    : {seconds}")
+    print(f"  ltx_python : {ltx_python}")
+    print(f"  script     : {inference_script}")
+    print(f"  config     : {pipeline_config}")
+    print(f"  dims       : {expected_width}x{expected_height} "
+          f"(requested {width}x{height})")
+    print(f"  seconds    : {seconds}  frame_rate: {frame_rate}")
 
     t0 = time.perf_counter()
     try:
@@ -172,8 +221,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             seconds,
             out_path,
             provider="ltx",
-            model_path=model_path,
-            use_mps=use_mps,
+            ltx_python=ltx_python,
+            ltx_inference_script=inference_script,
+            ltx_pipeline_config=pipeline_config,
+            ltx_height=height,
+            ltx_width=width,
+            ltx_frame_rate=frame_rate,
         )
     except Exception as e:  # noqa: BLE001
         wall = time.perf_counter() - t0
@@ -197,8 +250,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         size = list(clip.size)  # MoviePy returns [w, h]
         duration = float(clip.duration or 0.0)
 
-        if size != [width, height]:
-            failures.append(f"dims {size} != expected [{width}, {height}]")
+        if size != [expected_width, expected_height]:
+            failures.append(
+                f"dims {size} != expected [{expected_width}, {expected_height}]"
+            )
         if duration <= 0:
             failures.append(f"duration {duration} is not > 0")
 
@@ -226,8 +281,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     # ── Structured report ─────────────────────────────────────────────────────
     verdict = "PASS" if not failures else "FAIL"
     print("── Gate A report ──────────────────────────────")
-    print(f"  device       : {device}")
-    print(f"  dims         : {size[0]}x{size[1]} (expected {width}x{height})")
+    print(f"  dims         : {size[0]}x{size[1]} "
+          f"(expected {expected_width}x{expected_height})")
     print(f"  duration     : {duration:.2f}s")
     print(f"  wall-clock   : {wall:.1f}s")
     print(f"  black-frames : {'ALL BLACK' if all_black else 'ok'}")

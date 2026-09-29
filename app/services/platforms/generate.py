@@ -141,6 +141,7 @@ class GenerateAdapter:
             endpoint=settings.voicebox_endpoint or None,
             api_key=settings.voicebox_api_key,
             voice_profile=voice_profile,
+            engine=settings.voicebox_engine,
         )
 
         # ── B-roll shots ─────────────────────────────────────────────────────
@@ -155,8 +156,13 @@ class GenerateAdapter:
                 seconds,
                 shot_path,
                 provider=settings.ltx_provider,
-                model_path=settings.ltx_model_path or None,
-                use_mps=settings.ltx_use_mps,
+                seed=shot.get("seed"),
+                ltx_python=settings.ltx_python or None,
+                ltx_inference_script=settings.ltx_inference_script or None,
+                ltx_pipeline_config=settings.ltx_pipeline_config or None,
+                ltx_height=settings.ltx_height,
+                ltx_width=settings.ltx_width,
+                ltx_frame_rate=settings.ltx_frame_rate,
             )
             shot_paths.append(shot_path)
 
