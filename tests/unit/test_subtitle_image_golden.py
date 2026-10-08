@@ -85,7 +85,7 @@ def _render_sha256(case: str) -> str:
 def test_subtitle_image_matches_golden_hash(case: str):
     key = (features.check("raqm"), platform.system(), platform.machine())
     actual = _render_sha256(case)
-    expected = GOLDEN_SHA256[key].get(case)
+    expected = GOLDEN_SHA256.get(key, {}).get(case)
     if expected is None:
         message = (
             f"No golden hash for case {case!r} under raqm={key}; computed {actual}. "
