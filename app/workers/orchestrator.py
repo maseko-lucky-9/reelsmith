@@ -20,13 +20,13 @@ from app.services import (
     clip_service,
     download_service,
     export_service,
+    ffmpeg_tools,
     filler_removal_service,
     folder_service,
     manifest_service,
     ollama_service,
     platforms,
     render_service,
-    subtitle_image_service,
     thumbnail_service,
     transcription_service,
 )
@@ -354,60 +354,46 @@ async def _process_chapter(
     #                                     before render when reframe=True.
     opts = pipeline_options or PipelineOptions()
     tmp_dir = cleanup_root
-    clip_path = str(tmp_dir / f"chapter_{index}.mp4")
-    audio_path = str(tmp_dir / f"chapter_{index}.wav")
 
     def _set_status(state: ChapterArtifacts, status: str) -> None:
         state.status = status  # type: ignore[assignment]
 
-    # ── Extract clip (gated on render — G19) ─────────────────────────────────
-    if opts.render:
-        log.info("[%s] Chapter %d  extracting clip and audio", job_id, index)
+    # ── Extract chapter audio (gated on transcription) ───────────────────────
+    # The reel is rendered straight from the source (render_clip trims it),
+    # so the only per-chapter artefact is the transcription wav: 16 kHz mono,
+    # cut with the render's exact -ss/-t window so word timings line up.
+    audio_path: str | None = None
+    if opts.transcription:
+        wav_path = str(tmp_dir / f"chapter_{index}.wav")
+        log.info("[%s] Chapter %d  extracting audio", job_id, index)
         step_t0 = time.perf_counter()
         await store.upsert_chapter(job_id, lambda c: _set_status(c, "extracting"), index)
-        await asyncio.to_thread(
-            clip_service.extract_chapter_to_disk,
-            video_path,
-            start,
-            end,
-            clip_path,
-            audio_path,
+        audio_path = await ffmpeg_tools.to_thread_cancellable(
+            clip_service.extract_audio, video_path, start, chapter_duration, wav_path
         )
-        log.info("[%s] Chapter %d  clip extracted (%.2fs)  clip=%s  audio=%s",
-                 job_id, index, time.perf_counter() - step_t0, clip_path, audio_path)
-        await store.upsert_chapter(
-            job_id,
-            lambda c: (setattr(c, "clip_path", clip_path), setattr(c, "audio_path", audio_path)),
-            index,
-        )
+        log.info("[%s] Chapter %d  audio extracted (%.2fs)  audio=%s",
+                 job_id, index, time.perf_counter() - step_t0, audio_path)
+        if audio_path is not None:
+            await store.upsert_chapter(
+                job_id, lambda c: setattr(c, "audio_path", audio_path), index
+            )
+    # The web UI's "Extract clips" stage (render-gated) still counts this event;
+    # there is no intermediate chapter clip any more, so clip_path is None.
+    if opts.render:
         await _emit(
             bus,
             EventType.CHAPTER_CLIP_EXTRACTED,
             job_id,
             chapter_index=index,
-            clip_path=clip_path,
+            clip_path=None,
             audio_path=audio_path,
         )
-    else:
-        # render=False → source video stays untouched, no per-chapter clip extraction
-        log.info("[%s] Chapter %d  skipping clip extraction (render=False)", job_id, index)
-        # We still need audio for transcription if enabled
-        if opts.transcription:
-            await asyncio.to_thread(
-                clip_service.extract_chapter_to_disk,
-                video_path,
-                start,
-                end,
-                clip_path,
-                audio_path,
-            )
 
     # ── Audio enhancement (W1.8 — gated on audio_enhance) ────────────────────
-    # Replace the on-disk audio with the enhanced output so downstream stages
-    # (transcription, render) consume the cleaned track. We only run when we
-    # actually have an audio file (i.e. render=True or transcription=True
-    # caused extract_chapter_to_disk to fire above).
-    if opts.audio_enhance and Path(audio_path).exists():
+    # Replace the on-disk audio with the enhanced output so transcription
+    # consumes the cleaned track (the reel keeps the source's original audio).
+    # Runs only when a chapter wav was extracted above.
+    if opts.audio_enhance and audio_path is not None and Path(audio_path).exists():
         log.info(
             "[%s] Chapter %d  enhancing audio  provider=%s",
             job_id, index, settings.audio_enhance_provider,
@@ -415,7 +401,7 @@ async def _process_chapter(
         step_t0 = time.perf_counter()
         enhanced_audio_path = str(tmp_dir / f"chapter_{index}_enhanced.wav")
         try:
-            await asyncio.to_thread(
+            await ffmpeg_tools.to_thread_cancellable(
                 audio_enhance_service.enhance,
                 audio_path,
                 enhanced_audio_path,
@@ -454,10 +440,14 @@ async def _process_chapter(
                  job_id, index, settings.transcription_provider)
         step_t0 = time.perf_counter()
         await store.upsert_chapter(job_id, lambda c: _set_status(c, "transcribing"), index)
-        words = await asyncio.wait_for(
-            asyncio.to_thread(transcription_service.transcribe_to_words, audio_path),
-            timeout=settings.transcription_timeout_seconds,
-        )
+        if audio_path is None:
+            log.warning("[%s] Chapter %d  source has no audio; nothing to transcribe",
+                        job_id, index)
+        else:
+            words = await asyncio.wait_for(
+                asyncio.to_thread(transcription_service.transcribe_to_words, audio_path),
+                timeout=settings.transcription_timeout_seconds,
+            )
         text = " ".join(w.word for w in words)
         log.info("[%s] Chapter %d  transcription done (%.2fs)  words=%d",
                  job_id, index, time.perf_counter() - step_t0, len(words))
@@ -537,36 +527,8 @@ async def _process_chapter(
         log.info("[%s] Chapter %d  skipping captions", job_id, index)
         await _emit(bus, EventType.STAGE_SKIPPED, job_id, stage_id="caption", chapter_index=index)
 
-    # ── Subtitle images (gated on captions) ──────────────────────────────────
-    image_paths: list[str] = []
-    if captions_obj is not None and opts.captions:
-        caption_count = len(captions_obj)
-        log.info("[%s] Chapter %d  rendering %d subtitle image(s)", job_id, index, caption_count)
-        step_t0 = time.perf_counter()
-        videosize = (1280, 720)  # default; overridden by render service per real video size
-        for idx, caption in enumerate(captions_obj):
-            caption_text = caption.text if hasattr(caption, "text") else str(caption)
-            image_path = str(tmp_dir / f"chapter_{index}_caption_{idx}.png")
-            await asyncio.to_thread(
-                subtitle_image_service.render_to_path,
-                caption_text,
-                videosize,
-                image_path,
-            )
-            image_paths.append(image_path)
-        log.info("[%s] Chapter %d  subtitle images done (%.2fs)", job_id, index,
-                 time.perf_counter() - step_t0)
-    await store.upsert_chapter(
-        job_id, lambda c: setattr(c, "image_paths", image_paths), index
-    )
-    if image_paths:
-        await _emit(
-            bus,
-            EventType.SUBTITLE_IMAGE_RENDERED,
-            job_id,
-            chapter_index=index,
-            image_paths=image_paths,
-        )
+    # Caption images are drawn and burned in by render_clip (one PNG per unique
+    # caption, cropped); ChapterArtifacts.image_paths stays [] for the API/UI.
 
     # ── Render final clip (gated on render) ──────────────────────────────────
     output_path: str | None = None
@@ -576,13 +538,15 @@ async def _process_chapter(
         step_t0 = time.perf_counter()
         await store.upsert_chapter(job_id, lambda c: _set_status(c, "rendering"), index)
         output_path = str(Path(clips_folder) / f"{index:02d}_{safe_title}.mp4")
+        # Reads the SOURCE and trims [start, end) itself — one ffmpeg pass.
+        # Cancellation (e.g. this wait_for timing out) kills that ffmpeg.
         await asyncio.wait_for(
-            asyncio.to_thread(
+            ffmpeg_tools.to_thread_cancellable(
                 render_service.render_clip,
-                clip_path,
+                video_path,
                 output_path,
-                0.0,
-                chapter_duration,
+                start,
+                end,
                 captions_path,
                 target_aspect_ratio,
                 word_timings=words,

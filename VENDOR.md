@@ -13,6 +13,12 @@
 - **What was excluded:** `Browser.py` (Selenium/undetected-chromedriver),
   `Video.py` (moviepy/yt-dlp). `__init__.py` was rewritten to export only
   what the adapter uses.
+- **Local modifications:** `Video.py` (upstream's MoviePy/yt-dlp clip
+  helper) was deleted when ReelSmith dropped MoviePy (perf P1). Nothing in the
+  adapter path used it — `tiktok.py` only imported the name — so `Video` was
+  also dropped from the `from tiktok_uploader import ...` line in `tiktok.py`.
+  Re-vendoring upstream brings both back; delete them again (MoviePy is not a
+  dependency).
 - **Upstream changes:** pin this file before upgrading. Breaking changes are
   common — TikTok frequently rotates API endpoints and anti-bot measures.
 - **Setup:** `scripts/tiktok-setup.sh` installs the Node bundle. See

@@ -16,6 +16,7 @@ import subprocess
 import sys
 
 import numpy as np
+import pytest
 
 from scripts import ltx_smoke, voicebox_smoke
 
@@ -258,3 +259,35 @@ def test_smoke_scripts_have_no_import_time_torch_dependency():
         f"subprocess failed:\nstdout={proc.stdout}\nstderr={proc.stderr}"
     )
     assert "OK" in proc.stdout
+
+
+# ── ltx_smoke.inspect_clip (PyAV verification of a produced shot) ────────────
+
+
+def test_ltx_smoke_inspect_clip_on_stub_shot(tmp_path):
+    from app.services import ltx_producer
+
+    out = str(tmp_path / "shot.mp4")
+    ltx_producer.generate_shot("a calm sunrise", 2.0, out, provider="stub")
+    size, duration, frames = ltx_smoke.inspect_clip(out)
+    assert size == [1080, 1920]
+    assert duration == pytest.approx(2.0, abs=0.05)
+    assert len(frames) == 5
+    assert frames[0].shape == (1920, 1080, 3)
+    assert ltx_smoke.is_mostly_black(frames) is False
+
+
+def test_ltx_smoke_inspect_clip_black_clip_is_flagged(tmp_path):
+    from app.services import ffmpeg_tools
+
+    out = str(tmp_path / "black.mp4")
+    ffmpeg_tools.run(
+        [
+            "ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+            "-i", "color=c=black:s=64x64:r=24:d=1", "-c:v", "libx264",
+            "-pix_fmt", "yuv420p", out,
+        ]
+    )  # fmt: skip
+    _size, _duration, frames = ltx_smoke.inspect_clip(out)
+    assert len(frames) == 5
+    assert ltx_smoke.is_mostly_black(frames) is True

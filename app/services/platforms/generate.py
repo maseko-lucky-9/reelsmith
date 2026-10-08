@@ -2,7 +2,7 @@
 
 Handles the ``generate://`` URL scheme. Instead of downloading, it produces
 a real mp4 from a stored brief: TTS voice-over + AI b-roll shots, assembled
-with MoviePy. The result feeds ReelSmith's existing pipeline unchanged
+with one ffmpeg pass (concat filter + tpad). The result feeds ReelSmith's existing pipeline unchanged
 (empty chapters → full-video pseudo-chapter → transcribe → caption → export).
 
 STAGE 1: both producers default to STUB and emit real, decodable artifacts
@@ -16,15 +16,10 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
-import subprocess
 from pathlib import Path
 from urllib.parse import urlparse
 
-# Must run before any MoviePy import to restore PIL.Image.ANTIALIAS.
-import app.compat  # noqa: F401
-
-from app.services import ltx_producer, tts_service
+from app.services import ffmpeg_tools, ltx_producer, tts_service
 from app.services.platforms.base import Chapter, DownloadResult
 from app.settings import settings
 
@@ -41,52 +36,31 @@ _AUDIO_TAIL_HEADROOM_SECONDS = 2.0
 
 
 def _probe_duration(path: str) -> float:
-    """Return media duration in seconds, CI-safe.
+    """Return media duration in seconds via PyAV (video or audio-only, e.g. wav).
 
-    Prefers MoviePy (which uses ``imageio-ffmpeg``'s bundled ffmpeg and works in
-    CI where a system ``ffprobe`` is absent). Handles both video containers and
-    audio-only files (e.g. wav voice-over). Only falls back to the ``ffprobe``
-    subprocess when MoviePy can't open the file AND a real ``ffprobe`` is on
-    PATH. Never silently returns ``0.0`` when a real duration is obtainable.
+    CI-safe: no system ``ffprobe`` needed. Never silently returns ``0.0`` —
+    raises ``RuntimeError`` when the duration cannot be read.
     """
-    moviepy_err: Exception | None = None
     try:
-        from moviepy.editor import AudioFileClip, VideoFileClip
-
-        try:
-            clip = VideoFileClip(path)
-        except Exception:
-            # Audio-only container (wav VO) — VideoFileClip can't open it.
-            clip = AudioFileClip(path)
-        try:
-            return float(clip.duration)
-        finally:
-            try:
-                clip.close()
-            except Exception:  # noqa: BLE001
-                pass
+        return float(ffmpeg_tools.duration(path))
     except Exception as e:  # noqa: BLE001
-        moviepy_err = e
+        raise RuntimeError(f"could not determine duration of {path!r}: {e}") from e
 
-    # MoviePy could not read the file. Only now consider ffprobe, and only if a
-    # real one is installed (imageio-ffmpeg ships ffmpeg, NOT ffprobe).
-    if shutil.which("ffprobe") is not None:
-        try:
-            result = subprocess.run(
-                [
-                    "ffprobe", "-v", "quiet", "-print_format", "json",
-                    "-show_format", path,
-                ],
-                capture_output=True, text=True, timeout=15,
-            )
-            info = json.loads(result.stdout)
-            return float(info.get("format", {}).get("duration", 0))
-        except Exception:  # noqa: BLE001
-            pass
 
-    raise RuntimeError(
-        f"could not determine duration of {path!r}: {moviepy_err}"
-    )
+def _probe_duration_video(path: str) -> float:
+    """Duration of the first video stream (falls back to the container)."""
+    try:
+        value = ffmpeg_tools.duration(path, "video")
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"could not determine duration of {path!r}: {e}") from e
+    if value is None:
+        raise RuntimeError(f"no video stream in {path!r}")
+    return float(value)
+
+
+# Output frame rate of the assembled video (and of the no-shot black fallback).
+_ASSEMBLE_FPS = 24
+_FALLBACK_SIZE = (1080, 1920)
 
 
 class GenerateAdapter:
@@ -186,71 +160,70 @@ class GenerateAdapter:
         )
 
     def _assemble(self, shot_paths: list[str], vo_wav: str, out_path: str) -> float:
-        """Concatenate shots, attach the VO, pad the tail, write libx264/aac."""
-        from moviepy.editor import (
-            AudioFileClip,
-            ColorClip,
-            VideoFileClip,
-            concatenate_videoclips,
+        """Concatenate shots, attach the VO, pad the tail, write libx264/aac.
+
+        One ffmpeg pass: each shot is centred on the largest shot's canvas
+        (MoviePy ``method="compose"``), normalised to 24 fps, concatenated,
+        then black-padded (``tpad``) to the target length; ``-t`` is explicit.
+        Returns the written video's duration.
+        """
+        audio_duration = _probe_duration(vo_wav)
+        if shot_paths:
+            sizes = [ffmpeg_tools.video_size(p) for p in shot_paths]
+            width = max(w for w, _ in sizes)
+            height = max(h for _, h in sizes)
+            base_duration = sum(
+                ffmpeg_tools.duration(p, "video") or _probe_duration(p)
+                for p in shot_paths
+            )
+            inputs: list[str] = []
+            for p in shot_paths:
+                inputs += ["-i", p]
+        else:
+            # No shots: a black clip matching the VO length.
+            width, height = _FALLBACK_SIZE
+            base_duration = max(0.1, audio_duration)
+            inputs = [
+                "-f", "lavfi",
+                "-i", f"color=c=black:s={width}x{height}:r={_ASSEMBLE_FPS}:d={base_duration:.6f}",
+            ]  # fmt: skip
+        n_video = max(1, len(shot_paths))
+
+        # The downstream pipeline runs probe_safe_end → min(v,a) - epsilon.
+        # When the VO is longer than the concatenated b-roll, the video must
+        # extend STRICTLY past the audio by at least epsilon + margin so the
+        # safe_end clamp can never truncate spoken content. Pad the VIDEO tail
+        # to audio_duration + _AUDIO_TAIL_HEADROOM_SECONDS; never shorten audio.
+        target = max(
+            base_duration + _TRAILING_PAD_SECONDS,
+            audio_duration + _AUDIO_TAIL_HEADROOM_SECONDS,
         )
+        pad = max(0.0, target - base_duration)
 
-        video_clips = [VideoFileClip(p) for p in shot_paths]
-        audio_clip = AudioFileClip(vo_wav)
-        opened = [*video_clips, audio_clip]
-        try:
-            if video_clips:
-                base = concatenate_videoclips(video_clips, method="compose")
-            else:
-                # No shots: fall back to a black clip matching the VO length.
-                base = ColorClip(
-                    size=(1080, 1920), color=(0, 0, 0),
-                    duration=max(0.1, audio_clip.duration),
-                ).set_fps(24)
-                opened.append(base)
-
-            # The downstream pipeline runs probe_safe_end → min(v,a) - epsilon.
-            # When the VO is longer than the concatenated b-roll, the video must
-            # extend STRICTLY past the audio by at least epsilon + margin so the
-            # safe_end clamp can never truncate spoken content. Pad the VIDEO tail
-            # to audio_duration + _AUDIO_TAIL_HEADROOM_SECONDS; never shorten audio.
-            min_video_for_audio = audio_clip.duration + _AUDIO_TAIL_HEADROOM_SECONDS
-            target = max(
-                base.duration + _TRAILING_PAD_SECONDS,
-                min_video_for_audio,
-            )
-
-            # Pad video to target by holding a trailing black frame.
-            pad_tail = ColorClip(
-                size=base.size, color=(0, 0, 0),
-                duration=max(0.0, target - base.duration),
-            ).set_fps(24)
-            opened.append(pad_tail)
-            video = concatenate_videoclips([base, pad_tail], method="compose")
-            opened.append(video)
-
-            # Attach the VO without truncating speech (audio is never shortened;
-            # the video was extended above to keep it strictly longer than audio).
-            video = video.set_audio(audio_clip)
-            video.write_videofile(
+        graph = [
+            f"[{i}:v]pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,"
+            f"setsar=1,fps={_ASSEMBLE_FPS},format=yuv420p[s{i}]"
+            for i in range(n_video)
+        ]
+        graph.append(
+            "".join(f"[s{i}]" for i in range(n_video))
+            + f"concat=n={n_video}:v=1:a=0,"
+            + f"tpad=stop_mode=add:stop_duration={pad:.6f}:color=black[v]"
+        )
+        ffmpeg_tools.run(
+            [
+                "ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+                *inputs,
+                "-i", vo_wav,
+                "-filter_complex", ";".join(graph),
+                "-map", "[v]", "-map", f"{n_video}:a:0",
+                "-t", f"{target:.6f}", "-r", str(_ASSEMBLE_FPS),
+                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
                 out_path,
-                codec="libx264",
-                audio_codec="aac",
-                fps=24,
-                preset="ultrafast",
-                logger=None,
-            )
-            # Derive duration from the in-memory clip rather than re-opening the
-            # written file with ffprobe — MoviePy's clip duration is authoritative
-            # and works in CI (no system ffprobe required).
-            result_duration = float(video.duration)
-        finally:
-            for c in opened:
-                try:
-                    c.close()
-                except Exception:  # noqa: BLE001
-                    pass
-
-        return result_duration
+            ]
+        )  # fmt: skip
+        return _probe_duration_video(out_path)
 
     def extract_chapters(self, info: dict) -> list[Chapter]:
         return []

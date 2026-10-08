@@ -20,8 +20,8 @@ Exit codes (shared legend with Gate B / the preflight orchestrator):
     1  FAIL            — black frames, wrong dims, zero duration, or over budget
     2  NOT_CONFIGURED  — fork venv/script/config not set up; nothing was run
 
-The MoviePy / settings imports are deferred into ``main`` so that importing
-this module (e.g. from a unit test) stays cheap and torch-free.
+The PyAV / settings imports are deferred into the functions that use them so
+importing this module (e.g. from a unit test) stays cheap and torch-free.
 """
 from __future__ import annotations
 
@@ -60,8 +60,8 @@ def is_mostly_black(frames: Sequence, threshold: float = BLACK_LUMA_THRESHOLD) -
     """Return True if *every* sampled frame is near-black.
 
     A pure helper so the black-frame verdict is unit-testable without a model.
-    ``frames`` is a sequence of HxWxC (or HxW) numpy arrays as returned by
-    ``moviepy`` ``clip.get_frame(t)``. Luma is approximated as the per-frame
+    ``frames`` is a sequence of HxWxC (or HxW) numpy arrays (RGB frames as
+    sampled by ``inspect_clip``). Luma is approximated as the per-frame
     mean over all channels. The verdict is "mostly black" only when ALL
     sampled frames fall below ``threshold`` — a single bright frame clears it.
     """
@@ -77,6 +77,39 @@ def is_mostly_black(frames: Sequence, threshold: float = BLACK_LUMA_THRESHOLD) -
         if float(arr.mean()) >= threshold:
             return False
     return True
+
+
+def inspect_clip(path: str, samples: int = 5) -> tuple[list[int], float, list]:
+    """Return ``([width, height], duration_s, frames)`` for an mp4 via PyAV.
+
+    ``frames`` are ~``samples`` evenly spaced RGB numpy arrays (the frames on
+    screen at ``duration * (i + 0.5) / samples``) for the black-frame check.
+    No system ffprobe needed.
+    """
+    import av
+
+    with av.open(path) as container:
+        stream = container.streams.video[0]
+        size = [int(stream.codec_context.width), int(stream.codec_context.height)]
+        if stream.duration is not None:
+            duration = float(stream.duration * stream.time_base)
+        elif container.duration is not None:
+            duration = container.duration / av.time_base
+        else:
+            duration = 0.0
+        wanted = [duration * (i + 0.5) / samples for i in range(samples)] if duration > 0 else []
+        frames = []
+        last = None
+        for frame in container.decode(stream):
+            while wanted and frame.time is not None and frame.time > wanted[0]:
+                if last is not None:
+                    frames.append(last.to_ndarray(format="rgb24"))
+                wanted.pop(0)
+            last = frame
+        for _ in wanted:
+            if last is not None:
+                frames.append(last.to_ndarray(format="rgb24"))
+    return size, duration, frames
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -189,8 +222,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return EXIT_NOT_CONFIGURED
 
-    # ── Run the real model. Defer compat+moviepy+producer imports to here. ────
-    import app.compat  # noqa: F401  # PIL.Image.ANTIALIAS shim before MoviePy
+    # ── Run the real model. Defer the producer import to here. ────────────────
     from app.services import ltx_producer
 
     # The clip is sized to the ÷32-rounded request — assert against THESE, not
@@ -234,9 +266,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_FAIL
     wall = time.perf_counter() - t0
 
-    # ── Verify the output via MoviePy (no system ffprobe in CI). ──────────────
-    from moviepy.editor import VideoFileClip
-
+    # ── Verify the output via PyAV (no system ffprobe in CI). ─────────────────
     # Initialise report names up front so a mid-inspection raise (malformed /
     # zero-byte mp4) still lands a clean EXIT_FAIL report, never a NameError.
     failures: list[str] = []
@@ -244,11 +274,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     duration: float = 0.0
     all_black: bool = True
 
-    clip = None
     try:
-        clip = VideoFileClip(out_path)
-        size = list(clip.size)  # MoviePy returns [w, h]
-        duration = float(clip.duration or 0.0)
+        size, duration, frames = inspect_clip(out_path)
 
         if size != [expected_width, expected_height]:
             failures.append(
@@ -257,21 +284,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if duration <= 0:
             failures.append(f"duration {duration} is not > 0")
 
-        # Sample ~5 evenly-spaced frames for the black-frame check.
-        frames = []
-        if duration > 0:
-            n = 5
-            for i in range(n):
-                t = duration * (i + 0.5) / n
-                frames.append(clip.get_frame(min(t, max(0.0, duration - 1e-3))))
+        # ~5 evenly-spaced frames for the black-frame check.
         all_black = is_mostly_black(frames)
         if all_black:
             failures.append("all sampled frames are near-black")
     except Exception as e:  # noqa: BLE001
         failures.append(f"could not inspect output: {e}")
-    finally:
-        if clip is not None:
-            clip.close()
 
     if args.max_seconds is not None and wall > args.max_seconds:
         failures.append(

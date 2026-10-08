@@ -5,7 +5,7 @@ from requests_auth_aws_sigv4 import AWSSigV4
 from tiktok_uploader.cookies import load_cookies_from_file
 from tiktok_uploader.Browser import Browser
 from tiktok_uploader.bot_utils import *
-from tiktok_uploader import Config, Video, eprint
+from tiktok_uploader import Config, eprint
 from dotenv import load_dotenv
 
 

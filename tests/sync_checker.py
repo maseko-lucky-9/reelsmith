@@ -9,6 +9,8 @@ module recovers:
 * when every audio **click** starts (``click_onsets``);
 
 and checks both against the schedule the source implies (``assert_av_sync``).
+``assert_caption_band`` additionally checks that every output frame's caption
+band shows exactly the caption a schedule says is visible at that time.
 
 Bit-block format (read side — the generator encodes it independently)
 -----------------------------------------------------------------------
@@ -32,10 +34,10 @@ reframed reel places the source as a scaled inset on a taller canvas. Map the
 geometry with ``inset_geometry``:
 
 * default (no ``inset_rect``): the inset spans the full canvas width and is
-  vertically centred, ``y0 = (canvas_h - inset_h) // 2`` — the placement both
-  the MoviePy renderer (``clip_service.add_captions_to_clip``) and the planned
-  ffmpeg overlay use. A 1 px difference (e.g. even-rounded ``y0``) is harmless
-  because only the centre of each cell is sampled.
+  vertically centred, ``y0 = (canvas_h - inset_h) // 2`` — the legacy MoviePy
+  placement. The ffmpeg renderer rounds ``y0`` down to even
+  (``render_service.inset_y``); that 1 px difference is harmless because only
+  the centre of each cell is sampled, but tests pass the exact rect anyway.
 * otherwise pass ``inset_rect=(x0, y0, inset_w, inset_h)`` measured from the
   render's filtergraph.
 
@@ -283,6 +285,7 @@ def assert_av_sync(
     source_start: float = 0.0,
     max_frame_error: float = 1.0,
     audio_tolerance_s: float | None = None,
+    require_contiguous: bool = False,
 ) -> SyncReport:
     """Assert a render of the sync fixture shows and sounds each source frame on time.
 
@@ -303,6 +306,11 @@ def assert_av_sync(
         max_frame_error: exclusive bound on ``|frame_error|``, in frames.
         audio_tolerance_s: allowed |onset - expected| per click; defaults to one
             AAC frame (1024 samples) at the render's audio sample rate.
+        require_contiguous: also require consecutive frames to show consecutive
+            source indices (no duplicated or skipped frame). Only meaningful when
+            the render keeps the source's constant frame rate. A one-frame slip
+            after frame 0 can stay within ``±max_frame_error`` (e.g. +0.01 on
+            frame 0, -0.99 afterwards); this catches it.
 
     Raises:
         AssertionError: describing every out-of-tolerance frame or click.
@@ -324,6 +332,15 @@ def assert_av_sync(
                 f"frame {n} @ {reading.time:.4f}s: frame index {reading.index}, "
                 f"source position {ideal:.2f} (off by {error:+.2f} frames)"
             )
+
+    if require_contiguous:
+        indices = [r.index for r in readings]
+        for n, (prev, cur) in enumerate(zip(indices, indices[1:]), start=1):
+            if prev is not None and cur is not None and cur - prev != 1:
+                problems.append(
+                    f"frame {n} @ {readings[n].time:.4f}s: frame index {cur} follows "
+                    f"{prev} (duplicated or skipped source frame)"
+                )
 
     audio = _decode_audio(path)
     expected_clicks: list[float] = []
@@ -367,4 +384,142 @@ def assert_av_sync(
         max_abs_frame_error=worst,
         max_click_error_s=max((abs(e) for e in click_errors), default=0.0),
         click_errors_s=tuple(click_errors),
+    )
+
+
+# ── Caption band ──────────────────────────────────────────────────────────────
+
+# BT.601 limited-range luma, the conversion ffmpeg applies to RGB inputs that
+# carry no colour metadata (the background PNG and the caption PNGs).
+_LUMA_COEFFS = np.array([65.481, 128.553, 24.966]) / 255.0
+
+
+def rgb_to_luma(rgb: np.ndarray) -> np.ndarray:
+    """``uint8`` RGB (H, W, 3) → float BT.601 limited-range luma (16..235)."""
+    return 16.0 + rgb[..., :3].astype(np.float64) @ _LUMA_COEFFS
+
+
+@dataclass(frozen=True)
+class CaptionBand:
+    """What the caption band of a reel must look like, frame by frame.
+
+    ``rect`` is ``(x0, y0, x1, y1)`` in output-frame pixels; ``background`` is
+    the RGB background under it; ``images`` maps a caption key to its RGBA
+    image of the rect's size; ``schedule`` lists ``(key, start, duration)``
+    in output seconds — where entries overlap the one listed later wins, and
+    no entry (or a non-positive duration) means the band shows the background.
+    """
+
+    rect: tuple[int, int, int, int]
+    background: np.ndarray
+    images: dict[object, np.ndarray]
+    schedule: Sequence[tuple[object, float, float]]
+
+    def expected_key(self, t: float) -> object | None:
+        key = None
+        for k, start, duration in self.schedule:
+            if duration > 0 and start <= t < start + duration:
+                key = k
+        return key
+
+    def candidates(self) -> dict[object | None, np.ndarray]:
+        """Expected band luma per caption (``None`` = no caption)."""
+        bg = self.background[..., :3].astype(np.float64)
+        out: dict[object | None, np.ndarray] = {None: rgb_to_luma(bg)}
+        for key, rgba in self.images.items():
+            alpha = rgba[..., 3:4].astype(np.float64) / 255.0
+            comp = rgba[..., :3].astype(np.float64) * alpha + bg * (1.0 - alpha)
+            out[key] = rgb_to_luma(comp)
+        return out
+
+
+@dataclass(frozen=True)
+class CaptionBandReport:
+    frames_checked: int
+    captioned_frames: int
+    max_abs_luma_error: float
+    worst_mean_error: float
+    best_wrong_mean_error: float
+
+
+def _luma_plane(frame) -> np.ndarray:
+    if frame.format.name not in ("yuv420p", "yuvj420p"):
+        raise AssertionError(f"expected yuv420p output, got {frame.format.name}")
+    return frame.to_ndarray()[: frame.height]
+
+
+def assert_caption_band(
+    path: str | Path,
+    band: CaptionBand,
+    *,
+    tolerance: float | None = 2.0,
+    max_mean_error: float = 8.0,
+) -> CaptionBandReport:
+    """Assert every frame's caption band shows the scheduled caption.
+
+    Compares the decoded **luma** of ``band.rect`` with the expected
+    composite (caption alpha-blended over ``band.background``):
+
+    * ``tolerance`` set (lossless renders): every pixel within ``±tolerance``
+      of the scheduled caption's composite — ffmpeg blends in YUV and rounds,
+      the oracle blends in float, so ±2 covers blend rounding;
+    * ``tolerance=None`` (lossy renders): the scheduled composite must be the
+      nearest candidate by mean absolute error and within ``max_mean_error``.
+
+    Chroma is not compared: 4:2:0 subsampling smears coloured glyph edges
+    across 2x2 blocks, so per-channel RGB equality cannot hold at text edges.
+    """
+    x0, y0, x1, y1 = band.rect
+    candidates = band.candidates()
+    problems: list[str] = []
+    frames = captioned = 0
+    worst_px = worst_mean = 0.0
+    best_wrong = math.inf
+    with av.open(str(path)) as container:
+        stream = container.streams.video[0]
+        for n, frame in enumerate(container.decode(stream)):
+            frames += 1
+            t = float(frame.time)
+            luma = _luma_plane(frame)
+            if y1 > luma.shape[0] or x1 > luma.shape[1]:
+                raise AssertionError(
+                    f"caption rect {band.rect} exceeds frame {luma.shape[::-1]}"
+                )
+            got = luma[y0:y1, x0:x1].astype(np.float64)
+            want_key = band.expected_key(t)
+            captioned += want_key is not None
+            errors = {k: float(np.abs(got - v).mean()) for k, v in candidates.items()}
+            worst_mean = max(worst_mean, errors[want_key])
+            wrong = [e for k, e in errors.items() if k != want_key]
+            if wrong:
+                best_wrong = min(best_wrong, min(wrong))
+            if tolerance is not None:
+                px = float(np.abs(got - candidates[want_key]).max())
+                worst_px = max(worst_px, px)
+                if px > tolerance:
+                    nearest = min(errors, key=errors.get)
+                    problems.append(
+                        f"frame {n} @ {t:.4f}s: band differs from {want_key!r} by "
+                        f"up to {px:.1f} luma (tolerance {tolerance}); nearest "
+                        f"candidate is {nearest!r}"
+                    )
+            else:
+                nearest = min(errors, key=errors.get)
+                if nearest != want_key or errors[want_key] > max_mean_error:
+                    problems.append(
+                        f"frame {n} @ {t:.4f}s: expected {want_key!r} "
+                        f"(mean error {errors[want_key]:.2f}), nearest is "
+                        f"{nearest!r} ({errors[nearest]:.2f})"
+                    )
+    assert frames, f"{path}: no video frames decoded"
+    if problems:
+        shown = "\n  ".join(problems[:20])
+        more = f"\n  ... and {len(problems) - 20} more" if len(problems) > 20 else ""
+        raise AssertionError(f"caption band check failed for {path}:\n  {shown}{more}")
+    return CaptionBandReport(
+        frames_checked=frames,
+        captioned_frames=captioned,
+        max_abs_luma_error=worst_px,
+        worst_mean_error=worst_mean,
+        best_wrong_mean_error=best_wrong,
     )

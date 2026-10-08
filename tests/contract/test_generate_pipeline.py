@@ -2,7 +2,7 @@
 existing pipeline using stub producers + stub transcription.
 
 Marked ``e2e`` (still part of the default fast set — ``addopts`` only excludes
-integration/live/playwright) because it does real MoviePy assembly + render.
+integration/live/playwright) because it does real ffmpeg assembly + render.
 """
 from __future__ import annotations
 

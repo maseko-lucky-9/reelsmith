@@ -16,7 +16,9 @@ alembic==1.16.1
 
 # Domain dependencies
 yt-dlp==2026.3.17
-moviepy==1.0.3
+# Rendering: bundled ffmpeg binary (libx264, concat, overlay) + PyAV decode/probe
+imageio-ffmpeg==0.6.0
+av==17.0.1
 faster-whisper>=1.0.0
 pysrt==1.1.2
 webvtt-py==0.5.1

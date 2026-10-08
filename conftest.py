@@ -1,6 +1,5 @@
 """Root conftest — applied to every test in the project.
 
-Applies PIL.Image.ANTIALIAS compat shim before any test can import MoviePy.
 Provides autouse fixtures that clean up background tasks and Docker containers
 after every test so nothing leaks between runs.
 """
@@ -19,8 +18,6 @@ import pytest
 os.environ.setdefault("YTVIDEO_OLLAMA_ENABLED", "false")
 os.environ.setdefault("YTVIDEO_SEGMENT_PROVIDER", "chapter")
 os.environ.setdefault("YTVIDEO_JOB_STORE", "memory")
-
-import app.compat  # noqa: F401 — PIL.Image.ANTIALIAS shim for MoviePy 1.0.3
 
 
 @pytest.fixture(autouse=True)

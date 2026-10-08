@@ -54,19 +54,33 @@ class _FakeAdapter:
         ]
 
 
+# Recorders for the fakes below; reset by _run_pipeline.
+_CALLS: dict[str, list] = {}
+
+
+def _fake_extract_audio(src, start, duration, wav_path):
+    _CALLS.setdefault("extract_audio", []).append((src, start, duration, wav_path))
+    Path(wav_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(wav_path).write_bytes(b"\x00")
+    return wav_path
+
+
 def _fake_render(video_path, output_path, *args, **kwargs):
+    _CALLS.setdefault("render", []).append((video_path, output_path, args, kwargs))
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     Path(output_path).write_bytes(b"\x00")
     return output_path
 
 
-def _fake_render_to_path(text, videosize, path, font_size=50):
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    Path(path).write_bytes(b"\x00")
-    return path
-
-
-async def _run_pipeline(tmp_path, pipeline_options: PipelineOptions, monkeypatch):
+async def _run_pipeline(
+    tmp_path,
+    pipeline_options: PipelineOptions,
+    monkeypatch,
+    extract_audio=None,
+    adapter=None,
+    enhance=None,
+    render=None,
+):
     """Helper: runs the full pipeline with given PipelineOptions and returns collected events."""
     bus = AsyncEventBus()
     store = JobStore()
@@ -81,16 +95,11 @@ async def _run_pipeline(tmp_path, pipeline_options: PipelineOptions, monkeypatch
     await store.create(state)
 
     monkeypatch.setattr(orch.folder_service, "create_video_subfolder", _fake_subfolder)
-    monkeypatch.setattr(orch, "resolve_adapter", lambda url: _FakeAdapter())
+    monkeypatch.setattr(orch, "resolve_adapter", lambda url: adapter or _FakeAdapter())
     monkeypatch.setattr(orch.clip_service, "probe_safe_end", lambda path: 999.0)
+    _CALLS.clear()
     monkeypatch.setattr(
-        orch.clip_service, "extract_chapter_to_disk",
-        lambda video_path, start, end, out_clip, out_audio: (
-            Path(out_clip).parent.mkdir(parents=True, exist_ok=True),
-            Path(out_clip).write_bytes(b"\x00"),
-            Path(out_audio).write_bytes(b"\x00"),
-            (out_clip, out_audio),
-        )[-1],
+        orch.clip_service, "extract_audio", extract_audio or _fake_extract_audio
     )
     from app.services.transcription_service import WordTiming
     monkeypatch.setattr(
@@ -100,18 +109,17 @@ async def _run_pipeline(tmp_path, pipeline_options: PipelineOptions, monkeypatch
             WordTiming("world", 0.5, 1.0),
         ],
     )
-    monkeypatch.setattr(orch.render_service, "render_clip", _fake_render)
-    monkeypatch.setattr(orch.subtitle_image_service, "render_to_path", _fake_render_to_path)
+    monkeypatch.setattr(orch.render_service, "render_clip", render or _fake_render)
     monkeypatch.setattr(orch.settings, "max_parallel_chapters", 1)
     # Avoid real network/ffmpeg calls for the new W1/W2 stages
     monkeypatch.setattr(orch.ai_hook_service, "generate_hook", lambda *a, **k: "")
     monkeypatch.setattr(
         orch.audio_enhance_service, "enhance",
-        lambda in_path, out_path, **k: (
+        enhance or (lambda in_path, out_path, **k: (
             Path(out_path).parent.mkdir(parents=True, exist_ok=True),
             Path(out_path).write_bytes(b"\x00"),
             out_path,
-        )[-1],
+        )[-1]),
     )
 
     received: list[Event] = []
@@ -296,3 +304,155 @@ async def test_thumbnail_off_render_on(tmp_path, monkeypatch):
     skip_events = [e for e in events if e.type == EventType.STAGE_SKIPPED]
     skip_stages = [e.payload.get("stage_id") for e in skip_events]
     assert "thumbnail" in skip_stages
+
+
+# ── P1: audio extraction from the source replaces extract_chapter_to_disk ─────
+# Before P1 a chapter mp4 + wav were cut whenever render was on (and, for
+# transcription only, also when render was off), and render_clip re-read that
+# chapter mp4. Now ONLY the wav is cut, ONLY when transcription is on, and
+# render_clip reads the SOURCE directly. CHAPTER_CLIP_EXTRACTED is still
+# emitted while render is on (the web UI's "Extract clips" stage counts it),
+# now with clip_path=None.
+
+
+def _clip_extracted(events):
+    return [e for e in events if e.type == EventType.CHAPTER_CLIP_EXTRACTED]
+
+
+@pytest.mark.asyncio
+async def test_default_extracts_chapter_audio_and_renders_from_source(tmp_path, monkeypatch):
+    events, store = await _run_pipeline(tmp_path, PipelineOptions(), monkeypatch)
+    final = await store.get("job-gate")
+    source = final.video_path
+
+    assert len(_CALLS["extract_audio"]) == 1
+    src, start, duration, wav = _CALLS["extract_audio"][0]
+    assert (src, start, duration) == (source, 0.0, 10.0)
+    assert wav.endswith("chapter_0.wav")
+
+    [extracted] = _clip_extracted(events)
+    assert extracted.payload == {"chapter_index": 0, "clip_path": None, "audio_path": wav}
+
+    [(video_path, _out, args, kwargs)] = _CALLS["render"]
+    assert video_path == source  # no intermediate chapter mp4
+    assert args[:2] == (0.0, 10.0)  # the chapter window in source time
+    assert [w.word for w in kwargs["word_timings"]] == ["hello", "world"]
+
+    chapter = final.chapters[0]
+    assert chapter.clip_path is None
+    assert chapter.audio_path.endswith("chapter_0_enhanced.wav")  # audio_enhance on
+
+
+@pytest.mark.asyncio
+async def test_transcription_off_render_on_skips_extraction_but_emits_stage(tmp_path, monkeypatch):
+    events, _ = await _run_pipeline(tmp_path, PipelineOptions(transcription=False), monkeypatch)
+    assert "extract_audio" not in _CALLS
+    [extracted] = _clip_extracted(events)
+    assert extracted.payload == {"chapter_index": 0, "clip_path": None, "audio_path": None}
+    [(_src, _out, _args, kwargs)] = _CALLS["render"]
+    assert kwargs["word_timings"] == []
+    types = [e.type for e in events]
+    assert types[-1] is EventType.JOB_COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_render_off_transcription_on_extracts_audio_without_stage_event(tmp_path, monkeypatch):
+    events, _ = await _run_pipeline(tmp_path, PipelineOptions(render=False), monkeypatch)
+    assert len(_CALLS["extract_audio"]) == 1
+    assert _clip_extracted(events) == []
+    assert "render" not in _CALLS
+    assert EventType.CHAPTER_TRANSCRIBED in [e.type for e in events]
+
+
+@pytest.mark.asyncio
+async def test_all_off_extracts_nothing(tmp_path, monkeypatch):
+    opts = PipelineOptions(transcription=False, render=False)
+    events, _ = await _run_pipeline(tmp_path, opts, monkeypatch)
+    assert "extract_audio" not in _CALLS
+    assert _clip_extracted(events) == []
+
+
+@pytest.mark.asyncio
+async def test_subtitle_pngs_are_no_longer_rendered_by_the_orchestrator(tmp_path, monkeypatch):
+    """Captions are burned in by render_clip; the old per-caption PNG loop is gone."""
+    events, store = await _run_pipeline(tmp_path, PipelineOptions(), monkeypatch)
+    assert EventType.SUBTITLE_IMAGE_RENDERED not in [e.type for e in events]
+    assert (await store.get("job-gate")).chapters[0].image_paths == []
+
+
+@pytest.mark.asyncio
+async def test_source_without_audio_skips_transcription_words(tmp_path, monkeypatch):
+    """A source with no audio stream: nothing to transcribe, the job still completes
+    (before P1 the missing wav reached the transcriber and failed the job)."""
+    calls = []
+
+    def no_audio(src, start, duration, wav_path):
+        calls.append(wav_path)
+        return None
+
+    events, _ = await _run_pipeline(
+        tmp_path, PipelineOptions(), monkeypatch, extract_audio=no_audio
+    )
+    assert len(calls) == 1
+    [extracted] = _clip_extracted(events)
+    assert extracted.payload["audio_path"] is None
+    # the helper's transcriber stub returns "hello world" if it is ever called
+    transcribed = [e for e in events if e.type == EventType.CHAPTER_TRANSCRIBED]
+    assert [e.payload["text"] for e in transcribed] == [""]
+    assert [e.type for e in events][-1] is EventType.JOB_COMPLETED
+
+
+class _OffsetChapterAdapter(_FakeAdapter):
+    """One chapter that does NOT start at 0: [2.5, 7.0)."""
+
+    def extract_chapters(self, info: dict) -> list[Chapter]:
+        return [Chapter(index=0, title="Mid", start=2.5, end=7.0)]
+
+
+@pytest.mark.asyncio
+async def test_offset_chapter_uses_source_time_window(tmp_path, monkeypatch):
+    """extract_audio gets (start, duration); render_clip gets (start, end) — both
+    in SOURCE time, the same window, since neither reads an intermediate clip."""
+    events, store = await _run_pipeline(
+        tmp_path, PipelineOptions(), monkeypatch, adapter=_OffsetChapterAdapter()
+    )
+    source = (await store.get("job-gate")).video_path
+    [(src, start, duration, _wav)] = _CALLS["extract_audio"]
+    assert (src, start, duration) == (source, 2.5, 4.5)
+    [(video_path, _out, args, _kwargs)] = _CALLS["render"]
+    assert (video_path, args[:2]) == (source, (2.5, 7.0))
+    assert [e.type for e in events][-1] is EventType.JOB_COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_ffmpeg_stages_run_with_a_cancel_hook(tmp_path, monkeypatch):
+    """extract_audio, audio_enhance and render run via to_thread_cancellable,
+    so cancelling the job (or a wait_for timeout) kills their ffmpeg."""
+    from app.services import ffmpeg_tools
+
+    hooks: dict[str, object] = {}
+
+    def extract(src, start, duration, wav_path):
+        hooks["extract_audio"] = ffmpeg_tools.current_cancel_event()
+        return _fake_extract_audio(src, start, duration, wav_path)
+
+    def enhance(in_path, out_path, **kwargs):
+        hooks["audio_enhance"] = ffmpeg_tools.current_cancel_event()
+        Path(out_path).write_bytes(b"\x00")
+        return out_path
+
+    def render(video_path, output_path, *args, **kwargs):
+        hooks["render"] = ffmpeg_tools.current_cancel_event()
+        return _fake_render(video_path, output_path, *args, **kwargs)
+
+    events, _ = await _run_pipeline(
+        tmp_path,
+        PipelineOptions(),
+        monkeypatch,
+        extract_audio=extract,
+        enhance=enhance,
+        render=render,
+    )
+    assert [e.type for e in events][-1] is EventType.JOB_COMPLETED
+    assert set(hooks) == {"extract_audio", "audio_enhance", "render"}
+    assert all(h is not None for h in hooks.values()), hooks
