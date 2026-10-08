@@ -9,6 +9,26 @@ import pytest_asyncio
 _DB_URL = "postgresql+asyncpg://reelsmith:reelsmith@localhost:5432/reelsmith"
 
 
+@pytest.fixture(scope="session")
+def sync_fixture_640():
+    """640x360 23.976 fps B-frame source with frame-index block + AAC click track.
+
+    Built once into the gitignored ``tests/fixtures/generated/`` and reused
+    until ``make_sync_fixture.py`` changes.
+    """
+    from tests.fixtures.make_sync_fixture import build_sync_fixture_640
+
+    return build_sync_fixture_640()
+
+
+@pytest.fixture(scope="session")
+def sync_fixture_720():
+    """1280x720 23.976 fps B-frame source with frame-index block, no audio."""
+    from tests.fixtures.make_sync_fixture import build_sync_fixture_720
+
+    return build_sync_fixture_720()
+
+
 @pytest_asyncio.fixture
 async def db_store():
     """SqlJobStore backed by the test Postgres instance. Resets engine per test."""
