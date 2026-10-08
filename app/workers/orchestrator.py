@@ -78,6 +78,9 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
     target_aspect_ratio: float = payload.get(
         "target_aspect_ratio", settings.default_target_aspect_ratio
     )
+    # Job language tag (e.g. "en-US"); None lets the transcription service
+    # apply settings.default_transcription_language.
+    language: str | None = payload.get("language")
 
     # ── Pipeline options with server-side safety net (G2) ────────────────────
     raw_opts = payload.get("pipeline_options")
@@ -245,6 +248,7 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
                     bus=bus,
                     store=store,
                     pipeline_options=opts,
+                    language=language,
                 )
 
         outputs = await asyncio.gather(*(_bound(c) for c in chapters), return_exceptions=False)
@@ -322,6 +326,7 @@ async def _process_chapter(
     bus: AsyncEventBus,
     store: JobStore,
     pipeline_options: PipelineOptions | None = None,
+    language: str | None = None,
 ) -> str | None:
     index = int(chapter["index"])
     title = chapter["title"]
@@ -407,6 +412,7 @@ async def _process_chapter(
                 enhanced_audio_path,
                 provider=settings.audio_enhance_provider,
                 model_path=settings.audio_enhance_rnnoise_model,
+                for_transcription=True,
             )
             # Hand-off: subsequent stages should read the enhanced track.
             audio_path = enhanced_audio_path
@@ -436,17 +442,18 @@ async def _process_chapter(
     words = []
     text = ""
     if opts.transcription:
-        log.info("[%s] Chapter %d  transcribing audio  provider=%s",
-                 job_id, index, settings.transcription_provider)
+        log.info("[%s] Chapter %d  transcribing audio  provider=%s  language=%s",
+                 job_id, index, settings.transcription_provider, language)
         step_t0 = time.perf_counter()
         await store.upsert_chapter(job_id, lambda c: _set_status(c, "transcribing"), index)
         if audio_path is None:
             log.warning("[%s] Chapter %d  source has no audio; nothing to transcribe",
                         job_id, index)
         else:
-            words = await asyncio.wait_for(
-                asyncio.to_thread(transcription_service.transcribe_to_words, audio_path),
-                timeout=settings.transcription_timeout_seconds,
+            # Budget max(setting, chapter length), charged from decode start;
+            # a timeout/cancel stops the worker at its next segment.
+            words = await transcription_service.transcribe_words_async(
+                audio_path, language=language, audio_duration_s=chapter_duration
             )
         text = " ".join(w.word for w in words)
         log.info("[%s] Chapter %d  transcription done (%.2fs)  words=%d",

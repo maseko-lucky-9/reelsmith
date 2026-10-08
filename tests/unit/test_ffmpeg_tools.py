@@ -307,3 +307,27 @@ async def test_to_thread_cancellable_drops_a_still_queued_call():
     await blocker
     await asyncio.sleep(0.05)
     assert ran == []
+
+
+async def test_cancelled_call_that_raises_logs_no_asyncio_error(caplog):
+    """A worker that stops with an exception after the cancel is the expected
+    outcome, not an unhandled error: asyncio must not log it (Python 3.14's
+    ``asyncio.shield`` logs it as "exception in shielded future")."""
+    import logging
+
+    started = threading.Event()
+
+    def stops_on_cancel():
+        started.set()
+        ffmpeg_tools.current_cancel_event().wait(5)
+        raise RuntimeError("stopped by cancel")
+
+    task = asyncio.create_task(ffmpeg_tools.to_thread_cancellable(stops_on_cancel))
+    await asyncio.to_thread(started.wait, 5)
+    with caplog.at_level(logging.ERROR, logger="asyncio"):
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0.05)  # let the futures' done-callbacks run
+
+    assert "exception in shielded future" not in caplog.text

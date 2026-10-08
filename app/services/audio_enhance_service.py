@@ -37,18 +37,36 @@ class AudioEnhanceError(RuntimeError):
 # ── argv builders (pure functions; testable in isolation) ────────────────────
 
 
-def loudnorm_argv(in_path: str, out_path: str) -> tuple[str, ...]:
-    """ffmpeg EBU R128 single-pass (good enough for short clips)."""
+# Whisper's native input. loudnorm resamples to 192 kHz internally and writes
+# that rate unless told otherwise; transcription only needs 16 kHz mono.
+TRANSCRIPTION_OUTPUT_ARGS = ("-ac", "1", "-ar", "16000")
+
+
+def loudnorm_argv(
+    in_path: str, out_path: str, *, for_transcription: bool = False
+) -> tuple[str, ...]:
+    """ffmpeg EBU R128 single-pass (good enough for short clips).
+
+    ``for_transcription`` writes 16 kHz mono (Whisper input) instead of
+    keeping the source's channels and loudnorm's 192 kHz output rate.
+    """
     return (
         "ffmpeg", "-y", "-i", in_path,
         "-af",
         "loudnorm=I=-16:TP=-1.5:LRA=11",
         "-c:v", "copy",
+        *(TRANSCRIPTION_OUTPUT_ARGS if for_transcription else ()),
         out_path,
     )
 
 
-def rnnoise_argv(in_path: str, out_path: str, *, model_path: str | None = None) -> tuple[str, ...]:
+def rnnoise_argv(
+    in_path: str,
+    out_path: str,
+    *,
+    model_path: str | None = None,
+    for_transcription: bool = False,
+) -> tuple[str, ...]:
     """RNNoise via ffmpeg's arnndn filter, chained into loudnorm."""
     af = (
         f"arnndn=m={model_path}," if model_path
@@ -58,6 +76,7 @@ def rnnoise_argv(in_path: str, out_path: str, *, model_path: str | None = None) 
         "ffmpeg", "-y", "-i", in_path,
         "-af", af,
         "-c:v", "copy",
+        *(TRANSCRIPTION_OUTPUT_ARGS if for_transcription else ()),
         out_path,
     )
 
@@ -89,8 +108,13 @@ def enhance(
     invoker: callable = None,  # type: ignore[assignment]
     bus: "AsyncEventBus | None" = None,
     job_id: str | None = None,
+    for_transcription: bool = False,
 ) -> str:
     """Apply ``provider`` to ``in_path`` -> ``out_path``. Returns ``out_path``.
+
+    ``for_transcription`` (loudnorm / rnnoise) writes 16 kHz mono for Whisper;
+    the orchestrator sets it because the enhanced track only feeds
+    transcription — the reel keeps the source's original audio.
 
     ``invoker`` is the callable that actually runs the argv; production
     uses ``_invoke``, tests inject a recorder.
@@ -114,9 +138,12 @@ def enhance(
         return out_path
 
     if provider == "loudnorm":
-        argv = loudnorm_argv(in_path, out_path)
+        argv = loudnorm_argv(in_path, out_path, for_transcription=for_transcription)
     elif provider == "rnnoise":
-        argv = rnnoise_argv(in_path, out_path, model_path=model_path)
+        argv = rnnoise_argv(
+            in_path, out_path, model_path=model_path,
+            for_transcription=for_transcription,
+        )
     elif provider == "demucs":
         # demucs writes to a directory; treat out_path as the dir for this provider.
         argv = demucs_argv(in_path, out_path)

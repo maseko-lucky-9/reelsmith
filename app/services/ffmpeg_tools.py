@@ -217,7 +217,10 @@ async def to_thread_cancellable(func: Callable[..., T], /, *args, **kwargs) -> T
     loop = asyncio.get_running_loop()
     future = loop.run_in_executor(None, worker)
     try:
-        return await asyncio.shield(future)
+        # asyncio.wait never cancels what it waits on, so a cancel stops only
+        # this coroutine. (Not asyncio.shield: on Python 3.14 it logs the
+        # worker's post-cancel exception as "exception in shielded future".)
+        await asyncio.wait({future})
     except asyncio.CancelledError:
         event.set()
         with lock:
@@ -230,6 +233,7 @@ async def to_thread_cancellable(func: Callable[..., T], /, *args, **kwargs) -> T
                 if future.done() and not future.cancelled():
                     future.exception()  # mark retrieved; the cancel wins
         raise
+    return future.result()
 
 
 # ── PyAV probes ───────────────────────────────────────────────────────────────

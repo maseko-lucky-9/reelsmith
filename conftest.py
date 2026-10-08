@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import tempfile
 import subprocess
 
 import pytest
@@ -18,6 +19,14 @@ import pytest
 os.environ.setdefault("YTVIDEO_OLLAMA_ENABLED", "false")
 os.environ.setdefault("YTVIDEO_SEGMENT_PROVIDER", "chapter")
 os.environ.setdefault("YTVIDEO_JOB_STORE", "memory")
+# Never load a real Whisper model in the default run: the stub provider for
+# every test, and no lifespan warm-up. Real-model coverage lives in
+# tests/integration/test_whisper_real.py, which switches the provider itself.
+os.environ.setdefault("YTVIDEO_TRANSCRIPTION_PROVIDER", "stub")
+os.environ.setdefault("YTVIDEO_WHISPER_WARMUP", "false")
+# Never let the test suite export into a developer's real .env export folder
+# (e.g. a Syncthing share); env vars win over .env in pydantic-settings.
+os.environ.setdefault("YTVIDEO_EXPORT_BASE_FOLDER", tempfile.mkdtemp(prefix="reelsmith-test-export-"))
 
 
 @pytest.fixture(autouse=True)

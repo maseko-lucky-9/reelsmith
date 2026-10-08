@@ -144,3 +144,55 @@ def test_enhance_without_bus_still_works(tmp_path):
     out = svc.enhance(str(src), str(dst), provider="passthrough")
     assert out == str(dst)
     assert dst.read_bytes() == b"data"
+
+
+# ── Transcription input format (P3) ──────────────────────────────────────────
+# Enhanced audio only feeds Whisper (the reel keeps the source audio), so the
+# orchestrator asks for Whisper's native 16 kHz mono instead of loudnorm's
+# 192 kHz output. Other callers (the enhance-speech routes) keep the source
+# channel layout and rate.
+
+
+@pytest.mark.parametrize("builder", [svc.loudnorm_argv, svc.rnnoise_argv])
+def test_transcription_argv_forces_16k_mono(builder):
+    argv = builder("/in.wav", "/out.wav", for_transcription=True)
+    assert argv[-5:] == ("-ac", "1", "-ar", "16000", "/out.wav")
+
+
+@pytest.mark.parametrize("builder", [svc.loudnorm_argv, svc.rnnoise_argv])
+def test_default_argv_keeps_source_channels_and_rate(builder):
+    argv = builder("/in.mp4", "/out.mp4")
+    assert "-ac" not in argv
+    assert "-ar" not in argv
+
+
+@pytest.mark.parametrize("provider", ["loudnorm", "rnnoise"])
+def test_enhance_for_transcription_reaches_the_argv(tmp_path, provider):
+    src = tmp_path / "in.wav"
+    src.write_bytes(b"x")
+    captured: list[tuple[str, ...]] = []
+    svc.enhance(
+        str(src), str(tmp_path / "out.wav"), provider=provider,
+        invoker=lambda argv: captured.append(tuple(argv)), for_transcription=True,
+    )
+    assert captured[0][-5:-1] == ("-ac", "1", "-ar", "16000")
+
+
+def test_enhance_for_transcription_writes_16k_mono_wav(tmp_path):
+    """Real bundled ffmpeg: loudnorm alone would write 192 kHz stereo here."""
+    import av
+
+    from app.services import ffmpeg_tools
+
+    src = tmp_path / "in.wav"
+    ffmpeg_tools.run([
+        "ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+        "-t", "1", "-ac", "2", str(src),
+    ])
+    dst = tmp_path / "out.wav"
+
+    svc.enhance(str(src), str(dst), provider="loudnorm", for_transcription=True)
+
+    with av.open(str(dst)) as container:
+        stream = container.streams.audio[0]
+        assert (stream.rate, stream.layout.nb_channels) == (16000, 1)

@@ -97,7 +97,7 @@ def _install_pipeline_doubles(
     monkeypatch.setattr(orch.clip_service, "extract_audio", _fake_extract_audio)
     monkeypatch.setattr(
         orch.transcription_service, "transcribe_to_words",
-        lambda audio_path, language="en": list(words),
+        lambda audio_path, **_: list(words),
     )
     monkeypatch.setattr(orch.render_service, "render_clip", _fake_render)
     monkeypatch.setattr(orch.settings, "max_parallel_chapters", 1)
@@ -195,6 +195,8 @@ async def test_audio_enhance_runs_when_enabled(tmp_path, monkeypatch):
     assert in_path.endswith("chapter_0.wav")
     assert out_path.endswith("chapter_0_enhanced.wav")
     assert kwargs.get("provider") == orch.settings.audio_enhance_provider
+    # Enhanced audio only feeds Whisper: ask for its native 16 kHz mono.
+    assert kwargs.get("for_transcription") is True
 
     # The chapter record should now point at the enhanced audio.
     final = await store.get("job-w13")

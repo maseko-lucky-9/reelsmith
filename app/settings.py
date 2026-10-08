@@ -63,7 +63,20 @@ if _HAS_PYDANTIC_SETTINGS:
         # ── Transcription ─────────────────────────────────────────────────────
         transcription_provider: str = "whisper"  # "whisper" | "stub"
         whisper_model: str = "base"
+        # Decode-time budget per chapter: max(this, chapter seconds), counted
+        # from when decoding starts (model loaded, decode slot held).
         transcription_timeout_seconds: int = 120
+        # Decode settings, chosen by scripts/bench_whisper.py (P3, Apple M5 Pro,
+        # base int8, 77 s speech): beam 1 + VAD is ~2x faster than beam 5 and
+        # matched the reference transcript better (VAD stops Whisper skipping
+        # the speech that follows a long silence). 8 CPU threads beat 4/5/10/15
+        # and the CTranslate2 default (0 = 4); use 0 on hosts with < 8 cores.
+        whisper_beam_size: int = 1
+        whisper_vad_filter: bool = True
+        whisper_cpu_threads: int = 8
+        # Load the model in the background at API start-up (whisper provider
+        # only) so the first job doesn't pay for it. Tests turn this off.
+        whisper_warmup: bool = True
 
         # ── Segment scoring ───────────────────────────────────────────────────
         # "local_heuristic" | "chapter" | "stub"
@@ -220,6 +233,10 @@ else:  # Fallback: pydantic-settings not yet installed
         transcription_provider = "whisper"
         whisper_model = "base"
         transcription_timeout_seconds = 120
+        whisper_beam_size = 1
+        whisper_vad_filter = True
+        whisper_cpu_threads = 8
+        whisper_warmup = True
         segment_provider = "chapter"
         target_clip_seconds_min = 20
         target_clip_seconds_max = 60

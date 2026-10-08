@@ -104,7 +104,7 @@ async def _run_pipeline(
     from app.services.transcription_service import WordTiming
     monkeypatch.setattr(
         orch.transcription_service, "transcribe_to_words",
-        lambda audio_path, language="en": [
+        lambda audio_path, **_: [
             WordTiming("hello", 0.0, 0.5),
             WordTiming("world", 0.5, 1.0),
         ],
