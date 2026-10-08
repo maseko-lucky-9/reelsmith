@@ -1,6 +1,7 @@
 .vscode/
 .venv/
 .venv-mac/
+.venv-*/
 env/
 
 # Python artifacts

@@ -254,7 +254,10 @@ def test_rotated_source_size_and_frame_match_ffmpeg_autorotate(
     got = np.asarray(ffmpeg_tools.grab_frame(path, t))
     want = _ffmpeg_frame(path, t, tmp_path)
     assert got.shape == want.shape == (size[1], size[0], 3)
-    assert np.abs(got.astype(int) - want.astype(int)).mean() < 1.0
+    # Decoding is bit-identical; only YUV->RGB rounding differs. PyAV >= 18
+    # (FFmpeg 8 swscale) is exact BT.601, the bundled ffmpeg 7.1 CLI is off by
+    # up to 3 LSB (mean ~1.2). A wrong orientation gives a mean of ~67.
+    assert np.abs(got.astype(int) - want.astype(int)).mean() < 2.0
 
 
 def test_error_message_is_short_but_attribute_keeps_the_tail():
