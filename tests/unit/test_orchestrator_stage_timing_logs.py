@@ -40,7 +40,7 @@ def stubbed_services(monkeypatch):
     monkeypatch.setattr(
         orch.transcription_service,
         "transcribe_to_words",
-        lambda path: [WordTiming("hello", 0.0, 0.5), WordTiming("world", 0.5, 1.0)],
+        lambda path, **_: [WordTiming("hello", 0.0, 0.5), WordTiming("world", 0.5, 1.0)],
     )
     monkeypatch.setattr(
         orch.render_service, "render_clip", lambda src, out, *a, **k: _touch(out)

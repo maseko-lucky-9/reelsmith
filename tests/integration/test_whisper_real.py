@@ -60,3 +60,33 @@ def test_real_base_model_transcribes_known_phrase_with_monotonic_timestamps() ->
     assert starts == sorted(starts), f"start times not monotonic: {starts}"
     for w in words:
         assert 0.0 <= w.start <= w.end <= FIXTURE_DURATION_S + 0.5, w
+
+
+@pytest.mark.usefixtures("real_whisper")
+def test_real_library_rejects_a_raw_region_tag() -> None:
+    """faster-whisper's tokenizer refuses BCP-47 tags; the service must normalise."""
+    model = transcription_service._get_model()
+
+    with pytest.raises(ValueError, match="'en-US' is not a valid language code"):
+        model.transcribe(str(FIXTURE), language="en-US")
+
+
+@pytest.mark.usefixtures("real_whisper")
+def test_region_tagged_language_transcribes_end_to_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = transcription_service._get_model()
+    real_transcribe = model.transcribe
+    sent: list[str | None] = []
+
+    def spy(audio, **kwargs):
+        sent.append(kwargs.get("language"))
+        return real_transcribe(audio, **kwargs)
+
+    monkeypatch.setattr(model, "transcribe", spy)
+
+    words = transcription_service.transcribe_to_words(str(FIXTURE), language="en-US")
+
+    assert sent == ["en"], "expected the normalised code, not auto-detection"
+    heard = {_normalise(w.word) for w in words}
+    assert REQUIRED_WORDS <= heard, sorted(heard)

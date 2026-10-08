@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -35,10 +36,22 @@ from app.routers import (
     uploads,
     xml_export,
 )
+from app.services import transcription_service
 from app.settings import settings
 from app.workers.orchestrator import run_orchestrator
 
 import app.logging_config  # noqa: F401
+
+log = logging.getLogger(__name__)
+
+
+async def _warm_up_whisper() -> None:
+    """Load the Whisper model off the event loop; failure only costs the first job."""
+    try:
+        await asyncio.to_thread(transcription_service.warm_up)
+    except Exception:  # noqa: BLE001 — non-fatal: the first job loads it instead
+        log.warning("Whisper warm-up failed; the first job will load the model",
+                    exc_info=True)
 
 
 def _make_store():
@@ -94,6 +107,12 @@ async def lifespan(app: FastAPI):
                 job_queue.task_done()
 
     worker_task = asyncio.create_task(_queue_worker())
+    # Background model load so the first job doesn't pay for it. The reference
+    # is held on app.state; the thread can't be interrupted, so shutdown only
+    # cancels the waiting task.
+    app.state.whisper_warmup_task = None
+    if settings.transcription_provider == "whisper" and settings.whisper_warmup:
+        app.state.whisper_warmup_task = asyncio.create_task(_warm_up_whisper())
     app.state.orchestrator_task = asyncio.create_task(
         run_orchestrator(app.state.event_bus, app.state.job_store)
     )
@@ -137,12 +156,13 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        for t in [worker_task, retention_task, app.state.orchestrator_task]:
+        warmup_task = app.state.whisper_warmup_task
+        for t in [worker_task, retention_task, app.state.orchestrator_task, warmup_task]:
             if t is None:
                 continue
             t.cancel()
         task = app.state.orchestrator_task
-        for t in [worker_task, retention_task, task]:
+        for t in [worker_task, retention_task, task, warmup_task]:
             if t is not None and not t.done():
                 t.cancel()
                 try:

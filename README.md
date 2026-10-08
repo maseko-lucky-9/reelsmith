@@ -92,6 +92,10 @@ See `.env.example` for the full list. Key settings:
 | `YTVIDEO_SERVE_FRONTEND` | `false` | Serve built React app from FastAPI |
 | `YTVIDEO_REQUIRE_AUTH` | `false` | Enable API key auth |
 | `YTVIDEO_API_KEY` | `null` | API key when auth enabled |
+| `YTVIDEO_WHISPER_BEAM_SIZE` | `1` | Whisper beam size (bench: `scripts/bench_whisper.py`) |
+| `YTVIDEO_WHISPER_VAD_FILTER` | `true` | Silero VAD before decoding; stops Whisper skipping speech after long silences |
+| `YTVIDEO_WHISPER_CPU_THREADS` | `8` | CTranslate2 CPU threads; `0` = library default (4), use it on hosts with < 8 cores |
+| `YTVIDEO_WHISPER_WARMUP` | `true` | Load the Whisper model in the background at API start-up |
 
 ## Testing
 
