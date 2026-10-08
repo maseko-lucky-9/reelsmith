@@ -627,11 +627,13 @@ async def _process_chapter(
     thumbnail_path: str | None = None
     if opts.render and opts.thumbnail and output_path:
         try:
+            step_t0 = time.perf_counter()
             thumbnail_out = str(Path(clips_folder) / f"{index:02d}_{safe_title}_thumb.jpg")
             thumbnail_path = await asyncio.to_thread(
                 thumbnail_service.generate_thumbnail, output_path, thumbnail_out
             )
-            log.info("[%s] Chapter %d  thumbnail generated  path=%s", job_id, index, thumbnail_path)
+            log.info("[%s] Chapter %d  thumbnail generated (%.2fs)  path=%s",
+                     job_id, index, time.perf_counter() - step_t0, thumbnail_path)
             await _emit(bus, EventType.THUMBNAIL_GENERATED, job_id, chapter_index=index, thumbnail_path=thumbnail_path)
         except Exception as e:  # noqa: BLE001
             log.warning("[%s] Chapter %d  thumbnail failed: %s", job_id, index, e)

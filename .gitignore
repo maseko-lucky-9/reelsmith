@@ -19,6 +19,9 @@ app/example/Screenshot 2025-08-26 190730.png
 *.mp4
 *TEMP_MPY*
 
+# Deterministic A/V sync fixtures built by tests/fixtures/make_sync_fixture.py
+tests/fixtures/generated/
+
 # Playwright MCP session artifacts (console logs, page snapshots)
 .playwright-mcp/
 
