@@ -15,9 +15,8 @@ app/example/Screenshot 2025-08-26 190730.png
 # Database (SQLite dev store)
 *.db
 
-# Video files — downloaded clips and MoviePy temp renders land here
+# Video files — downloaded clips and renders land here
 *.mp4
-*TEMP_MPY*
 
 # Deterministic A/V sync fixtures built by tests/fixtures/make_sync_fixture.py
 tests/fixtures/generated/

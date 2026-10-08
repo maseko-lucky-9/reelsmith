@@ -48,11 +48,11 @@ All providers follow the same pattern: `get_<feature>_service()` factory reads t
 | Service | Responsibility |
 |---|---|
 | `download_service` | yt-dlp download, chapter extraction |
-| `clip_service` | FFmpeg clip extraction, subtitle overlay |
+| `clip_service` | Caption schedule, chapter audio extraction (ffmpeg), background still |
 | `transcription_service` | Whisper word-level timing |
 | `caption_service` | SRT/WebVTT generation from word timings |
 | `subtitle_image_service` | Per-caption PNG rendering |
-| `render_service` | Final vertical-format MP4 via MoviePy |
+| `render_service` | Final vertical-format MP4 in one ffmpeg pass from the source |
 | `thumbnail_service` | JPEG thumbnail from clip midpoint |
 | `segment_proposer` | Virality scoring + segment selection |
 | `reframe_service` | Face-tracked crop track |

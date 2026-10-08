@@ -77,18 +77,17 @@ def _write_brief(brief_dir: Path, brief_id: str, **overrides) -> None:
 
 
 def _has_audio_stream(path: str) -> bool:
-    """True if the mp4 carries an audio track.
+    """True if the mp4 carries a non-empty audio track.
 
-    Uses MoviePy (imageio-ffmpeg's bundled ffmpeg) rather than a raw ``ffprobe``
-    subprocess so the check works in CI where a system ``ffprobe`` is absent.
+    Uses PyAV rather than a raw ``ffprobe`` subprocess so the check works in
+    CI where a system ``ffprobe`` is absent.
     """
-    from moviepy.editor import VideoFileClip
+    import av
 
-    clip = VideoFileClip(path)
-    try:
-        return clip.audio is not None and clip.audio.duration > 0
-    finally:
-        clip.close()
+    with av.open(path) as container:
+        if not container.streams.audio:
+            return False
+        return any(f.samples for f in container.decode(audio=0))
 
 
 # ── download() — happy path with stub producers ───────────────────────────────
@@ -176,3 +175,89 @@ def test_assemble_audio_longer_than_broll_keeps_headroom(tmp_path):
     # The returned (probed) clip duration must clear the audio by at least the
     # epsilon, so min(video, audio) - epsilon ≥ audio - epsilon never drops words.
     assert video_dur >= audio_dur + AUDIO_TAIL_EPSILON_SECONDS
+
+
+# ── _assemble — ffmpeg concat / tpad / explicit -t ────────────────────────────
+
+
+def _streams(path: str) -> dict:
+    import av
+
+    with av.open(path) as container:
+        v = container.streams.video[0]
+        size = (v.codec_context.width, v.codec_context.height)
+        fps = v.average_rate
+        frames = list(container.decode(video=0))
+        mid = frames[12].to_ndarray(format="rgb24")  # t=0.5 s: inside the first shot
+        last = frames[-1].to_ndarray(format="rgb24")
+    with av.open(path) as container:
+        audio = container.streams.audio[0]
+        samples = sum(f.samples for f in container.decode(audio=0))
+        rate = audio.codec_context.sample_rate
+    return {
+        "size": size,
+        "rate": fps,
+        "video_s": len(frames) / float(fps),
+        "audio_s": samples / rate,
+        "mid": mid,
+        "last": last,
+    }
+
+
+def test_assemble_composes_mixed_sizes_and_pads_black_tail(tmp_path):
+    from app.services import ffmpeg_tools, ltx_producer, tts_service
+
+    big = str(tmp_path / "big.mp4")
+    ltx_producer.generate_shot("a", 1.0, big, provider="stub")  # 1080x1920
+    small = str(tmp_path / "small.mp4")
+    ffmpeg_tools.run(
+        [
+            "ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+            "-i", "color=c=white:s=540x960:r=30:d=1", "-c:v", "libx264",
+            "-pix_fmt", "yuv420p", small,
+        ]
+    )  # fmt: skip
+    vo = str(tmp_path / "vo.wav")
+    tts_service.synthesize("hi", vo, provider="stub")  # 2.0 s stub VO
+    audio_dur = gen_mod._probe_duration(vo)
+
+    out = str(tmp_path / "out.mp4")
+    returned = GenerateAdapter()._assemble([small, big], vo, out)
+    info = _streams(out)
+    assert info["size"] == (1080, 1920)  # largest shot wins; smaller is centred
+    assert info["rate"] == 24
+    # target = max(2.0 s of shots + 1.5, VO + 2.0)
+    target = max(2.0 + 1.5, audio_dur + 2.0)
+    assert info["video_s"] == pytest.approx(target, abs=1 / 24 + 1e-6)
+    assert returned == pytest.approx(info["video_s"], abs=1 / 24 + 1e-6)
+    assert info["audio_s"] == pytest.approx(audio_dur, abs=0.03)  # VO never cut
+    # first shot (white 540x960) centred on black: centre white, corner black
+    mid = info["mid"]
+    assert mid[960, 540].min() > 200 and mid[10, 10].max() < 30
+    assert info["last"].max() < 30  # black tail pad
+
+
+def test_assemble_without_shots_uses_black_canvas(tmp_path):
+    from app.services import tts_service
+
+    vo = str(tmp_path / "vo.wav")
+    tts_service.synthesize("hello there", vo, provider="stub")
+    audio_dur = gen_mod._probe_duration(vo)
+    out = str(tmp_path / "out.mp4")
+    GenerateAdapter()._assemble([], vo, out)
+    info = _streams(out)
+    assert info["size"] == (1080, 1920)
+    assert info["video_s"] >= audio_dur + 2.0 - 1 / 24
+    assert info["last"].max() < 30
+
+
+def test_probe_duration_reads_wav_and_mp4_and_raises_on_garbage(tmp_path):
+    from app.services import tts_service
+
+    vo = str(tmp_path / "vo.wav")
+    tts_service.synthesize("hi", vo, provider="stub")
+    assert gen_mod._probe_duration(vo) == pytest.approx(2.0, abs=0.05)
+    junk = tmp_path / "junk.mp4"
+    junk.write_bytes(b"not a video")
+    with pytest.raises(RuntimeError, match="could not determine duration"):
+        gen_mod._probe_duration(str(junk))

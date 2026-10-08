@@ -67,6 +67,7 @@ _STAGE_ORDER = (
     "Folder ready",
     "Download complete",
     "clip extracted",
+    "audio extracted",
     "audio enhanced",
     "transcription done",
     "filler removal done",

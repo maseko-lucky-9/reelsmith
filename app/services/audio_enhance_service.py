@@ -18,11 +18,11 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable, Sequence
 
 from app.domain.events import EventType, emit_from_sync
+from app.services import ffmpeg_tools
 
 if TYPE_CHECKING:  # pragma: no cover - import only for typing
     from app.bus.event_bus import AsyncEventBus
@@ -133,10 +133,11 @@ def enhance(
 
 
 def _invoke(argv: Sequence[str]) -> None:
+    """Run ``argv`` via ``ffmpeg_tools.run`` (bare ``ffmpeg`` → bundled binary)."""
     log.info("audio_enhance: %s", " ".join(argv))
-    proc = subprocess.run(argv, capture_output=True)
-    if proc.returncode != 0:
+    try:
+        ffmpeg_tools.run(argv)
+    except ffmpeg_tools.FfmpegError as e:
         raise AudioEnhanceError(
-            f"ffmpeg failed (rc={proc.returncode}): "
-            f"{proc.stderr.decode('utf-8', errors='replace')[-500:]}"
-        )
+            f"ffmpeg failed (rc={e.returncode}): {e.stderr_tail[-500:]}"
+        ) from e

@@ -1,17 +1,16 @@
 """Editor-driven timeline render (W1.12).
 
 Consumes the ``ClipEdit.timeline`` JSON produced by the inline editor
-(W1.2 router) and produces a render plan or — when MoviePy is
-available — a real CompositeVideoClip.
+(W1.2 router) and produces a deterministic render plan.
 
 This module is split into:
 
 * ``build_render_plan(timeline, base_clip_path)`` — pure function that
   emits a deterministic dict describing what should be rendered.
-  Tested in isolation; never touches MoviePy.
+  Tested in isolation.
 
-* ``render_with_moviepy(plan, output_path)`` — opt-in that imports
-  MoviePy and writes a file. Skipped in CI / unit tests.
+(The MoviePy-based ``render_with_moviepy`` writer was removed in perf P1: it
+had no callers and needed ImageMagick for ``TextClip``.)
 
 Track schema (mirrors W1.2 router):
 
@@ -189,47 +188,3 @@ def build_render_plan(
         },
     )
     return plan
-
-
-def render_with_moviepy(
-    plan: RenderPlan,
-    output_path: str,
-    *,
-    bus: "AsyncEventBus | None" = None,
-    job_id: str | None = None,
-) -> str:  # pragma: no cover
-    """Write a real composited mp4. Heavy; not exercised in unit tests.
-
-    Emits ``TIMELINE_RENDERED`` when ``bus`` + ``job_id`` are provided
-    and rendering succeeds.
-    """
-    from moviepy.editor import (
-        CompositeVideoClip, TextClip, VideoFileClip, concatenate_videoclips,
-    )
-
-    clips: list = []
-    for v in plan.video:
-        c = VideoFileClip(v.src).subclip(v.trim_start, v.trim_start + (v.end - v.start))
-        c = c.set_start(v.start)
-        clips.append(c)
-    base = concatenate_videoclips(clips, method="compose") if clips else None
-
-    overlay_clips = []
-    for o in plan.overlays:
-        tc = (TextClip(o.text, fontsize=o.font_size, color=o.color)
-              .set_start(o.start)
-              .set_duration(o.end - o.start)
-              .set_position((o.x, o.y), relative=True))
-        overlay_clips.append(tc)
-
-    if base is None:
-        raise TimelineError("render plan has no video items")
-    composed = (
-        CompositeVideoClip([base, *overlay_clips]) if overlay_clips else base
-    )
-    composed.write_videofile(output_path, codec="libx264", audio_codec="aac")
-    emit_from_sync(
-        bus, job_id, EventType.TIMELINE_RENDERED,
-        {"output_path": output_path, "duration": plan.duration},
-    )
-    return output_path

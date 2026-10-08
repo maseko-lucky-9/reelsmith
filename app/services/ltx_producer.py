@@ -1,8 +1,8 @@
 """AI b-roll shot producer for generate:// mode (Stage 2).
 
 Provider-pluggable. The ``stub`` provider renders a solid-colour 1080x1920
-clip via MoviePy so the generate pipeline produces a real, decodable mp4 on
-hosts without a GPU or the LTX model.
+clip with the bundled ffmpeg (lavfi ``color`` source) so the generate pipeline
+produces a real, decodable mp4 on hosts without a GPU or the LTX model.
 
 Behind ``YTVIDEO_LTX_PROVIDER``:
     stub | ltx  (default ``stub``)
@@ -27,8 +27,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-# Must run before any MoviePy import to restore PIL.Image.ANTIALIAS.
-import app.compat  # noqa: F401
+from app.services import ffmpeg_tools
 
 log = logging.getLogger(__name__)
 
@@ -70,26 +69,21 @@ def nearest_valid_num_frames(target: int) -> int:
 
 
 def _stub_shot(prompt: str, seconds: float, out_path: str) -> str:
-    """Render a solid-colour 1080x1920 clip of ``seconds`` duration as mp4."""
-    from moviepy.editor import ColorClip
-
+    """Render a solid-colour 1080x1920 24 fps clip of ``seconds`` duration as mp4."""
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     # Deterministic colour derived from the prompt so successive shots differ.
     seed = sum(ord(c) for c in prompt) if prompt else 0
-    colour = (40 + seed % 160, 40 + (seed // 3) % 160, 40 + (seed // 7) % 160)
-    clip = ColorClip(size=(1080, 1920), color=colour, duration=max(0.1, seconds))
-    clip = clip.set_fps(24)
-    try:
-        clip.write_videofile(
+    r, g, b = (40 + seed % 160, 40 + (seed // 3) % 160, 40 + (seed // 7) % 160)
+    duration = max(0.1, seconds)
+    ffmpeg_tools.run(
+        [
+            "ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+            "-f", "lavfi",
+            "-i", f"color=c=0x{r:02x}{g:02x}{b:02x}:s=1080x1920:r=24:d={duration:.6f}",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-an",
             out_path,
-            codec="libx264",
-            audio=False,
-            fps=24,
-            preset="ultrafast",
-            logger=None,
-        )
-    finally:
-        clip.close()
+        ]
+    )  # fmt: skip
     return out_path
 
 
@@ -220,7 +214,7 @@ def generate_shot(
 ) -> str:
     """Generate a b-roll shot for ``prompt`` of ``seconds`` length at ``out_path``.
 
-    ``stub`` — renders a solid-colour 1080x1920 libx264 mp4 via MoviePy.
+    ``stub`` — renders a solid-colour 1080x1920 libx264 mp4 via ffmpeg.
     ``ltx``  — shells out to the LTX fork's ``inference.py`` CLI (running in the
                fork's own venv via ``ltx_python``), then copies the produced
                mp4 to ``out_path``. NEVER imports torch in-process.

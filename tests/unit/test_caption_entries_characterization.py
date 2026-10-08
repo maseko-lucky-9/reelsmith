@@ -1,25 +1,24 @@
-"""Characterization of the MoviePy-era caption schedule and ``probe_safe_end``.
+"""Characterization of the caption schedule and ``probe_safe_end``.
 
-Locks today's behaviour of ``clip_service.add_captions_to_clip``
-(word-timing loop and SRT-caption loop) and ``clip_service.probe_safe_end``
-so the ffmpeg port in P1 can prove it schedules identical captions.
+P0 locked the MoviePy-era behaviour of ``clip_service.add_captions_to_clip``
+(word-timing loop and SRT-caption loop) and ``clip_service.probe_safe_end``.
+P1 deleted the MoviePy compositor; its schedule now lives in the pure
+``clip_service.caption_entries``, which these tests pin to the SAME literal
+tables (unchanged since P0), so the ffmpeg port provably schedules identical
+captions.
 
-Each case is checked three ways:
+Each case is checked two ways:
 
 * ``EXPECTED_*`` literal tables — the contract, readable at a glance;
 * ``_reference_word_schedule`` / ``_reference_srt_schedule`` — a pure,
-  test-local mirror of the legacy loops (P1 repoints these assertions at
-  ``clip_service.caption_entries``);
-* the **real** legacy function, run with ``create_subtitle_clip`` patched to
-  record ``(text, highlight, start, duration)`` instead of building ImageClips.
+  test-local mirror of the legacy loops, kept as an independent oracle;
+* ``clip_service.caption_entries`` — the production port.
 """
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 
 import pysrt
 import pytest
@@ -43,7 +42,7 @@ def _w(word: str, start: float, end: float) -> WordTiming:
     return WordTiming(word=word, start=start, end=end)
 
 
-# ── Test-local reference (mirrors clip_service.py:198-227) ────────────────────
+# ── Test-local reference (mirrors the legacy clip_service.py:198-227) ─────────
 
 
 def _reference_word_schedule(words: list[WordTiming], n: int) -> list[Entry]:
@@ -67,87 +66,19 @@ def _reference_srt_schedule(captions: pysrt.SubRipFile) -> list[Entry]:
     ]
 
 
-# ── Recording harness around the real legacy function ────────────────────────
+# ── Production port under test ────────────────────────────────────────────────
 
 
-class _StubInset:
-    def set_position(self, _pos):
-        return self
-
-
-class _StubClip:
-    def __init__(self, w: int, h: int, duration: float = 10.0):
-        self.w, self.h, self.duration = w, h, duration
-
-    def resize(self, height: int):
-        assert height == self.h
-        return _StubInset()
-
-
-@dataclass
-class _Recorded:
-    entries: list[Entry]
-    videosizes: set[tuple[int, int]]
-    anchors: set[int]
-    composite_size: tuple[int, int]
-    layer_count: int
-
-
-def _run_legacy(
-    monkeypatch: pytest.MonkeyPatch,
+def _port(
     *,
     word_timings: list[WordTiming] | None = None,
     captions=None,
     n: int = 3,
-    clip_size: tuple[int, int] = (640, 360),
-) -> _Recorded:
-    calls: list[dict] = []
-
-    class _Placed:
-        def __init__(self, call: dict):
-            self._call = call
-
-        def set_start(self, t: float):
-            self._call["start"] = t
-            return self
-
-    def fake_create_subtitle_clip(
-        text, videosize, duration, highlight_word_index=None, text_anchor_y=None
-    ):
-        call = {
-            "text": text,
-            "videosize": tuple(videosize),
-            "duration": duration,
-            "highlight": highlight_word_index,
-            "anchor": text_anchor_y,
-        }
-        calls.append(call)
-        return _Placed(call)
-
-    monkeypatch.setattr(clip_service, "create_subtitle_clip", fake_create_subtitle_clip)
-    monkeypatch.setattr(
-        clip_service, "create_background", lambda clip, ratio: "background"
-    )
-    monkeypatch.setattr(
-        clip_service, "CompositeVideoClip", lambda layers, size: (layers, size)
-    )
-
-    layers, size = clip_service.add_captions_to_clip(
-        _StubClip(*clip_size),
-        captions,
-        9 / 16,
-        word_timings=word_timings,
-        caption_words_per_segment=n,
-    )
-    return _Recorded(
-        entries=[
-            Entry(c["text"], c["highlight"], c["start"], c["duration"]) for c in calls
-        ],
-        videosizes={c["videosize"] for c in calls},
-        anchors={c["anchor"] for c in calls},
-        composite_size=size,
-        layer_count=len(layers),
-    )
+) -> list[Entry]:
+    return [
+        Entry(e.text, e.highlight, e.start, e.duration)
+        for e in clip_service.caption_entries(word_timings, captions, n)
+    ]
 
 
 def _assert_entries(got: list[Entry], want: list[Entry]) -> None:
@@ -235,17 +166,14 @@ def test_reference_word_schedule_matches_expected_table(case: str):
 
 
 @pytest.mark.parametrize("case", sorted(WORD_CASES))
-def test_legacy_add_captions_word_schedule_matches_expected_table(
-    case: str, monkeypatch
-):
+def test_caption_entries_word_schedule_matches_expected_table(case: str):
     words, n, expected = WORD_CASES[case]
-    recorded = _run_legacy(monkeypatch, word_timings=words, n=n)
-    _assert_entries(recorded.entries, expected)
-    # background + inset + one layer per scheduled caption
-    assert recorded.layer_count == 2 + len(expected)
+    got = _port(word_timings=words, n=n)
+    _assert_entries(got, expected)
+    assert len(got) == len(expected)
 
 
-def test_word_timings_take_precedence_over_caption_list(monkeypatch):
+def test_word_timings_take_precedence_over_caption_list():
     srt = pysrt.SubRipFile(
         items=[
             pysrt.SubRipItem(
@@ -256,13 +184,13 @@ def test_word_timings_take_precedence_over_caption_list(monkeypatch):
             )
         ]
     )
-    recorded = _run_legacy(
-        monkeypatch, word_timings=[_w("kept", 0.0, 1.0)], captions=srt
+    _assert_entries(
+        _port(word_timings=[_w("kept", 0.0, 1.0)], captions=srt),
+        [Entry("kept", 0, 0.0, 1.0)],
     )
-    _assert_entries(recorded.entries, [Entry("kept", 0, 0.0, 1.0)])
 
 
-def test_empty_word_list_suppresses_srt_captions(monkeypatch):
+def test_empty_word_list_suppresses_srt_captions():
     """The orchestrator always passes ``word_timings=words`` — an empty list,
     not None, when transcription is off — so the SRT branch never runs there."""
     srt = pysrt.SubRipFile(
@@ -275,9 +203,7 @@ def test_empty_word_list_suppresses_srt_captions(monkeypatch):
             )
         ]
     )
-    recorded = _run_legacy(monkeypatch, word_timings=[], captions=srt)
-    assert recorded.entries == []
-    assert recorded.layer_count == 2
+    assert _port(word_timings=[], captions=srt) == []
 
 
 # ── SRT caption-list path (word_timings=None) ────────────────────────────────
@@ -320,15 +246,12 @@ def test_reference_srt_schedule_matches_expected_table(case: str):
 
 
 @pytest.mark.parametrize("case", sorted(SRT_CASES))
-def test_legacy_add_captions_srt_schedule_matches_expected_table(
-    case: str, monkeypatch
-):
+def test_caption_entries_srt_schedule_matches_expected_table(case: str):
     captions, expected = SRT_CASES[case]
-    recorded = _run_legacy(monkeypatch, word_timings=None, captions=captions)
-    _assert_entries(recorded.entries, expected)
+    _assert_entries(_port(word_timings=None, captions=captions), expected)
 
 
-def test_legacy_srt_schedule_from_written_file(monkeypatch, tmp_path):
+def test_srt_schedule_from_written_file(tmp_path):
     """Round-trip through caption_service + render_service._load_captions."""
     from app.services import caption_service, render_service
 
@@ -344,16 +267,13 @@ def test_legacy_srt_schedule_from_written_file(monkeypatch, tmp_path):
         "srt",
         str(path),
     )
-    recorded = _run_legacy(
-        monkeypatch, captions=render_service._load_captions(str(path))
-    )
     _assert_entries(
-        recorded.entries,
+        _port(captions=render_service._load_captions(str(path))),
         [Entry("one two three", None, 0, 2), Entry("four", None, 2, 1)],
     )
 
 
-# ── Canvas size and caption anchor (clip_service.py:186-195) ──────────────────
+# ── Canvas size and caption anchor (legacy clip_service.py:186-195) ───────────
 
 
 @pytest.mark.parametrize(
@@ -365,22 +285,20 @@ def test_legacy_srt_schedule_from_written_file(monkeypatch, tmp_path):
         ((320, 240), (320, 568), 486),
     ],
 )
-def test_legacy_canvas_size_and_band_anchor(monkeypatch, clip_size, canvas, anchor):
-    recorded = _run_legacy(
-        monkeypatch, word_timings=[_w("x", 0.0, 1.0)], clip_size=clip_size
-    )
-    assert recorded.composite_size == canvas
-    assert recorded.videosizes == {canvas}
-    assert recorded.anchors == {anchor}
+def test_reel_canvas_size_and_band_anchor(clip_size, canvas, anchor):
+    geometry = clip_service.reel_geometry(*clip_size, 9 / 16)
+    assert geometry.canvas_size == canvas
+    assert geometry.band_anchor_y == anchor
 
 
-# ── probe_safe_end (clip_service.py:23-34) ────────────────────────────────────
+# ── probe_safe_end (legacy clip_service.py:23-34) ─────────────────────────────
 
 
-@contextmanager
-def _fake_clip(v_dur: float, a_dur: float | None):
-    audio = None if a_dur is None else SimpleNamespace(duration=a_dur)
-    yield SimpleNamespace(duration=v_dur, audio=audio)
+def _fake_duration(v_dur: float, a_dur: float | None):
+    def duration(_path, kind="container"):
+        return {"video": v_dur, "audio": a_dur, "container": v_dur}[kind]
+
+    return duration
 
 
 @pytest.mark.parametrize(
@@ -394,7 +312,7 @@ def _fake_clip(v_dur: float, a_dur: float | None):
 )
 def test_probe_safe_end_logic(monkeypatch, v_dur, a_dur, expected):
     monkeypatch.setattr(
-        clip_service, "closing_clip", lambda _path: _fake_clip(v_dur, a_dur)
+        clip_service.ffmpeg_tools, "duration", _fake_duration(v_dur, a_dur)
     )
     assert clip_service.AUDIO_TAIL_EPSILON_SECONDS == 1.0
     assert clip_service.probe_safe_end("ignored.mp4") == pytest.approx(
@@ -403,7 +321,12 @@ def test_probe_safe_end_logic(monkeypatch, v_dur, a_dur, expected):
 
 
 def test_probe_safe_end_on_sample_mp4():
-    assert clip_service.probe_safe_end(str(SAMPLE_MP4)) == 4.0
+    # MoviePy reported exactly 4.0 (10 ms banner resolution); PyAV reads the
+    # stream durations exactly. Loosened deliberately to the same 11 ms bound
+    # as the sync fixtures below.
+    assert clip_service.probe_safe_end(str(SAMPLE_MP4)) == pytest.approx(
+        4.0, abs=0.011
+    )
 
 
 def test_probe_safe_end_on_sync_fixtures(
@@ -411,8 +334,8 @@ def test_probe_safe_end_on_sync_fixtures(
 ):
     # MoviePy reads duration from ffmpeg's banner at 10 ms resolution:
     # 144 frames @ 23.976 = 6.006 s → "6.01"; 72 frames = 3.003 s → "3.00".
-    # The P1 PyAV port is expected to land within 5 ms of these; loosen to
-    # abs=0.005 there deliberately, not silently.
+    # The P1 PyAV port reads exact stream durations (6.006 s → 5.006,
+    # 3.003 s → 2.003); abs=0.011 is the deliberate loosening.
     assert clip_service.probe_safe_end(str(sync_fixture_640.path)) == pytest.approx(
         5.01, abs=0.011
     )

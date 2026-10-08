@@ -67,7 +67,7 @@ describe('<JobProgressTimeline />', () => {
         '0': {
           chapter_index: 0,
           status: 'transcribing',
-          clip_path: '/0.mp4',
+          clip_path: null, // never set since perf P1; status drives extract
           audio_path: null,
           transcript: null,
           captions_path: null,

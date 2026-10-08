@@ -23,23 +23,27 @@ from app.services import ltx_producer as svc
 def test_stub_shot_produces_decodable_1080x1920_mp4(tmp_path):
     """Stub renders a decodable 1080x1920 mp4 of the requested length.
 
-    Reads back via MoviePy (imageio-ffmpeg's bundled ffmpeg) so the check works
-    in CI where a system ``ffprobe`` is absent.
+    Reads back via PyAV so the check works in CI where a system ``ffprobe``
+    is absent.
     """
-    from moviepy.editor import VideoFileClip
+    import av
 
     out = str(tmp_path / "shot.mp4")
     result = svc.generate_shot("a quiet city street", 2.0, out, provider="stub")
     assert result == out
 
-    clip = VideoFileClip(out)
-    try:
-        width, height = clip.size  # MoviePy returns [w, h]
-        assert int(width) == 1080
-        assert int(height) == 1920
-        assert clip.duration == pytest.approx(2.0, abs=0.25)
-    finally:
-        clip.close()
+    with av.open(out) as container:
+        video = container.streams.video[0]
+        assert (video.codec_context.width, video.codec_context.height) == (1080, 1920)
+        assert video.codec_context.pix_fmt == "yuv420p"
+        assert video.average_rate == 24
+        assert not container.streams.audio
+        assert container.duration / av.time_base == pytest.approx(2.0, abs=0.25)
+        frames = list(container.decode(video))
+    assert len(frames) == 48
+    # solid colour derived from the prompt
+    rgb = frames[0].to_ndarray(format="rgb24")
+    assert rgb.std(axis=(0, 1)).max() < 2
 
 
 def test_stub_unknown_provider_raises(tmp_path):

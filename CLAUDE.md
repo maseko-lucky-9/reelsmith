@@ -2,16 +2,16 @@
 
 ## Project
 
-Learning project: YouTube-to-reels pipeline. FastAPI backend + Streamlit UI.
+Learning project: YouTube-to-reels pipeline. FastAPI backend + React UI (`web/`); the Streamlit UI is legacy (`ui/_legacy/`).
 
 ## Tech Stack
 
 - **Python 3.11+** with `asyncio`
 - **FastAPI** — HTTP API + SSE job progress
 - **yt-dlp** — video download
-- **MoviePy** — video editing/rendering
-- **SpeechRecognition** — transcription (Google backend)
-- **Streamlit** — UI thin client
+- **ffmpeg** (bundled `imageio-ffmpeg` binary) + **PyAV** — one-pass rendering, probing, frame grabs (`app/services/ffmpeg_tools.py`)
+- **faster-whisper** — transcription (word-level timings)
+- **React + Vite** — UI (`web/`); Streamlit thin client is legacy (`ui/_legacy/`)
 - **pytest + pytest-asyncio** — tests
 
 ## Entry Points
@@ -19,7 +19,7 @@ Learning project: YouTube-to-reels pipeline. FastAPI backend + Streamlit UI.
 | What | Command |
 |---|---|
 | API server | `uvicorn app.main:app --reload` |
-| UI | `cd ui && streamlit run streamlit_app.py` |
+| UI | `cd web && pnpm dev` (legacy: `streamlit run ui/_legacy/streamlit_app.py`) |
 | Tests | `pytest` |
 
 ## Key Conventions
@@ -27,7 +27,7 @@ Learning project: YouTube-to-reels pipeline. FastAPI backend + Streamlit UI.
 - All env vars are prefixed `YTVIDEO_` and defined in `app/settings.py`.
 - Domain events live in `app/domain/events.py`; all inter-service communication goes through `app/bus/event_bus.py`.
 - Services are stateless functions — state lives in `JobStore` on `app.state`.
-- `app/compat.py` must be imported before any MoviePy import (monkey-patches deprecated stdlib).
+- Run ffmpeg only through `app/services/ffmpeg_tools.run` (bundled binary, killed on timeout/cancel); never a system ffmpeg/ffprobe. MoviePy is not a dependency.
 - Test markers: `integration` (real network), `live` (real YouTube), `e2e` (fixtures), `playwright` (UI). Default run excludes `integration`, `live`, `playwright`.
 
 ## Build & Test

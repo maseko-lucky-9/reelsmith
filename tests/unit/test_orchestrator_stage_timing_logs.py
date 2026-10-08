@@ -31,8 +31,8 @@ def _touch(path: str) -> str:
 def stubbed_services(monkeypatch):
     monkeypatch.setattr(
         orch.clip_service,
-        "extract_chapter_to_disk",
-        lambda src, start, end, clip, audio: (_touch(clip), _touch(audio)),
+        "extract_audio",
+        lambda src, start, duration, wav: _touch(wav),
     )
     monkeypatch.setattr(
         orch.audio_enhance_service, "enhance", lambda src, dst, **_: _touch(dst)
@@ -41,11 +41,6 @@ def stubbed_services(monkeypatch):
         orch.transcription_service,
         "transcribe_to_words",
         lambda path: [WordTiming("hello", 0.0, 0.5), WordTiming("world", 0.5, 1.0)],
-    )
-    monkeypatch.setattr(
-        orch.subtitle_image_service,
-        "render_to_path",
-        lambda text, size, path, **_: _touch(path),
     )
     monkeypatch.setattr(
         orch.render_service, "render_clip", lambda src, out, *a, **k: _touch(out)
@@ -92,11 +87,10 @@ async def test_thumbnail_and_stage_lines_log_step_timing(
     assert _TIMED.search(thumb[0]), thumb[0]
 
     for marker in (
-        "clip extracted",
+        "audio extracted",
         "audio enhanced",
         "transcription done",
         "captions written",
-        "subtitle images done",
         "render done",
     ):
         lines = [m for m in messages if marker in m]

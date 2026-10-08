@@ -2,7 +2,7 @@
 
 Lexicon-based approach for words; VAD-based approach for silences.
 Pure-function planner returns the list of (start, end) intervals to
-KEEP. The render stage (or moviepy concatenator) consumes these and
+KEEP. The render stage (an ffmpeg concat) consumes these and
 splices them together.
 
 The heavy webrtcvad-based silence detector is opt-in; the default

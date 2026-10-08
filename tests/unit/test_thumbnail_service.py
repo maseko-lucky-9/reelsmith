@@ -1,50 +1,60 @@
 import hashlib
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from app.services.thumbnail_service import ThumbnailError, compose_thumbnail, generate_thumbnail
 
 
-def test_generate_thumbnail_uses_cv2_first(tmp_path):
+def test_generate_thumbnail_real_midpoint_frame(sync_fixture_640, tmp_path):
+    """Decodes the midpoint frame with PyAV and writes a 320x569 (9:16) JPEG."""
+    from PIL import Image
+
     output = str(tmp_path / "thumb.jpg")
-    with patch("app.services.thumbnail_service._via_cv2", return_value=output) as mock_cv2:
-        result = generate_thumbnail("/tmp/clip.mp4", output)
-    mock_cv2.assert_called_once_with("/tmp/clip.mp4", output)
-    assert result == output
+    assert generate_thumbnail(str(sync_fixture_640.path), output) == output
+    img = Image.open(output)
+    assert img.format == "JPEG"
+    assert img.size == (320, 569)
 
 
-def test_generate_thumbnail_falls_back_on_import_error(tmp_path):
-    output = str(tmp_path / "thumb.jpg")
+def test_generate_thumbnail_grabs_midpoint_and_center_crops(tmp_path):
+    """Landscape frame → centre column of 9:16 width, resized to 320x569."""
+    from PIL import Image
+
+    frame = Image.new("RGB", (1600, 900), (0, 0, 255))
+    # 9:16 crop of a 900-tall frame is int(900 * 320/569) = 506 px wide, centred.
+    frame.paste((255, 0, 0), (547, 0, 1053, 900))
+    output = str(tmp_path / "deep" / "dir" / "thumb.jpg")
     with (
-        patch("app.services.thumbnail_service._via_cv2", side_effect=ImportError),
-        patch("app.services.thumbnail_service._via_moviepy", return_value=output) as mock_mp,
+        patch("app.services.thumbnail_service.ffmpeg_tools.duration", return_value=8.0),
+        patch(
+            "app.services.thumbnail_service.ffmpeg_tools.grab_frame", return_value=frame
+        ) as grab,
     ):
         result = generate_thumbnail("/tmp/clip.mp4", output)
-    mock_mp.assert_called_once_with("/tmp/clip.mp4", output)
+    grab.assert_called_once_with("/tmp/clip.mp4", 4.0)
     assert result == output
+    img = Image.open(output).convert("RGB")
+    assert img.size == (320, 569)
+    r, g, b = img.resize((1, 1)).getpixel((0, 0))
+    assert r > 200 and b < 60  # only the red centre column survived the crop
 
 
-def test_generate_thumbnail_falls_back_on_cv2_runtime_error(tmp_path):
+def test_generate_thumbnail_portrait_crops_vertically(tmp_path):
+    from PIL import Image
+
+    frame = Image.new("RGB", (720, 2000), (0, 0, 255))
+    # 9:16 crop of a 720-wide frame is int(720 / (320/569)) = 1280 px tall.
+    frame.paste((0, 255, 0), (0, 360, 720, 1640))
     output = str(tmp_path / "thumb.jpg")
     with (
-        patch("app.services.thumbnail_service._via_cv2", side_effect=RuntimeError("cap read failed")),
-        patch("app.services.thumbnail_service._via_moviepy", return_value=output) as mock_mp,
-    ):
-        result = generate_thumbnail("/tmp/clip.mp4", output)
-    mock_mp.assert_called_once()
-    assert result == output
-
-
-def test_generate_thumbnail_creates_parent_dir(tmp_path):
-    nested = tmp_path / "deep" / "dir" / "thumb.jpg"
-    output = str(nested)
-    with (
-        patch("app.services.thumbnail_service._via_cv2", return_value=output),
+        patch("app.services.thumbnail_service.ffmpeg_tools.duration", return_value=2.0),
+        patch("app.services.thumbnail_service.ffmpeg_tools.grab_frame", return_value=frame),
     ):
         generate_thumbnail("/tmp/clip.mp4", output)
-    assert nested.parent.exists()
+    r, g, b = Image.open(output).convert("RGB").resize((1, 1)).getpixel((0, 0))
+    assert g > 200 and b < 60
 
 
 # ---------------------------------------------------------------------------

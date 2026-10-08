@@ -40,7 +40,9 @@ export const STAGES: readonly StageDescriptor[] = [
   { id: 'folder',     label: 'Prepare workspace',     doneOnEvents: ['FolderCreated'] },
   { id: 'download',   label: 'Download source',       doneOnEvents: ['VideoDownloaded'] },
   { id: 'chapters',   label: 'Detect chapters',       doneOnEvents: ['ChaptersDetected'] },
-  { id: 'extract',    label: 'Extract clips',         doneOnEvents: ['ChapterClipExtracted'],  perChapter: true, artifactField: 'clip_path' },
+  // No artifact: since perf P1 reels render straight from the source and clip_path stays null;
+  // progress comes from ChapterClipExtracted events or the 'extracting' status threshold.
+  { id: 'extract',    label: 'Extract clips',         doneOnEvents: ['ChapterClipExtracted'],  perChapter: true, artifactField: null },
   { id: 'transcribe', label: 'Transcribe audio',      doneOnEvents: ['ChapterTranscribed'],    perChapter: true, artifactField: 'transcript' },
   { id: 'caption',    label: 'Generate captions',     doneOnEvents: ['CaptionsGenerated'],     perChapter: true, artifactField: 'captions_path' },
   { id: 'render',     label: 'Render reels',          doneOnEvents: ['ClipRendered'],          perChapter: true, artifactField: 'output_path' },

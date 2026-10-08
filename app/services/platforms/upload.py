@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse
 
+from app.services import ffmpeg_tools
 from app.services.platforms.base import Chapter, DownloadResult
 
 # Must match the directory used by app/routers/uploads.py.
@@ -22,19 +23,9 @@ _ALLOWED_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 
 
 def _probe_duration(path: str) -> float:
-    """Return video duration in seconds via ffprobe, or 0 on failure."""
+    """Return video duration in seconds via PyAV, or 0 on failure."""
     try:
-        import subprocess
-        result = subprocess.run(
-            [
-                "ffprobe", "-v", "quiet", "-print_format", "json",
-                "-show_format", path,
-            ],
-            capture_output=True, text=True, timeout=15,
-        )
-        import json
-        info = json.loads(result.stdout)
-        return float(info.get("format", {}).get("duration", 0))
+        return float(ffmpeg_tools.duration(path))
     except Exception:
         return 0.0
 

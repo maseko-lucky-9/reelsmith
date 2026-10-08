@@ -4,8 +4,8 @@ Five preset styles plus a `static` passthrough. Each style is described
 by a dataclass with the parameters needed by the per-frame renderer:
 animation kind, font, colours, stroke. The actual frame composition is
 done by ``render_caption_frames`` which returns a list of (timestamp,
-PIL.Image) pairs — fed into MoviePy as a transparent overlay clip in
-production.
+PIL.Image) pairs — meant to be fed to the ffmpeg render as a transparent
+overlay in production.
 
 Tests assert on the descriptor + frame count + per-frame size, never
 on pixel hashes.
@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Iterable, Sequence
 
 from app.domain.events import EventType, emit_from_sync
+from app.services import ffmpeg_tools
 
 if TYPE_CHECKING:  # pragma: no cover - import only for typing
     from app.bus.event_bus import AsyncEventBus
@@ -317,16 +318,14 @@ def _build_ass_document(
 
 
 def _invoke(argv: Sequence[str]) -> None:
-    """Patchable subprocess hook (mirrors voiceover_service pattern)."""
-    import subprocess
-
+    """Patchable subprocess hook; runs via ``ffmpeg_tools.run`` (bundled ffmpeg)."""
     log.info("animated-caption burn: %s", " ".join(argv))
-    proc = subprocess.run(argv, capture_output=True)
-    if proc.returncode != 0:
+    try:
+        ffmpeg_tools.run(argv)
+    except ffmpeg_tools.FfmpegError as e:
         raise AnimatedCaptionBurnError(
-            f"ffmpeg failed (rc={proc.returncode}): "
-            f"{proc.stderr.decode('utf-8', errors='replace')[-500:]}"
-        )
+            f"ffmpeg failed (rc={e.returncode}): {e.stderr_tail[-500:]}"
+        ) from e
 
 
 def burn_animated_captions(

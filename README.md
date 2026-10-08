@@ -70,7 +70,7 @@ The `/jobs/$jobId` page renders a per-stage timeline while the pipeline runs. St
 | API | FastAPI + Uvicorn |
 | Database | Postgres 16 + SQLAlchemy 2 async + Alembic |
 | Video download | yt-dlp (YouTube / Facebook / TikTok / Instagram via PlatformAdapter registry) |
-| Video editing | MoviePy |
+| Video editing | ffmpeg (bundled via imageio-ffmpeg) + PyAV |
 | Transcription | Whisper (word-level) |
 | Virality scoring | librosa + VADER + spaCy + webrtcvad |
 | Reframe | MediaPipe face detection |

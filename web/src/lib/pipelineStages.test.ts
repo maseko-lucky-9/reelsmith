@@ -105,14 +105,14 @@ describe('deriveStageStates — outer stages from JobState', () => {
 })
 
 describe('deriveStageStates — per-chapter aggregation', () => {
-  it('counts artifacts across chapters', () => {
+  it('counts artifacts (and status for extract) across chapters', () => {
     const result = deriveStageStates(
       job({
         destination_folder: '/v',
         video_path: '/v/x.mp4',
         chapters: {
-          '0': chapter(0, { clip_path: '/c0.mp4', transcript: 'hi' }),
-          '1': chapter(1, { clip_path: '/c1.mp4' }),
+          '0': chapter(0, { status: 'transcribing', transcript: 'hi' }),
+          '1': chapter(1, { status: 'extracting' }),
           '2': chapter(2),
         },
       }),
@@ -130,8 +130,8 @@ describe('deriveStageStates — per-chapter aggregation', () => {
     const result = deriveStageStates(
       job({
         chapters: {
-          '0': chapter(0, { clip_path: '/a' }),
-          '1': chapter(1, { clip_path: '/b' }),
+          '0': chapter(0, { status: 'transcribing' }),
+          '1': chapter(1, { status: 'transcribing' }),
         },
       }),
       [],
@@ -160,7 +160,7 @@ describe('deriveStageStates — per-chapter aggregation', () => {
     const result = deriveStageStates(
       job({
         chapters: {
-          '0': chapter(0, { clip_path: '/a' }), // only one chapter has artifact
+          '0': chapter(0, { status: 'extracting' }), // only one chapter has progressed
           '1': chapter(1),
           '2': chapter(2),
         },
@@ -182,6 +182,43 @@ describe('deriveStageStates — per-chapter aggregation', () => {
       events,
     )
     expect(result.find((r) => r.descriptor.id === 'finalise_chapters')?.done).toBe(1)
+  })
+})
+
+describe('deriveStageStates — extract stage without an intermediate clip (P1)', () => {
+  // The backend renders reels straight from the source; ChapterArtifacts.clip_path
+  // is never set any more, so the extract row must count chapters by status.
+  it('counts extract from chapter status when clip_path is never set', () => {
+    const result = deriveStageStates(
+      job({
+        destination_folder: '/v',
+        video_path: '/v/x.mp4',
+        chapters: {
+          '0': chapter(0, { status: 'transcribing' }),
+          '1': chapter(1, { status: 'rendering' }), // transcription off: no 'extracting'
+          '2': chapter(2),
+        },
+      }),
+      [],
+    )
+    const extract = result.find((r) => r.descriptor.id === 'extract')!
+    expect(extract.done).toBe(2)
+    expect(extract.state).toBe('active')
+  })
+
+  it('does not mark extract failed when a chapter fails later in the pipeline', () => {
+    const result = deriveStageStates(
+      job({
+        status: 'failed',
+        current_step: 'chapters',
+        chapters: {
+          '0': chapter(0, { status: 'completed', output_path: '/o0.mp4' }),
+          '1': chapter(1, { status: 'failed', error: 'render crashed' }),
+        },
+      }),
+      [],
+    )
+    expect(result.find((r) => r.descriptor.id === 'extract')?.state).toBe('done')
   })
 })
 
@@ -210,7 +247,7 @@ describe('deriveStageStates — terminal states', () => {
         status: 'failed',
         current_step: 'chapters',
         chapters: {
-          '0': chapter(0, { clip_path: '/a', status: 'completed' }),
+          '0': chapter(0, { status: 'completed' }),
           '1': chapter(1, { status: 'failed', error: 'transcription crashed' }),
         },
       }),
@@ -230,8 +267,8 @@ describe('describeActiveStage', () => {
         destination_folder: '/v',
         video_path: '/v/x.mp4',
         chapters: {
-          '0': chapter(0, { clip_path: '/a' }),
-          '1': chapter(1, { clip_path: '/b' }),
+          '0': chapter(0, { status: 'extracting' }),
+          '1': chapter(1, { status: 'extracting' }),
         },
       }),
       [],

@@ -1,153 +1,193 @@
-import logging
-from contextlib import contextmanager
+"""Chapter geometry, caption schedule, audio extraction and background still.
 
-import numpy as np
-from moviepy.editor import CompositeVideoClip, ImageClip, VideoFileClip
+Pure helpers used by the one-pass ffmpeg renderer (``render_service``) and
+the orchestrator. Nothing here decodes video frame-by-frame or holds a
+composited canvas in memory; the heavy lifting is a single ffmpeg process.
+"""
+
+import logging
+from dataclasses import dataclass
+from pathlib import Path
+
 from PIL import Image, ImageFilter
 
-from app.services.subtitle_image_service import create_subtitle_image
+from app.services import ffmpeg_tools
 
 import app.logging_config  # noqa: F401
 
 log = logging.getLogger(__name__)
 
 
-# MoviePy's AudioFileClip writer reads in fixed-size sample buffers and can
-# request a window up to ~1 buffer (≈4.5s @ 44.1kHz on the 1.0.x default)
-# past the clip's `duration`, raising `OSError: Accessing time t=...`. Keeping
-# subclip ends ≥ EPSILON below the audio EOF is the documented workaround.
-# Bump if a future MoviePy version widens the buffer.
+# Chapter ends are kept this far below the shorter of the audio/video streams.
+# MoviePy needed it because its chunked audio writer read up to ~1 buffer past
+# a subclip's end; ffmpeg does not, but the 1 s guard is kept so chapter
+# windows (and therefore published clip lengths) stay exactly as before.
 AUDIO_TAIL_EPSILON_SECONDS = 1.0
+
+# Whisper input format: 16 kHz mono signed 16-bit PCM.
+_WHISPER_SAMPLE_RATE = 16_000
+
+
+@dataclass(frozen=True)
+class CaptionEntry:
+    """One caption image on screen from ``start`` for ``duration`` seconds."""
+
+    text: str
+    highlight: int | None
+    start: float
+    duration: float
+
+
+@dataclass(frozen=True)
+class ReelGeometry:
+    """Layout of a reel built from a ``source_size`` source."""
+
+    source_size: tuple[int, int]
+    canvas_size: tuple[int, int]
+    band_anchor_y: int
+
+
+def reel_geometry(
+    source_w: int, source_h: int, target_aspect_ratio: float = 9 / 16
+) -> ReelGeometry:
+    """Canvas size and caption anchor for a reel (legacy clip_service.py:186-195).
+
+    The canvas keeps the source width and is ``int(w / ratio)`` tall; captions
+    are anchored in the middle of the blur band below the vertically centred
+    inset.
+    """
+    canvas_h = int(source_w / target_aspect_ratio)
+    inner_top = (canvas_h - source_h) // 2
+    inner_bottom = inner_top + source_h
+    band_anchor_y = inner_bottom + (canvas_h - inner_bottom) // 2
+    return ReelGeometry(
+        source_size=(source_w, source_h),
+        canvas_size=(source_w, canvas_h),
+        band_anchor_y=band_anchor_y,
+    )
+
+
+def caption_entries(
+    word_timings,
+    captions=None,
+    words_per_segment: int = 3,
+) -> list[CaptionEntry]:
+    """Caption schedule for a chapter (pure port of legacy clip_service.py:198-227).
+
+    Word timings (karaoke) take precedence; an empty list yields no captions
+    and still suppresses ``captions``. Each word shows its group of
+    ``words_per_segment`` words with itself highlighted, from its own start
+    until the NEXT word's start (the last word until its own end); slots with
+    a non-positive duration are skipped but keep their group position.
+
+    Without word timings, ``captions`` (pysrt / webvtt items) are scheduled as
+    the legacy code did: from ``caption.start.seconds`` to
+    ``caption.end.seconds`` — pysrt's 0-59 *seconds component*, a known legacy
+    quirk pinned by the characterization tests.
+    """
+    entries: list[CaptionEntry] = []
+    if word_timings is not None:
+        n = words_per_segment
+        for i, word in enumerate(word_timings):
+            group_start = (i // n) * n
+            group = word_timings[group_start : group_start + n]
+            group_text = " ".join(w.word for w in group)
+            # Extend to the next word's start to avoid inter-word blank frames.
+            clip_end = (
+                word_timings[i + 1].start if i + 1 < len(word_timings) else word.end
+            )
+            duration = clip_end - word.start
+            if duration <= 0:
+                continue
+            entries.append(CaptionEntry(group_text, i % n, word.start, duration))
+        return entries
+    for caption in captions or []:
+        start_time = caption.start.seconds
+        end_time = caption.end.seconds
+        entries.append(
+            CaptionEntry(caption.text, None, start_time, end_time - start_time)
+        )
+    return entries
 
 
 def probe_safe_end(video_path: str) -> float:
-    """Return the highest `end` value safe to pass to extract_chapter_to_disk.
+    """Return the highest chapter ``end`` the pipeline will use for this source.
 
-    Takes the minimum of video and audio stream durations (audio is often
-    shorter on re-muxed YouTube downloads) and subtracts
-    AUDIO_TAIL_EPSILON_SECONDS so MoviePy's chunked audio writer cannot
-    overshoot EOF.
+    Takes the minimum of the video and audio stream durations (audio is often
+    shorter on re-muxed YouTube downloads) minus AUDIO_TAIL_EPSILON_SECONDS.
     """
-    with closing_clip(video_path) as video:
-        v_dur = float(video.duration)
-        a_dur = float(video.audio.duration) if video.audio is not None else v_dur
-        return max(0.0, min(v_dur, a_dur) - AUDIO_TAIL_EPSILON_SECONDS)
+    v_dur = ffmpeg_tools.duration(video_path, "video")
+    a_dur = ffmpeg_tools.duration(video_path, "audio")
+    if v_dur is None:
+        raise ValueError(f"{video_path}: no video stream")
+    if a_dur is None:
+        a_dur = v_dur
+    return max(0.0, min(v_dur, a_dur) - AUDIO_TAIL_EPSILON_SECONDS)
 
 
-@contextmanager
-def closing_clip(path: str):
-    clip = VideoFileClip(path)
-    try:
-        yield clip
-    finally:
-        try:
-            if clip.audio is not None:
-                clip.audio.close()
-        except Exception:
-            pass
-        try:
-            clip.close()
-        except Exception:
-            pass
+def extract_audio_argv(
+    src: str, start: float, duration: float, wav_path: str
+) -> list[str]:
+    """ffmpeg argv for ``extract_audio`` (same ``-ss``/``-t`` window as the render)."""
+    return [
+        "ffmpeg",
+        "-hide_banner",
+        "-nostdin",
+        "-loglevel",
+        "error",
+        "-y",
+        "-ss",
+        f"{start:.6f}",
+        "-t",
+        f"{duration:.6f}",
+        "-i",
+        src,
+        "-map",
+        "0:a:0",
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        str(_WHISPER_SAMPLE_RATE),
+        "-c:a",
+        "pcm_s16le",
+        wav_path,
+    ]
 
 
-def create_clip(video, start_time: float, end_time: float):
-    if start_time is None or end_time is None:
-        raise ValueError("start_time and end_time are required")
-    if start_time < 0 or end_time < 0:
-        raise ValueError("start_time and end_time must be non-negative")
-    if start_time >= end_time:
-        raise ValueError("start_time must be less than end_time")
-    log.info("Creating subclip [%.3f, %.3f]", start_time, end_time)
-    return video.subclip(start_time, end_time)
+def extract_audio(src: str, start: float, duration: float, wav_path: str) -> str | None:
+    """Write ``[start, start + duration)`` of ``src``'s audio as 16 kHz mono PCM.
 
-
-def extract_chapter_to_disk(
-    video_path: str,
-    start: float,
-    end: float,
-    out_clip_path: str,
-    out_audio_path: str,
-) -> tuple[str, str]:
-    """Slice a chapter from a source video and persist clip + audio to disk."""
-    log.info("Extracting chapter to disk  [%.3f, %.3f]  src=%s", start, end, video_path)
-    with closing_clip(video_path) as video:
-        v_dur = float(video.duration)
-        a_dur = float(video.audio.duration) if video.audio is not None else v_dur
-        hard_max = max(0.0, min(v_dur, a_dur) - AUDIO_TAIL_EPSILON_SECONDS)
-        if end > hard_max:
-            log.warning(
-                "Clamping chapter end %.3f -> %.3f (video=%.3f audio=%.3f epsilon=%.3f)",
-                end, hard_max, v_dur, a_dur, AUDIO_TAIL_EPSILON_SECONDS,
-            )
-            end = hard_max
-        if end <= start:
-            raise ValueError(
-                f"chapter end ({end:.3f}) <= start ({start:.3f}) after clamp; "
-                f"video={v_dur:.3f}s audio={a_dur:.3f}s"
-            )
-        sub = create_clip(video, start, end)
-        try:
-            sub.write_videofile(
-                out_clip_path,
-                codec="libx264",
-                audio_codec="aac",
-                logger=None,
-            )
-            if sub.audio is not None:
-                sub.audio.write_audiofile(out_audio_path, logger=None)
-        finally:
-            try:
-                if sub.audio is not None:
-                    sub.audio.close()
-            except Exception:
-                pass
-            try:
-                sub.close()
-            except Exception:
-                pass
-    log.info("Chapter extracted  clip=%s  audio=%s", out_clip_path, out_audio_path)
-    return out_clip_path, out_audio_path
-
-
-def create_subtitle_clip(
-    text: str,
-    videosize,
-    duration: float,
-    highlight_word_index: int | None = None,
-    text_anchor_y: int | None = None,
-):
-    log.info("Create Subtitle Clip...")
-    subtitle_image = create_subtitle_image(
-        text,
-        videosize,
-        highlight_word_index=highlight_word_index,
-        text_anchor_y=text_anchor_y,
+    Uses the render's exact ``-ss start -t duration`` input window, so word
+    timestamps from this file line up sample-accurately with the rendered
+    reel's audio. Returns ``wav_path``, or ``None`` when ``src`` has no audio
+    stream (nothing is written).
+    """
+    if start < 0 or duration <= 0:
+        raise ValueError(f"invalid audio window start={start} duration={duration}")
+    if not ffmpeg_tools.has_audio(src):
+        log.warning("No audio stream in %s; skipping audio extraction", src)
+        return None
+    Path(wav_path).parent.mkdir(parents=True, exist_ok=True)
+    log.info(
+        "Extracting audio  [%.3f, +%.3f]  src=%s -> %s", start, duration, src, wav_path
     )
-    return ImageClip(subtitle_image).set_duration(duration)
+    ffmpeg_tools.run(extract_audio_argv(src, start, duration, wav_path))
+    return wav_path
 
 
-def _blur_frame(image, blur_radius: int = 5):
-    return np.array(
-        Image.fromarray(image).filter(ImageFilter.GaussianBlur(blur_radius))
-    )
+def create_background(frame: Image.Image, target_aspect_ratio: float = 9 / 16):
+    """Return the blurred still behind the inset (PIL logic of legacy :144-172).
 
-
-def create_background(clip, target_aspect_ratio: float = 9 / 16):
-    """Return a static blurred ImageClip the size of the target frame.
-
-    Blurring a single representative frame (mid-clip) rather than every frame
-    via fl_image cuts render time dramatically — the background is effectively
-    a still image, so motion accuracy is not needed.
+    ``frame`` is one representative source frame (the chapter midpoint); the
+    result is ``frame.width`` x ``int(frame.width / ratio)``, scaled to cover,
+    centre-cropped and Gaussian-blurred.
     """
     log.info("Creating blurred background...")
-    target_height = int(clip.w / target_aspect_ratio)
-    target_width = clip.w
+    target_height = int(frame.width / target_aspect_ratio)
+    target_width = frame.width
 
-    # Sample one frame near the middle of the clip for the background.
-    sample_t = clip.duration / 2
-    frame = clip.get_frame(sample_t)
-    pil = Image.fromarray(frame)
+    pil = frame
 
     # Scale so the shorter dimension fills the target canvas.
     src_w, src_h = pil.size
@@ -155,9 +195,7 @@ def create_background(clip, target_aspect_ratio: float = 9 / 16):
         scale = target_width / src_w
     else:
         scale = target_height / src_h
-    scaled = pil.resize(
-        (int(src_w * scale), int(src_h * scale)), Image.LANCZOS
-    )
+    scaled = pil.resize((int(src_w * scale), int(src_h * scale)), Image.LANCZOS)
 
     # Centre-crop to exact canvas size.
     cx, cy = scaled.width / 2, scaled.height / 2
@@ -169,64 +207,4 @@ def create_background(clip, target_aspect_ratio: float = 9 / 16):
     )
     cropped = scaled.crop(box)
 
-    blurred = np.array(cropped.filter(ImageFilter.GaussianBlur(40)))
-    return ImageClip(blurred).set_duration(clip.duration)
-
-
-def add_captions_to_clip(
-    clip,
-    captions,
-    target_aspect_ratio: float = 9 / 16,
-    word_timings=None,
-    caption_words_per_segment: int = 3,
-):
-    log.info("Add Captions To Clip...")
-    background = create_background(clip, target_aspect_ratio)
-
-    new_height = int(clip.w / target_aspect_ratio)
-    new_size = (clip.w, new_height)
-
-    resized_clip = clip.resize(height=clip.h)
-    resized_clip = resized_clip.set_position(("center", "center"))
-
-    # Anchor captions in the centre of the lower blur band (below the inset video).
-    inner_top = (new_height - clip.h) // 2
-    inner_bottom = inner_top + clip.h
-    band_anchor_y = inner_bottom + (new_height - inner_bottom) // 2
-
-    subtitle_clips = []
-    if word_timings is not None:
-        n = caption_words_per_segment
-        for i, word in enumerate(word_timings):
-            word_pos = i % n
-            group_start = (i // n) * n
-            group = word_timings[group_start:group_start + n]
-            group_text = " ".join(w.word for w in group)
-
-            # Extend clip to next word's start to avoid inter-word blank frames.
-            clip_end = word_timings[i + 1].start if i + 1 < len(word_timings) else word.end
-            duration = clip_end - word.start
-            if duration <= 0:
-                continue
-
-            subtitle_clip = create_subtitle_clip(
-                group_text, new_size, duration,
-                highlight_word_index=word_pos,
-                text_anchor_y=band_anchor_y,
-            )
-            subtitle_clips.append(subtitle_clip.set_start(word.start))
-    else:
-        for caption in captions:
-            start_time = caption.start.seconds
-            end_time = caption.end.seconds
-            duration = end_time - start_time
-            subtitle_clip = create_subtitle_clip(
-                caption.text, new_size, duration,
-                text_anchor_y=band_anchor_y,
-            )
-            subtitle_clips.append(subtitle_clip.set_start(start_time))
-
-    return CompositeVideoClip(
-        [background, resized_clip, *subtitle_clips],
-        size=new_size,
-    )
+    return cropped.filter(ImageFilter.GaussianBlur(40))

@@ -1,4 +1,5 @@
 import logging
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -19,11 +20,25 @@ _SHADOW_BLUR = 4
 _STROKE_WIDTH = 4
 
 
+# Per-thread (path, size) -> FreeTypeFont cache. Fonts are not shared across
+# threads: caption images are drawn from a thread pool and FreeType face
+# objects are not safe for concurrent use.
+_font_cache = threading.local()
+
+
 def _load_font(font_size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     font_path = settings.font_path
     if font_path and Path(font_path).is_file():
+        cache = getattr(_font_cache, "fonts", None)
+        if cache is None:
+            cache = _font_cache.fonts = {}
+        key = (font_path, font_size)
+        font = cache.get(key)
+        if font is not None:
+            return font
         try:
-            return ImageFont.truetype(font_path, font_size)
+            font = cache[key] = ImageFont.truetype(font_path, font_size)
+            return font
         except OSError as e:
             log.warning("Failed to load font %s: %s", font_path, e)
     log.warning("Falling back to PIL default font; %s not found", font_path)

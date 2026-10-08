@@ -112,3 +112,44 @@ def test_render_to_path_with_highlight_creates_file(tmp_path):
     render_to_path("hello world foo", _SIZE, str(out), font_size=20, highlight_word_index=1)
     assert out.is_file()
     assert out.stat().st_size > 0
+
+
+# ── Per-thread font cache ─────────────────────────────────────────────────────
+
+
+def _cache_probe(monkeypatch, tmp_path):
+    import shutil
+    import threading
+
+    from app.services import subtitle_image_service as svc
+    from app.settings import _REPO_ANTON
+
+    monkeypatch.setattr(svc.settings, "font_path", str(_REPO_ANTON))
+    monkeypatch.setattr(svc, "_font_cache", threading.local())
+    other = tmp_path / "copy.ttf"
+    shutil.copy(_REPO_ANTON, other)
+    return svc, str(_REPO_ANTON), str(other)
+
+
+def test_load_font_is_cached_per_path_and_size(monkeypatch, tmp_path):
+    svc, anton, other = _cache_probe(monkeypatch, tmp_path)
+    first = svc._load_font(96)
+    assert svc._load_font(96) is first
+    assert svc._load_font(48) is not first
+    monkeypatch.setattr(svc.settings, "font_path", other)
+    assert svc._load_font(96) is not first
+    monkeypatch.setattr(svc.settings, "font_path", anton)
+    assert svc._load_font(96) is first
+
+
+def test_load_font_cache_is_not_shared_across_threads(monkeypatch, tmp_path):
+    import threading
+
+    svc, _anton, _other = _cache_probe(monkeypatch, tmp_path)
+    main = svc._load_font(96)
+    seen = []
+    worker = threading.Thread(target=lambda: seen.extend([svc._load_font(96), svc._load_font(96)]))
+    worker.start()
+    worker.join()
+    assert seen[0] is seen[1]
+    assert seen[0] is not main
