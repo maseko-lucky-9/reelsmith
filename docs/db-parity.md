@@ -55,6 +55,34 @@ break it.
 7. **`server_default`** for new not-null columns OR backfill in a follow-up
    migration before flipping nullability.
 
+## Models match migrations
+
+Deployed databases were built by the migrations, so the migrations are the
+source of truth and `app/db/models.py` must describe the same schema.
+
+- Name indexes explicitly with `Index("ix_...", ...)` in `__table_args__`
+  using the exact name the migration created. Column-level `index=True`
+  derives `ix_<table>_<column>`, which differs from short migration names
+  such as `ix_cas_clip` and shows up as a remove/add pair.
+- Declare every named `UniqueConstraint` the migration created
+  (`uq_clip_edits_clip_id`, `uq_social_accounts_platform_handle_owner`).
+  `unique=True, index=True` on a column produces one unique index, not a
+  constraint plus a plain index.
+- `sa.table()`/`sa.column()` used by `op.bulk_insert` need a type
+  (`sa.column("id", sa.String)`); untyped columns break offline `--sql`.
+
+Explicit `ix_*` names are identical on both engines. Unnamed unique
+constraints (`caption_styles.name`, `workspaces.name`, `share_links.token`,
+`api_tokens.token_hash`) are named `<table>_<column>_key` by Postgres and
+`sqlite_autoindex_<table>_N` by SQLite; Alembic matches them by columns, so
+they are not drift.
+
+Gates: `tests/unit/test_alembic_parity.py` (SQLite, offline) upgrades a temp
+file to head and requires an empty `compare_metadata`; CI runs `alembic
+check` and `alembic upgrade head --sql` against the Postgres 16 service.
+Offline `--sql` is a Postgres-dialect check: on SQLite, batch
+`ALTER COLUMN` (`n2o3p4q5r6s7`) needs a live connection to reflect the table.
+
 ## Postgres-only features (W3)
 
 The Wave 3 scheduler relies on `SELECT … FOR UPDATE SKIP LOCKED`, which has
@@ -112,6 +140,9 @@ alembic upgrade head                         # SQLite (default)
 psql -h localhost -U reelsmith -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
 YTVIDEO_DB_URL=postgresql+asyncpg://reelsmith:reelsmith@localhost:5432/reelsmith \
   alembic upgrade head                       # Postgres
+
+# Models vs migrated schema (gating, exits 1 on drift):
+alembic check
 
 # Schema dump diff (informational, not gating):
 sqlite3 reelsmith.db .schema | sort > /tmp/sqlite.schema

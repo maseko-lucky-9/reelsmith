@@ -41,6 +41,21 @@ jobs:
           YTVIDEO_JOB_STORE: sql
         run: alembic upgrade head
 
+      # Models must equal the migrated schema (T018): any drift fails CI.
+      - name: Check models match migrations
+        env:
+          YTVIDEO_DB_URL: postgresql+asyncpg://reelsmith:reelsmith@localhost:5432/reelsmith
+          YTVIDEO_JOB_STORE: sql
+        run: alembic check
+
+      # Offline mode renders every revision (incl. data migrations) as SQL
+      # for the Postgres dialect without touching the database.
+      - name: Render migrations as offline SQL
+        env:
+          YTVIDEO_DB_URL: postgresql+asyncpg://reelsmith:reelsmith@localhost:5432/reelsmith
+          YTVIDEO_JOB_STORE: sql
+        run: alembic upgrade head --sql > /dev/null
+
       # faster-whisper `base` (~145 MB) for tests/integration/test_whisper_real.py
       - name: Cache Hugging Face models
         uses: actions/cache@v6
@@ -70,3 +85,21 @@ jobs:
 
       - name: Build frontend
         run: cd web && pnpm build
+
+  # Constitution principle VI: secrets scan. On push/PR the action scans only
+  # the new commits; the allowlist in .gitleaks.toml covers full-history scans.
+  secrets:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write # gitleaks-action comments on PRs
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Scan for secrets with gitleaks
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
