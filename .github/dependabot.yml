@@ -1,0 +1,9 @@
+version: 2
+updates:
+  # Keeps the commit-SHA pins in .github/workflows/*.yml current.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
