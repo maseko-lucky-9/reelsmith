@@ -125,6 +125,9 @@ A creator exports a clip for Premiere or DaVinci, or downloads many clips with a
 - Whisper unavailable: `YTVIDEO_TRANSCRIPTION_PROVIDER=stub` keeps the pipeline runnable.
 - A stage fails inside one chapter: the chapter task is bounded by `max_parallel_chapters`; the job status reflects failure through `JobFailed`.
 - Auth: with `YTVIDEO_REQUIRE_AUTH=true`, every API route requires the API key; the docs routes and the static frontend mount do not (FR-060).
+- Output folders: each job writes to `<download_path>/<slug>-<job_id[:8]>/clips` (slug: the video title, or `upload_video` / `generate_video` / `<platform>_video`), so two jobs never share a clip path (T030). Folders made before T030 are named `<slug>/clips`; re-render still finds them because it works from the clip's own `output_path`. `POST /folders` has no job and keeps the bare slug.
+- Storage: `YTVIDEO_DEFAULT_DOWNLOAD_PATH` defaults to `<project>/data/downloads` (gitignored), uploads live in its `uploads/` subfolder (T031). The UI still sends `/tmp/yt` for URL jobs (T035).
+- Route prefixes: six routers are served under `/api/...` and the rest are not; the dev proxy strips `/api` and `serve_frontend` does not, so some UI calls 404 in each mode (T034). The `/api/...` paths below are the backend paths as they stand.
 
 ## Requirements *(mandatory)*
 
@@ -144,9 +147,9 @@ A creator exports a clip for Premiere or DaVinci, or downloads many clips with a
 | FR-008 | The system MUST generate a thumbnail per rendered clip and, optionally, AI hook text, filler removal and audio enhancement. | Implemented | `tests/unit/test_thumbnail_service.py`, `test_ai_hook_service.py`, `test_filler_transition_profanity.py`, `test_audio_enhance_service.py`; the pipeline emits `AudioEnhanced`, `FillersRemoved` and `AiHookGenerated` per chapter: `test_orchestrator_stage_events.py` |
 | FR-009 | The system MUST propose and score segments for sources without chapters. | **Scaffolded-unwired** | `segment_proposer` is gated at `app/workers/orchestrator.py:206`, but both branches build the same single "Full Video" chapter ("would run here (future)"). Service tested in isolation: `tests/unit/test_segment_proposer.py`. Clips are therefore **not** virality-ranked. |
 | FR-010 | The system MUST honour the `reframe` and `broll` pipeline options (default on). | **Scaffolded-unwired** | `orchestrator.py:653-656` emits `StageSkipped` only inside the `render=False` branch; when they are on, nothing runs. Services exist: `reframe_service`, `active_speaker_service`, `broll_service`, `broll_pexels_service`. |
-| FR-011 | The system MUST accept MP4 uploads (415 wrong type, 413 too large). | Implemented | `tests/contract/test_uploads_router.py` |
+| FR-011 | The system MUST accept MP4 uploads (415 wrong type, 413 too large). | Implemented | `tests/contract/test_uploads_router.py`; stored under `<default_download_path>/uploads`, the pre-T031 `/tmp/yt/uploads` root is still readable: `tests/unit/test_default_download_path.py` |
 | FR-012 | The system MUST generate a video from a brief when `generate_enabled`, else 400. | Implemented | `tests/contract/test_generate_router.py`, `test_generate_pipeline.py`, `tests/unit/test_ltx_producer.py` |
-| FR-013 | The system MUST retire clips older than `retention_days` (30) and delete their video and thumbnail files, on a sweep every `retention_sweep_minutes` (60). Jobs are not deleted. | Implemented | `app/services/retention.py` (`sweep_expired_clips`, looped by the lifespan janitor in `app/main.py`); `tests/unit/test_retention_sweep.py` (T025). The row is retired and committed before files are deleted; only `output_path` and `thumbnail_path` are deleted, never the job's source video. |
+| FR-013 | The system MUST retire clips older than `retention_days` (30) and delete their video and thumbnail files, on a sweep every `retention_sweep_minutes` (60). Jobs are not deleted. | Implemented | `app/services/retention.py` (`sweep_expired_clips`, looped by the lifespan janitor in `app/main.py`); `tests/unit/test_retention_sweep.py` (T025). The row is retired and committed before files are deleted; only `output_path` and `thumbnail_path` are deleted, never the job's source video. A file that a live clip still references is kept (rows from before per-job folders can share a path, T030). |
 
 **Clip curation**
 
