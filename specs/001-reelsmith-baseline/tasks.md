@@ -35,7 +35,7 @@ Format: `- [ ] T### [FR-xxx|E#] [Principle] description. Proving test → commit
 
 ## Phase 4: Tooling and documentation
 
-- [ ] T018 `alembic check` reports 13 drift operations between migrations and models (11 index add/remove, 2 unique-constraint removals on `clip_edits` and `social_accounts`); `alembic upgrade --sql` fails on a data migration. Test: `alembic check` exits 0 → `fix(db): align migrations with models`
+- [x] T018 (done, models aligned to the migrations; no new revision) `alembic check` reports 13 drift operations between migrations and models (11 index add/remove, 2 unique-constraint removals on `clip_edits` and `social_accounts`); `alembic upgrade --sql` fails on a data migration. Test: `alembic check` exits 0 (CI, Postgres) and `tests/unit/test_alembic_parity.py` (SQLite + offline SQL) → `fix(db): align migrations with models`
 - [ ] T019 Skip or fix the 4 tests in `tests/unit/test_orchestrator_concurrency.py` that fail on Python 3.12 (CI and docs are 3.14 only). → `test: mark concurrency tests 3.14-only`
 - [ ] T020 Seed Linux golden caption hashes in `tests/unit/test_subtitle_image_golden.py` (CI skips them today; the PNG-equality tests are the guard). → `test: seed linux caption goldens`
 - [ ] T021 Set ruff `target-version` (reports F821 on `ExceptionGroup`). → `chore(lint): set ruff target-version`
