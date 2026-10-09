@@ -30,7 +30,7 @@ Format: `- [ ] T### [FR-xxx|E#] [Principle] description. Proving test → commit
 - [ ] T013 [FR-023] **Decision**: wire animated captions, transitions, brand vocabulary, profanity filter and voice-over into the orchestrator, or mark them timeline-only. Spec 002 candidate.
 - [ ] T014 Remove or use these settings that no code reads: `scheduler_enabled`, `scheduler_poll_seconds`, `scheduler_max_concurrent`, `tiktok_profile_url_base`, `tiktok_node_bin`, `pexels_api_key`, `broll_cache_dir`, `ltx_model_path`, `ltx_use_mps`, `ltx_num_frames`, `stage_timeout_seconds`. Test: `tests/unit/test_settings_module.py` → `chore(config): drop unused settings`
 - [ ] T015 Use or delete `app/sse_heartbeat.py` (referenced by no route). Test: SSE keepalive test → `chore: remove unused sse_heartbeat`
-- [ ] T016 Emit `AUDIO_ENHANCED`, `FILLERS_REMOVED`, `AI_HOOK_GENERATED` from the orchestrator (marked TODO), or delete the enum members. Test: orchestrator event-order test → `feat(pipeline): emit stage events`
+- [x] T016 (done: emitted by the orchestrator right after each stage succeeds, never when the stage is off, skipped or failed; payloads carry `chapter_index`, plus `clip_id` for the hook; `tests/unit/test_orchestrator_stage_events.py`) Emit `AUDIO_ENHANCED`, `FILLERS_REMOVED`, `AI_HOOK_GENERATED` from the orchestrator (marked TODO), or delete the enum members. Test: orchestrator event-order test → `feat(pipeline): emit stage events`
 - [ ] T017 Missing backends for UI pages `/analytics`, `/calendar`, `/team`, `/settings/api`, `/settings/webhooks`, `/share/$token`. Each needs its own spec (`specs/002-…`) before work.
 
 ## Phase 4: Tooling and documentation
