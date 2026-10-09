@@ -41,7 +41,7 @@ Single-tenant: tier matrix replicated as `capabilities.py` flag map; everything 
 | # | Decision | Pick | Why |
 |---|---|---|---|
 | 1 | Stage insertion mechanism | Append `bool` flag to `PipelineOptions`, gate in orchestrator, append `StageDescriptor` and `ToggleDescriptor` to frontend registries | Substrate already shipped in `5865534`; no refactor needed |
-| 2 | Multi-track timeline state | New `clip_edits` table; `timeline JSON` schema; server-side `timeline_render_service` (MoviePy CompositeVideoClip) | WYSIWYG with final export; rejects WebCodecs/ffmpeg.wasm |
+| 2 | Multi-track timeline state | New `clip_edits` table; `timeline JSON` schema; server-side `timeline_render_service` (MoviePy CompositeVideoClip; superseded by ADR-004: one-pass ffmpeg, MoviePy is no longer a dependency) | WYSIWYG with final export; rejects WebCodecs/ffmpeg.wasm |
 | 3 | Editor preview | 240p server-side proxy render | Pixel-true vs final |
 | 4 | Social OAuth tokens | Fernet-encrypted at rest; lazy refresh on use; `SELECT ... FOR UPDATE` to serialise refreshes | Standard, no extra infra |
 | 5 | Scheduler | W1 APScheduler scaffold → W3 Postgres-backed worker (`SKIP LOCKED`) | Postgres survives restarts; calendar UI reads same table |
