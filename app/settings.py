@@ -95,8 +95,13 @@ class Settings(BaseSettings):
     reframe_provider: str = "letterbox"
 
     # ── B-Roll ────────────────────────────────────────────────────────────
-    # "local" | "none"
+    # Fills a reel's B-roll inserts when the job's ``broll`` option is on:
+    # "none" (default: no B-roll) | "local" (broll_library_dir) | "pexels"
+    # (Pexels video search; needs pexels_api_key).
     broll_provider: str = "none"
+    # The local provider's library: *.mp4 files named by keyword
+    # (``ocean_waves.mp4`` answers "ocean" and "waves").
+    broll_library_dir: str = str(_PROJECT_ROOT / "data" / "broll")
 
     # ── Media & retention ─────────────────────────────────────────────────
     max_upload_mb: int = 500
@@ -159,6 +164,8 @@ class Settings(BaseSettings):
     audio_enhance_rnnoise_model: str | None = None
 
     # ── B-Roll Pexels (W1.9) ──────────────────────────────────────────────
+    # Sent only as the Authorization header of the search request; never
+    # logged. Downloads are cached in broll_cache_dir by Pexels video id.
     pexels_api_key: str | None = None
     broll_cache_dir: str = "data/broll-cache"
 

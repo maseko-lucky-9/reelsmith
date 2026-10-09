@@ -66,11 +66,9 @@ _INDIRECT_READS = {
 }
 
 # Declared on purpose with no reader yet. Keep this list short and give a reason.
-_FORWARD_LOOKING = {
-    # B-roll Pexels wiring will pass these to app/services/broll_pexels_service.py.
-    "pexels_api_key",
-    "broll_cache_dir",
-}
+# (Empty since the B-roll wiring, T012, gave pexels_api_key and
+# broll_cache_dir their reader in app/services/broll_pexels_service.py.)
+_FORWARD_LOOKING: set[str] = set()
 
 
 def _app_source_outside_settings() -> str:

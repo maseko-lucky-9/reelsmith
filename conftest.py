@@ -24,6 +24,13 @@ os.environ.setdefault("YTVIDEO_JOB_STORE", "memory")
 # tests/integration/test_whisper_real.py, which switches the provider itself.
 os.environ.setdefault("YTVIDEO_TRANSCRIPTION_PROVIDER", "stub")
 os.environ.setdefault("YTVIDEO_WHISPER_WARMUP", "false")
+# B-roll stays off and offline whatever a developer's .env says: no provider,
+# no Pexels key, and a throwaway library and cache. Tests that need a
+# provider set it on settings.
+os.environ.setdefault("YTVIDEO_BROLL_PROVIDER", "none")
+os.environ.setdefault("YTVIDEO_PEXELS_API_KEY", "")
+os.environ.setdefault("YTVIDEO_BROLL_LIBRARY_DIR", tempfile.mkdtemp(prefix="reelsmith-test-broll-"))
+os.environ.setdefault("YTVIDEO_BROLL_CACHE_DIR", tempfile.mkdtemp(prefix="reelsmith-test-broll-cache-"))
 # Never let the test suite export into a developer's real .env export folder
 # (e.g. a Syncthing share); env vars win over .env in pydantic-settings.
 os.environ.setdefault("YTVIDEO_EXPORT_BASE_FOLDER", tempfile.mkdtemp(prefix="reelsmith-test-export-"))

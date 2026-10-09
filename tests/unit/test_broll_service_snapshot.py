@@ -12,6 +12,13 @@ here indicate behavioural drift in:
 If a Wave 1 PR changes one of these on purpose, update this file
 and call out the diff in the PR description.
 
+T012 (B-roll wiring) changed three on purpose, and every case below still
+holds: keywords are all lowercase content tokens of the text in spoken
+order (no spaCy; the old fallback kept only Capitalised words, so a
+lowercase query never matched), a keyword matches a whole word of the file
+name (plural ``s`` folded) instead of any substring, and the library
+(``settings.broll_library_dir``) is scanned in name order.
+
 PR-0b · ADR-003 · `tasks/todo.md`
 """
 from __future__ import annotations
@@ -20,8 +27,8 @@ from pathlib import Path
 
 import pytest
 
-import app.services.broll_service as bs
 from app.services.broll_service import LocalBRoll
+from app.settings import settings
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -40,7 +47,7 @@ def broll_library(tmp_path: Path, monkeypatch) -> Path:
     ]
     for name in clip_names:
         (tmp_path / name).write_bytes(b"\x00")
-    monkeypatch.setattr(bs, "_BROLL_DIR", tmp_path)
+    monkeypatch.setattr(settings, "broll_library_dir", str(tmp_path))
     return tmp_path
 
 
@@ -48,9 +55,8 @@ def broll_library(tmp_path: Path, monkeypatch) -> Path:
 #
 # Each case = (label, transcript, forced_phrases, expected_match_substring_or_None)
 #
-# ``forced_phrases`` short-circuits ``_extract_noun_phrases`` so the test
-# stays hermetic (no spaCy model required in CI). When ``None``, we exercise
-# the regex proper-noun fallback path on the real ``_extract_noun_phrases``.
+# ``forced_phrases`` short-circuits ``_extract_noun_phrases``. When ``None``,
+# we exercise the real ``_extract_noun_phrases`` (lowercase content tokens).
 
 _SNAPSHOT_CASES: list[tuple[str, str, list[str] | None, str | None]] = [
     (
@@ -101,6 +107,12 @@ _SNAPSHOT_CASES: list[tuple[str, str, list[str] | None, str | None]] = [
         None,  # exercise real fallback path
         "machine_learning",
     ),
+    (
+        "lowercase_query_matches",
+        "sunset",
+        None,  # the planner's queries are lowercase single words
+        "sunset_timelapse",
+    ),
 ]
 
 
@@ -134,12 +146,6 @@ def test_find_broll_returns_absolute_path(broll_library: Path) -> None:
     """Locked: ``find_broll`` returns a stringified path that resolves under the library."""
     svc = LocalBRoll()
     result = svc.find_broll("sunset")
-    # With proper-noun fallback this won't match (lowercase 'sunset' isn't a proper noun),
-    # so explicitly force the phrase to assert the path-shape contract.
-    import unittest.mock as _mock
-
-    with _mock.patch.object(svc, "_extract_noun_phrases", return_value=["sunset"]):
-        result = svc.find_broll("sunset")
 
     assert result is not None
     assert Path(result).parent == broll_library
