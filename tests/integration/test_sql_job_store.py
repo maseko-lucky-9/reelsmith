@@ -1,7 +1,8 @@
 """Integration tests for SqlJobStore — require a running Postgres instance.
 
 Run with: pytest -m integration
-Postgres connection: YTVIDEO_DB_URL or default postgresql+asyncpg://reelsmith:reelsmith@localhost:5432/reelsmith
+Postgres connection: YTVIDEO_TEST_DB_URL (local hosts only; see tests/db_safety.py),
+default postgresql+asyncpg://reelsmith:reelsmith@localhost:5432/reelsmith
 """
 from __future__ import annotations
 
@@ -96,3 +97,58 @@ async def test_list_clips_min_score_filter(db_store: SqlJobStore):
     assert all(c["virality_score"] >= 50 for c in high)
     assert any(c["clip_id"] == "clip-high" for c in high)
     assert not any(c["clip_id"] == "clip-low" for c in high)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_find_job_by_url_exact_newest_and_status_filtered(db_store: SqlJobStore):
+    url = "https://yt.test/find"
+    for job_id, job_url, status in [
+        ("find-old", url, "completed"),
+        ("find-new", url, "running"),
+        ("find-failed", url, "failed"),
+        ("find-longer", url + "&t=1", "completed"),
+    ]:
+        await db_store.create(JobState(job_id=job_id, url=job_url, download_path="/tmp"))
+        await db_store.update(job_id, lambda s, st=status: setattr(s, "status", st))
+
+    active = ("completed", "running", "pending")
+    found = await db_store.find_job_by_url(url, active)
+    assert found is not None and found.job_id == "find-new"
+    assert await db_store.find_job_by_url("https://yt.test/fin", active) is None
+    failed = await db_store.find_job_by_url(url, ("failed",))
+    assert failed is not None and failed.job_id == "find-failed"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_get_clip_hides_retired_unless_asked(db_store: SqlJobStore):
+    from sqlalchemy import update
+
+    from app.db.models import ClipRecord
+
+    await db_store.create(JobState(job_id="ret-job", url="https://yt.test/r", download_path="/tmp"))
+    await db_store.upsert_clip("ret-job", "ret-clip", lambda c: c.update({"start": 0, "end": 1}))
+    assert (await db_store.get_clip("ret-clip"))["clip_id"] == "ret-clip"
+
+    async with db_store._factory() as session:
+        await session.execute(
+            update(ClipRecord).where(ClipRecord.id == "ret-clip").values(retired=True)
+        )
+        await session.commit()
+
+    assert await db_store.get_clip("ret-clip") is None
+    assert (await db_store.get_clip("ret-clip", include_retired=True))["retired"] is True
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_fail_interrupted_jobs_on_postgres(db_store: SqlJobStore):
+    for job_id, status in [("int-p", "pending"), ("int-r", "running"), ("int-c", "completed")]:
+        await db_store.create(JobState(job_id=job_id, url=f"https://yt.test/{job_id}", download_path="/tmp"))
+        await db_store.update(job_id, lambda s, st=status: setattr(s, "status", st))
+
+    assert sorted(await db_store.fail_interrupted_jobs()) == ["int-p", "int-r"]
+    assert (await db_store.get("int-r")).error == "interrupted by restart"
+    assert (await db_store.get("int-c")).status == "completed"
+    assert await db_store.fail_interrupted_jobs() == []

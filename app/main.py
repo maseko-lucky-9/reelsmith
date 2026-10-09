@@ -82,27 +82,38 @@ async def lifespan(app: FastAPI):
     app.state.event_bus = AsyncEventBus()
     app.state.job_store = _make_store()
 
-    # Job queue with concurrency cap.
-    # POST /jobs enqueues (job_id, payload); this worker fires VIDEO_REQUESTED
-    # respecting max_concurrent_jobs via the semaphore.
+    # Jobs a previous process left pending/running have no pipeline any more
+    # (the queue and the tasks died with it); fail them so they don't block
+    # their URL in the duplicate check. Before the queue worker starts, so no
+    # new job can be caught by it. No events: nobody is subscribed yet.
+    if settings.job_store == "sql":
+        interrupted = await app.state.job_store.fail_interrupted_jobs()
+        if interrupted:
+            log.warning(
+                "Marked %d job(s) interrupted by restart as failed: %s",
+                len(interrupted), interrupted,
+            )
+
+    # Job queue: the routers (jobs, uploads, generate, clips rerender) enqueue
+    # (job_id, payload); this worker turns each into a VIDEO_REQUESTED event.
+    # The max_concurrent_jobs cap is enforced by run_orchestrator around each
+    # pipeline, not here (publish() returns immediately).
     job_queue: asyncio.Queue[tuple[str, dict]] = asyncio.Queue()
-    job_semaphore = asyncio.Semaphore(settings.max_concurrent_jobs)
     app.state.job_queue = job_queue
 
     async def _queue_worker():
         while True:
             job_id, payload = await job_queue.get()
             try:
-                async with job_semaphore:
-                    await app.state.event_bus.publish(
-                        Event(
-                            type=EventType.VIDEO_REQUESTED,
-                            job_id=job_id,
-                            payload=payload,
-                        )
+                await app.state.event_bus.publish(
+                    Event(
+                        type=EventType.VIDEO_REQUESTED,
+                        job_id=job_id,
+                        payload=payload,
                     )
-            except Exception:  # noqa: BLE001
-                pass
+                )
+            except Exception:  # noqa: BLE001 — keep the worker alive
+                log.exception("[%s] failed to publish VideoRequested", job_id)
             finally:
                 job_queue.task_done()
 

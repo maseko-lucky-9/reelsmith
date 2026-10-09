@@ -21,6 +21,9 @@ from app.settings import settings
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
+# A new request for a URL with a job in one of these states reuses that job.
+_DEDUP_STATUSES = ("completed", "running", "pending")
+
 
 class CreateJobRequest(BaseModel):
     url: str
@@ -127,11 +130,13 @@ async def create_job(req: CreateJobRequest, request: Request) -> CreateJobRespon
             status_code=400, detail=f"Unsupported platform for URL: {req.url}"
         )
 
-    # Return existing job if the same URL was already processed or is running.
-    existing = await request.app.state.job_store.list_jobs(limit=200)
-    for job in existing:
-        if job.url == req.url and job.status in ("completed", "running", "pending"):
-            return CreateJobResponse(job_id=job.job_id, status=job.status)
+    # Return the existing job if the same URL was already processed or is
+    # queued/running (exact URL match, newest first, any age).
+    existing = await request.app.state.job_store.find_job_by_url(
+        req.url, _DEDUP_STATUSES
+    )
+    if existing is not None:
+        return CreateJobResponse(job_id=existing.job_id, status=existing.status)
 
     job_id = new_job_id()
     state = JobState(

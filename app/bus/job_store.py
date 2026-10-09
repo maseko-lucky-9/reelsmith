@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Collection
 from typing import Any, Callable, Protocol, runtime_checkable
 
 from app.domain.models import ChapterArtifacts, JobState, PipelineOptions
@@ -8,6 +9,12 @@ from app.domain.models import ChapterArtifacts, JobState, PipelineOptions
 
 class JobNotFoundError(KeyError):
     pass
+
+
+# Statuses of a job that is queued or in flight; nothing survives a restart in
+# these states (the queue and the pipelines live in the process).
+INTERRUPTIBLE_STATUSES = ("pending", "running")
+INTERRUPTED_ERROR = "interrupted by restart"
 
 
 @runtime_checkable
@@ -25,7 +32,13 @@ class JobStoreProtocol(Protocol):
     async def list_jobs(
         self, limit: int = 20, offset: int = 0, search: str = ""
     ) -> list[JobState]: ...
-    async def get_clip(self, clip_id: str) -> dict[str, Any] | None: ...
+    async def find_job_by_url(
+        self, url: str, statuses: Collection[str]
+    ) -> JobState | None: ...
+    async def fail_interrupted_jobs(self) -> list[str]: ...
+    async def get_clip(
+        self, clip_id: str, *, include_retired: bool = False
+    ) -> dict[str, Any] | None: ...
     async def list_clips(
         self,
         job_id: str | None = None,
@@ -94,9 +107,15 @@ class InMemoryJobStore:
             self._clips[clip_id] = clip
             return clip
 
-    async def get_clip(self, clip_id: str) -> dict[str, Any] | None:
+    async def get_clip(
+        self, clip_id: str, *, include_retired: bool = False
+    ) -> dict[str, Any] | None:
+        """The clip, or None if unknown or (unless asked for) retired."""
         async with self._lock:
-            return self._clips.get(clip_id)
+            clip = self._clips.get(clip_id)
+            if clip is None or (clip.get("retired") and not include_retired):
+                return None
+            return clip
 
     async def list_jobs(
         self, limit: int = 20, offset: int = 0, search: str = ""
@@ -107,6 +126,37 @@ class InMemoryJobStore:
                 jobs = [j for j in jobs if search.lower() in j.url.lower()]
             return jobs[offset : offset + limit]
 
+    async def find_job_by_url(
+        self, url: str, statuses: Collection[str]
+    ) -> JobState | None:
+        """Newest job whose URL equals ``url`` exactly and whose status is in
+        ``statuses``; None if there is none."""
+        async with self._lock:
+            return next(
+                (
+                    job
+                    for job in reversed(self._jobs.values())
+                    if job.url == url and job.status in statuses
+                ),
+                None,
+            )
+
+    async def fail_interrupted_jobs(self) -> list[str]:
+        """Mark every pending/running job failed; return their ids.
+
+        A fresh in-memory store is empty, so at startup this finds nothing;
+        it exists so both stores honour the same protocol.
+        """
+        async with self._lock:
+            interrupted = [
+                job for job in self._jobs.values()
+                if job.status in INTERRUPTIBLE_STATUSES
+            ]
+            for job in interrupted:
+                job.status = "failed"
+                job.error = INTERRUPTED_ERROR
+            return [job.job_id for job in interrupted]
+
     async def list_clips(
         self,
         job_id: str | None = None,
@@ -114,7 +164,7 @@ class InMemoryJobStore:
         search: str = "",
     ) -> list[dict[str, Any]]:
         async with self._lock:
-            clips = list(self._clips.values())
+            clips = [c for c in self._clips.values() if not c.get("retired")]
             if job_id:
                 clips = [c for c in clips if c.get("job_id") == job_id]
             if min_score is not None:
@@ -283,14 +333,19 @@ class SqlJobStore:
             await session.commit()
         return clip
 
-    async def get_clip(self, clip_id: str) -> dict[str, Any] | None:
+    async def get_clip(
+        self, clip_id: str, *, include_retired: bool = False
+    ) -> dict[str, Any] | None:
+        """The clip, or None if unknown or (unless asked for) retired —
+        the same retired filter ``list_clips`` applies."""
         from app.db.models import ClipRecord
         from sqlalchemy import select
 
         async with self._factory() as session:
-            result = await session.execute(
-                select(ClipRecord).where(ClipRecord.id == clip_id)
-            )
+            q = select(ClipRecord).where(ClipRecord.id == clip_id)
+            if not include_retired:
+                q = q.where(ClipRecord.retired == False)  # noqa: E712
+            result = await session.execute(q)
             record = result.scalar_one_or_none()
             return _clip_record_to_dict(record) if record else None
 
@@ -312,6 +367,48 @@ class SqlJobStore:
             q = q.offset(offset).limit(limit)
             result = await session.execute(q)
             return [_record_to_state(r) for r in result.scalars().all()]
+
+    async def find_job_by_url(
+        self, url: str, statuses: Collection[str]
+    ) -> JobState | None:
+        """Newest job whose URL equals ``url`` exactly and whose status is in
+        ``statuses``; None if there is none. One row, whatever the table size."""
+        from app.db.models import JobRecord
+        from sqlalchemy import select
+        from sqlalchemy.orm import selectinload
+
+        async with self._factory() as session:
+            result = await session.execute(
+                select(JobRecord)
+                .options(selectinload(JobRecord.clips))
+                .where(JobRecord.youtube_url == url)
+                .where(JobRecord.status.in_(list(statuses)))
+                .order_by(JobRecord.created_at.desc())
+                .limit(1)
+            )
+            record = result.scalar_one_or_none()
+        return _record_to_state(record) if record is not None else None
+
+    async def fail_interrupted_jobs(self) -> list[str]:
+        """Mark every pending/running job failed (one UPDATE); return their ids.
+
+        Called once at startup: a previous process that stopped or crashed
+        left these jobs without a pipeline, and they would otherwise block
+        their URL in the duplicate check forever.
+        """
+        from app.db.models import JobRecord
+        from sqlalchemy import update
+
+        async with self._factory() as session:
+            result = await session.execute(
+                update(JobRecord)
+                .where(JobRecord.status.in_(INTERRUPTIBLE_STATUSES))
+                .values(status="failed", error=INTERRUPTED_ERROR)
+                .returning(JobRecord.id)
+            )
+            failed_ids = [row[0] for row in result.all()]
+            await session.commit()
+        return failed_ids
 
     async def list_clips(
         self,

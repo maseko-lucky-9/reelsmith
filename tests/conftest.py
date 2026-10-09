@@ -6,8 +6,6 @@ import os
 import pytest
 import pytest_asyncio
 
-_DB_URL = "postgresql+asyncpg://reelsmith:reelsmith@localhost:5432/reelsmith"
-
 
 @pytest.fixture(scope="session")
 def sync_fixture_640():
@@ -30,9 +28,20 @@ def sync_fixture_720():
 
 
 @pytest_asyncio.fixture
-async def db_store():
-    """SqlJobStore backed by the test Postgres instance. Resets engine per test."""
-    os.environ["YTVIDEO_DB_URL"] = _DB_URL
+async def db_store(monkeypatch):
+    """SqlJobStore on the local test Postgres, with its tables TRUNCATEd.
+
+    The database is ``YTVIDEO_TEST_DB_URL`` (default: the local docker-compose
+    / CI Postgres), never the app's ``YTVIDEO_DB_URL``, and must be on this
+    machine — see ``tests/db_safety.py``. It is forced onto both the env var
+    and the already-loaded settings. Resets the engine per test.
+    """
+    from app.settings import settings
+    from tests.db_safety import resolve_test_db_url
+
+    url = resolve_test_db_url(os.environ)
+    monkeypatch.setenv("YTVIDEO_DB_URL", url)
+    monkeypatch.setattr(settings, "db_url", url)
 
     # Reset singletons so each test gets a fresh engine on the current event loop.
     import app.db.engine as _eng

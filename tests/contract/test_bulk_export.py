@@ -1,8 +1,13 @@
 """Contract tests for /api/clips/bulk-export.zip (W3.7)."""
 from __future__ import annotations
 
+import asyncio
 import io
+import os
+import tempfile
+import threading
 import zipfile
+from typing import Any
 
 import httpx
 import pytest
@@ -12,6 +17,7 @@ from app.db.base import Base
 from app.db.models import ClipRecord, JobRecord
 from app.db.session import get_session
 from app.main import create_app
+from app.routers import bulk_export as bulk_export_router
 
 
 @pytest.fixture
@@ -88,3 +94,160 @@ async def test_bulk_export_too_many(export_client, monkeypatch):
     q = "&".join(f"ids={i}" for i in ids)
     r = await client.get(f"/api/clips/bulk-export.zip?{q}")
     assert r.status_code == 422
+
+
+# ── Streaming from a temp file (P4) ──────────────────────────────────────────
+# Invariants: the temp file never has a name on disk (link count 0 from
+# creation, so nothing can be left behind), and its handle is closed however
+# the response ends — fully read, iterator closed, or client disconnect.
+
+
+@pytest.fixture
+def temp_files(monkeypatch):
+    """Record every temp file opened (named or not) with its link count at
+    creation."""
+    opened: list[tuple[Any, int]] = []
+
+    def spying(factory):
+        def spy(*args, **kwargs):
+            handle = factory(*args, **kwargs)
+            opened.append((handle, os.fstat(handle.fileno()).st_nlink))
+            return handle
+
+        return spy
+
+    for name in ("TemporaryFile", "NamedTemporaryFile"):
+        monkeypatch.setattr(tempfile, name, spying(getattr(tempfile, name)))
+    return opened
+
+
+async def test_bulk_export_streams_stored_zip_from_unlinked_temp_file(
+    export_client, temp_files
+):
+    client, ids = export_client
+    q = "&".join(f"ids={i}" for i in ids)
+
+    r = await client.get(f"/api/clips/bulk-export.zip?{q}")
+
+    assert r.status_code == 200
+    assert r.headers["content-length"] == str(len(r.content))
+    assert r.headers["content-disposition"] == (
+        'attachment; filename="reelsmith-bulk-export.zip"'
+    )
+    z = zipfile.ZipFile(io.BytesIO(r.content))
+    assert z.testzip() is None
+    assert all(info.compress_type == zipfile.ZIP_STORED for info in z.infolist())
+    assert sorted(z.read(n) for n in z.namelist() if n.endswith(".mp4")) == [
+        b"video-a",
+        b"video-b",
+    ]
+    [(handle, links_at_creation)] = temp_files
+    assert links_at_creation == 0, "temp file must have no name on disk"
+    assert handle.closed
+
+
+async def test_bulk_export_builds_zip_off_the_event_loop(export_client, monkeypatch):
+    client, ids = export_client
+    threads: list[threading.Thread] = []
+    real = bulk_export_router._write_zip
+
+    def spy(*args, **kwargs):
+        threads.append(threading.current_thread())
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(bulk_export_router, "_write_zip", spy)
+    loop_thread = threading.current_thread()
+
+    r = await client.get(f"/api/clips/bulk-export.zip?ids={ids[0]}")
+
+    assert r.status_code == 200
+    assert len(threads) == 1
+    assert threads[0] is not loop_thread
+
+
+async def test_bulk_export_closes_temp_file_when_body_iterator_is_closed(
+    export_client, temp_files, monkeypatch
+):
+    """Read one chunk, then close the body iterator (what a server does when
+    it abandons a response)."""
+    client, ids = export_client
+    monkeypatch.setattr(bulk_export_router, "_STREAM_CHUNK_BYTES", 16)
+    session_override = client._transport.app.dependency_overrides[get_session]
+
+    async for session in session_override():
+        response = await bulk_export_router.bulk_export(ids=ids, session=session)
+    body = response.body_iterator
+    first = await body.__anext__()
+    [(handle, _links)] = temp_files
+    assert len(first) == 16
+    assert not handle.closed
+    assert os.fstat(handle.fileno()).st_nlink == 0
+
+    await body.aclose()
+
+    assert handle.closed
+
+
+async def test_bulk_export_closes_temp_file_on_client_disconnect(
+    export_client, temp_files, monkeypatch
+):
+    """Drive the ASGI app directly; the client disconnects after the first
+    body chunk, mid-stream."""
+    client, ids = export_client
+    monkeypatch.setattr(bulk_export_router, "_STREAM_CHUNK_BYTES", 16)
+    app = client._transport.app
+    first_chunk_sent = asyncio.Event()
+    sent: list[dict[str, Any]] = []
+    request_delivered = False
+
+    async def receive() -> dict[str, Any]:
+        nonlocal request_delivered
+        if not request_delivered:
+            request_delivered = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await first_chunk_sent.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+        if message["type"] == "http.response.body" and message.get("body"):
+            first_chunk_sent.set()
+            await asyncio.sleep(0.05)  # a slow client: the disconnect wins
+
+    query = "&".join(f"ids={i}" for i in ids).encode()
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/api/clips/bulk-export.zip",
+        "raw_path": b"/api/clips/bulk-export.zip",
+        "query_string": query,
+        "root_path": "",
+        "headers": [(b"host", b"test")],
+        "client": ("127.0.0.1", 50000),
+        "server": ("test", 80),
+    }
+
+    await asyncio.wait_for(app(scope, receive, send), timeout=5)
+
+    start = sent[0]
+    assert start["status"] == 200
+    declared = int(dict(start["headers"])[b"content-length"])
+    streamed = sum(
+        len(m.get("body", b"")) for m in sent if m["type"] == "http.response.body"
+    )
+    assert 0 < streamed < declared, "the response must have been cut short"
+    [(handle, _links)] = temp_files
+    assert handle.closed
+
+
+async def test_bulk_export_rejections_create_no_temp_file(export_client, temp_files):
+    client, _ids = export_client
+
+    assert (await client.get("/api/clips/bulk-export.zip")).status_code == 422
+    assert (
+        await client.get("/api/clips/bulk-export.zip?ids=not-real")
+    ).status_code == 404
+    assert temp_files == []

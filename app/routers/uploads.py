@@ -15,6 +15,9 @@ router = APIRouter(prefix="/uploads", tags=["uploads"])
 
 _ALLOWED_MIME = {"video/mp4", "video/quicktime", "video/x-m4v"}
 _UPLOAD_DIR = Path("/tmp/yt/uploads")
+# Spooled-upload read size: 1 MiB keeps per-chunk await/write overhead low
+# for multi-GB videos while staying small in memory.
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 
 @router.post("")
@@ -34,7 +37,7 @@ async def upload_video(request: Request, file: UploadFile = File(...)) -> JSONRe
 
     total = 0
     with open(dest, "wb") as f:
-        while chunk := await file.read(65536):
+        while chunk := await file.read(_UPLOAD_CHUNK_BYTES):
             total += len(chunk)
             if total > max_bytes:
                 f.close()

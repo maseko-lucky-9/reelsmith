@@ -6,6 +6,7 @@ import re
 import shutil
 import time
 import uuid
+from collections.abc import Coroutine
 from pathlib import Path
 from typing import Any
 
@@ -46,22 +47,38 @@ def _sanitize(name: str) -> str:
 
 
 async def run_orchestrator(bus: AsyncEventBus, store: JobStore) -> None:
-    """Subscribes to VIDEO_REQUESTED events and spawns per-job pipelines."""
+    """Subscribes to VIDEO_REQUESTED events and runs per-job pipelines.
+
+    At most ``settings.max_concurrent_jobs`` pipelines run at once; a job past
+    the cap waits for a slot with its status still ``pending``. Cancelling the
+    orchestrator cancels running and waiting jobs alike.
+    """
     log.info("Orchestrator subscribed; awaiting VideoRequested events")
+    max_jobs = settings.max_concurrent_jobs
+    if max_jobs < 1:
+        log.warning(
+            "max_concurrent_jobs=%d is below 1; running 1 job at a time", max_jobs
+        )
+        max_jobs = 1
+    job_slots = asyncio.Semaphore(max_jobs)
     pipeline_tasks: set[asyncio.Task[Any]] = set()
+
+    async def _run_when_slot_free(event: Event) -> None:
+        async with job_slots:
+            await _run_job(event, bus, store)
+
     try:
         async for event in bus.subscribe(types=[EventType.VIDEO_REQUESTED]):
-            task = asyncio.create_task(_run_job(event, bus, store))
+            task = asyncio.create_task(_run_when_slot_free(event))
             pipeline_tasks.add(task)
             task.add_done_callback(pipeline_tasks.discard)
     except asyncio.CancelledError:
         for task in pipeline_tasks:
             task.cancel()
-        for task in pipeline_tasks:
-            try:
-                await task
-            except Exception:  # noqa: BLE001
-                pass
+        # Wait for every job to unwind — cancellation is where their ffmpeg is
+        # killed. return_exceptions: one job's CancelledError must not end
+        # the wait for the others.
+        await asyncio.gather(*pipeline_tasks, return_exceptions=True)
         raise
 
 
@@ -251,8 +268,28 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
                     language=language,
                 )
 
-        outputs = await asyncio.gather(*(_bound(c) for c in chapters), return_exceptions=False)
-        output_paths = [p for p in outputs if p]
+        # Structured fan-out: the first failing chapter cancels its siblings
+        # and the group waits for them to unwind before the job is marked
+        # failed, so no chapter emits events after JobFailed. Their ffmpeg
+        # runs, transcription and caption-file writes go through
+        # to_thread_cancellable: ffmpeg is killed, and the worker threads are
+        # awaited, so nothing still writes into cleanup_root when it is
+        # removed. The remaining plain asyncio.to_thread calls (caption
+        # timing, thumbnail, ai_hook, ollama) cannot be interrupted and may
+        # finish in the background; they write nothing into cleanup_root.
+        # The job fails with the first chapter's own error, as with gather().
+        try:
+            async with asyncio.TaskGroup() as chapter_group:
+                chapter_tasks = [chapter_group.create_task(_bound(c)) for c in chapters]
+        except ExceptionGroup as group:
+            first, *others = group.exceptions
+            for other in others:
+                log.warning(
+                    "[%s] Another chapter also failed: %s", job_id, other,
+                    exc_info=other,
+                )
+            raise first from None
+        output_paths = [p for p in (t.result() for t in chapter_tasks) if p]
 
         # ── Export ────────────────────────────────────────────────────────────
         if settings.export_base_folder:
@@ -296,22 +333,52 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
         raise
     except Exception as e:  # noqa: BLE001
         log.exception("[%s] Job failed after %.2fs", job_id, time.perf_counter() - job_t0)
-
-        def _fail(s: JobState) -> None:
-            s.status = "failed"
-            s.error = str(e)
-
-        await store.update(job_id, _fail)
-        await _emit(
-            bus,
-            EventType.JOB_FAILED,
-            job_id,
-            failed_step=(await store.get(job_id)).current_step,
-            error=str(e),
-        )
+        # A cancel (e.g. shutdown) may already be pending — TaskGroup re-arms
+        # an outer cancel that hit while a chapter was failing — or arrive
+        # now; record the failure regardless, then let the cancel through.
+        await _finish_then_honour_cancel(_record_failure(bus, store, job_id, str(e)))
     finally:
         if cleanup_root is not None and cleanup_root.exists():
             shutil.rmtree(cleanup_root, ignore_errors=True)
+
+
+async def _record_failure(
+    bus: AsyncEventBus, store: JobStore, job_id: str, error: str
+) -> None:
+    def _fail(s: JobState) -> None:
+        s.status = "failed"
+        s.error = error
+
+    await store.update(job_id, _fail)
+    await _emit(
+        bus,
+        EventType.JOB_FAILED,
+        job_id,
+        failed_step=(await store.get(job_id)).current_step,
+        error=error,
+    )
+
+
+async def _finish_then_honour_cancel(coro: Coroutine[Any, Any, None]) -> None:
+    """Run ``coro`` to completion even if the current task is (or gets)
+    cancelled meanwhile; then re-raise that cancellation.
+
+    Raises:
+        asyncio.CancelledError: the current task was cancelled before or
+            while ``coro`` ran.
+    """
+    current = asyncio.current_task()
+    cancelled = current is not None and current.cancelling() > 0
+    inner = asyncio.create_task(coro)
+    while not inner.done():
+        try:
+            # asyncio.wait never cancels what it waits on.
+            await asyncio.wait({inner})
+        except asyncio.CancelledError:
+            cancelled = True
+    inner.result()
+    if cancelled:
+        raise asyncio.CancelledError
 
 
 async def _process_chapter(
@@ -513,7 +580,9 @@ async def _process_chapter(
             words, settings.caption_words_per_segment, caption_format,
         )
         captions_path = str(tmp_dir / f"chapter_{index}.{caption_format}")
-        await asyncio.to_thread(
+        # Cancellable: a cancelled chapter waits for this write into tmp_dir
+        # to finish, so the job's tmp cleanup never races it.
+        await ffmpeg_tools.to_thread_cancellable(
             caption_service.write_captions, captions_obj, caption_format, captions_path
         )
         caption_count = len(captions_obj) if captions_obj is not None else 0
