@@ -6,7 +6,7 @@ Learning project: YouTube-to-reels pipeline. FastAPI backend + React UI (`web/`)
 
 ## Tech Stack
 
-- **Python 3.14** (CI) / 3.12+ supported, with `asyncio`
+- **Python 3.14** (CI; 3.12 is not supported: 4 orchestrator concurrency tests fail there, see PR #25), with `asyncio`
 - **FastAPI** — HTTP API + SSE job progress
 - **yt-dlp** — video download
 - **ffmpeg** (bundled `imageio-ffmpeg` binary) + **PyAV** — one-pass rendering, probing, frame grabs (`app/services/ffmpeg_tools.py`)

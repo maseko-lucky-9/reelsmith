@@ -10,7 +10,8 @@ asgi-lifespan==2.1.0
 python-multipart==0.0.32
 
 # Database
-sqlalchemy[asyncio]==2.0.54
+# Keep the [asyncio] extra: since 2.1 it is the only thing that installs greenlet.
+sqlalchemy[asyncio]==2.1.4
 asyncpg==0.32.0
 aiosqlite==0.22.1
 alembic==1.20.0
