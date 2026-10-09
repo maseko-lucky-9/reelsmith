@@ -5,6 +5,7 @@ import { Plus, X, ChevronDown } from 'lucide-react'
 import { rootRoute } from './root'
 import { api } from '@/api/client'
 import { BrandTemplateCard } from '@/components/dashboard/BrandTemplateCard'
+import { NotAppliedBadge } from '@/components/not-applied-badge'
 import { toast } from 'sonner'
 
 export const brandTemplateRoute = createRoute({
@@ -100,6 +101,7 @@ function BrandTemplatePage() {
           <h1 className="text-sm font-semibold text-white">Brand template</h1>
           <p className="text-xs text-zinc-500">Quickly setup your video template</p>
         </div>
+        <NotAppliedBadge />
 
         <div className="flex-1" />
 
@@ -200,8 +202,14 @@ function BrandTemplatePage() {
             <p className="text-xs font-semibold text-zinc-300">AI</p>
             {AI_TOGGLES.map(({ key, label }) => (
               <div key={key} className="flex items-center justify-between">
-                <span className="text-xs text-zinc-400">{label}</span>
+                <span className="flex flex-col items-start gap-1">
+                  <span id={`ai-${key}-label`} className="text-xs text-zinc-400">{label}</span>
+                  {key === 'auto_transitions' && <NotAppliedBadge />}
+                </span>
                 <button
+                  role="switch"
+                  aria-checked={aiSettings[key]}
+                  aria-labelledby={`ai-${key}-label`}
                   onClick={() => setAiSettings((s) => ({ ...s, [key]: !s[key] }))}
                   className={`relative w-8 h-4 rounded-full transition-colors ${aiSettings[key] ? 'bg-white' : 'bg-zinc-600'}`}
                 >

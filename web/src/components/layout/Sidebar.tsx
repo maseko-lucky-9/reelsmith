@@ -5,8 +5,6 @@ import {
   Sparkles,
   LayoutTemplate,
   FolderOpen,
-  Calendar,
-  BarChart2,
   Share2,
   ChevronLeft,
   ChevronRight,
@@ -30,8 +28,7 @@ const CREATE_ITEMS: NavItem[] = [
 ]
 
 const POST_ITEMS: NavItem[] = [
-  { label: 'Calendar', icon: Calendar, to: '/calendar' },
-  { label: 'Analytics', icon: BarChart2, to: '/analytics' },
+  // hidden: no backend, see specs roadmap (Calendar -> /calendar, Analytics -> /analytics)
   { label: 'Social accounts', icon: Share2, to: '/settings/social' },
 ]
 
