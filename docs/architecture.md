@@ -7,16 +7,17 @@ POST /jobs
     │
     ▼
 job_queue (asyncio.Queue)
-    │  (max_concurrent_jobs semaphore)
+    │
     ▼
 AsyncEventBus.publish(VIDEO_REQUESTED)
     │
     ▼
-Orchestrator
+Orchestrator  (max_concurrent_jobs semaphore per job; waiting jobs stay "pending")
     ├─ FOLDER_CREATED
     ├─ VIDEO_DOWNLOADED
     ├─ CHAPTERS_DETECTED
-    ├─ [per chapter/segment fan-out]
+    ├─ [per chapter/segment fan-out: TaskGroup, max_parallel_chapters;
+    │    first failing chapter cancels the rest → JOB_FAILED is the last event]
     │   ├─ CHAPTER_CLIP_EXTRACTED
     │   ├─ CHAPTER_TRANSCRIBED
     │   ├─ CAPTIONS_GENERATED

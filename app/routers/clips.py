@@ -25,7 +25,7 @@ async def list_clips(
 @router.patch("/{clip_id}/like")
 async def like_clip(clip_id: str, request: Request) -> dict[str, Any]:
     store = request.app.state.job_store
-    clip = await store.get_clip(clip_id)
+    clip = await store.get_clip(clip_id, include_retired=True)
     if clip is None:
         raise HTTPException(status_code=404, detail="clip not found")
     new_liked = not clip.get("liked", False)
@@ -42,7 +42,7 @@ async def like_clip(clip_id: str, request: Request) -> dict[str, Any]:
 @router.patch("/{clip_id}/dislike")
 async def dislike_clip(clip_id: str, request: Request) -> dict[str, Any]:
     store = request.app.state.job_store
-    clip = await store.get_clip(clip_id)
+    clip = await store.get_clip(clip_id, include_retired=True)
     if clip is None:
         raise HTTPException(status_code=404, detail="clip not found")
     new_disliked = not clip.get("disliked", False)
@@ -62,8 +62,7 @@ class RerenderRequest(BaseModel):
 
 @router.post("/{clip_id}/rerender", status_code=202)
 async def rerender_clip(clip_id: str, req: RerenderRequest, request: Request):
-    clips = await request.app.state.job_store.list_clips()
-    clip = next((c for c in clips if c.get("clip_id") == clip_id), None)
+    clip = await request.app.state.job_store.get_clip(clip_id)
     if clip is None:
         raise HTTPException(status_code=404, detail="clip not found")
     # Enqueue a re-render job via the job queue with the reframe setting in extra payload.

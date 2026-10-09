@@ -15,25 +15,27 @@ router = APIRouter(prefix="/clips", tags=["media"])
 _RANGE_RE = re.compile(r"bytes=(\d+)-(\d*)")
 
 
-def _resolve_clip_path(clips: list[dict[str, Any]], clip_id: str, field: str) -> Path:
-    """Look up a clip's file path from the store result; never accept client-supplied paths."""
-    for clip in clips:
-        if clip.get("clip_id") == clip_id:
-            raw = clip.get(field)
-            if not raw:
-                raise HTTPException(status_code=404, detail=f"{field} not available")
-            p = Path(raw).resolve()
-            # Guard against path traversal: must be an absolute path on the server
-            if not p.is_file():
-                raise HTTPException(status_code=404, detail="file not found")
-            return p
-    raise HTTPException(status_code=404, detail="clip not found")
+async def _resolve_clip_path(request: Request, clip_id: str, field: str) -> Path:
+    """Look up a clip's file path in the store; never accept client-supplied paths.
+
+    Retired clips 404, as they are hidden from ``list_clips``.
+    """
+    clip: dict[str, Any] | None = await request.app.state.job_store.get_clip(clip_id)
+    if clip is None:
+        raise HTTPException(status_code=404, detail="clip not found")
+    raw = clip.get(field)
+    if not raw:
+        raise HTTPException(status_code=404, detail=f"{field} not available")
+    p = Path(raw).resolve()
+    # Guard against path traversal: must be an absolute path on the server
+    if not p.is_file():
+        raise HTTPException(status_code=404, detail="file not found")
+    return p
 
 
 @router.get("/{clip_id}/video")
 async def stream_video(clip_id: str, request: Request):
-    clips = await request.app.state.job_store.list_clips()
-    path = _resolve_clip_path(clips, clip_id, "output_path")
+    path = await _resolve_clip_path(request, clip_id, "output_path")
 
     file_size = path.stat().st_size
     range_header = request.headers.get("range")
@@ -81,6 +83,5 @@ async def stream_video(clip_id: str, request: Request):
 
 @router.get("/{clip_id}/thumbnail")
 async def get_thumbnail(clip_id: str, request: Request):
-    clips = await request.app.state.job_store.list_clips()
-    path = _resolve_clip_path(clips, clip_id, "thumbnail_path")
+    path = await _resolve_clip_path(request, clip_id, "thumbnail_path")
     return FileResponse(str(path), media_type="image/jpeg")
