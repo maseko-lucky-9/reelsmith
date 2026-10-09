@@ -25,11 +25,11 @@ FastAPI backend with an asyncio orchestrator that turns a video URL into caption
 | Principle | Status | Enforcement today |
 |---|---|---|
 | I. One configuration surface | Holds (E1, E2 fixed in T001, T002) | `tests/unit/test_settings_module.py`, `test_settings_env_reads.py`, `test_skip_alembic.py` |
-| II. Orchestrator sequences; events report | Exception E6 (CLAUDE.md wording) | `tests/unit/test_event_bus.py`, `test_orchestrator.py` |
-| III. One ffmpeg | Exceptions E3, E4 | `tests/unit/test_no_moviepy_in_app.py`, `test_ffmpeg_tools.py` |
+| II. Orchestrator sequences; events report | Holds (E6 fixed in T005) | `tests/unit/test_event_bus.py`, `test_orchestrator.py` |
+| III. One ffmpeg | Holds (E3, E4 fixed in T003) | `tests/unit/test_no_moviepy_in_app.py`, `test_ffmpeg_tools.py`, `test_yt_dlp_bundled_ffmpeg.py`, `test_yt_dlp_metadata.py` |
 | IV. Offline, deterministic default tests | Holds | `pyproject.toml` `addopts`, `ci.yml` |
 | V. Additive migrations, both engines | Holds (model drift fixed in T018) | `docs/db-parity.md`, `tests/unit/test_alembic_parity.py`, `ci.yml` `alembic check` + offline `--sql` (Postgres) |
-| VI. Secrets | Exception E5 | `token_vault.py`; gitleaks not enforced |
+| VI. Secrets | Holds (E5 fixed in T004) | `token_vault.py`; gitleaks in `ci.yml` |
 | VII. React dashboard is the UI | Holds | `tests/unit/test_no_streamlit_in_app.py` |
 | VIII. Decisions recorded | Holds | `docs/decisions/` |
 
