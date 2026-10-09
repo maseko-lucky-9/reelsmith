@@ -36,6 +36,9 @@ class JobRecord(Base):
     auto_hook: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     brand_template_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     pipeline_options: Mapped[dict | None] = mapped_column(JSON, default=dict, nullable=True)
+    # Downloaded source video; kept so a single clip can be re-rendered.
+    # NULL for jobs created before this column existed.
+    video_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_now
     )

@@ -215,6 +215,7 @@ class SqlJobStore:
                 auto_hook=state.auto_hook,
                 brand_template_id=state.brand_template_id,
                 pipeline_options=state.pipeline_options.model_dump(),
+                video_path=state.video_path,
             )
             session.add(record)
             await session.commit()
@@ -261,6 +262,7 @@ class SqlJobStore:
             record.auto_hook = state.auto_hook
             record.brand_template_id = state.brand_template_id
             record.pipeline_options = state.pipeline_options.model_dump()
+            record.video_path = state.video_path
             await session.commit()
         return state
 
@@ -467,6 +469,7 @@ def _record_to_state(record: Any) -> JobState:
         auto_hook=getattr(record, "auto_hook", None) if getattr(record, "auto_hook", None) is not None else True,
         brand_template_id=getattr(record, "brand_template_id", None),
         pipeline_options=pipeline_opts,
+        video_path=getattr(record, "video_path", None),
     )
 
 
