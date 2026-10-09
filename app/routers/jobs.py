@@ -29,7 +29,8 @@ _YT_DLP_TIMEOUT_SECONDS = 12.0
 
 class CreateJobRequest(BaseModel):
     url: str
-    download_path: str
+    # Omitted by the UI: the server default keeps sources out of /tmp (T035).
+    download_path: str = Field(default_factory=lambda: settings.default_download_path)
     caption_format: str = Field(default_factory=lambda: settings.default_caption_format)
     target_aspect_ratio: float = Field(
         default_factory=lambda: settings.default_target_aspect_ratio
