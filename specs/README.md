@@ -42,7 +42,7 @@ From T017.
   - Table `clip_analytics_snapshots` (`ClipAnalyticsSnapshot`).
   - `web/src/routes/analytics.tsx`, hidden from the sidebar. It shows three counts computed from `GET /clips`, not analytics.
 - **Missing.** Nothing collects snapshots from a platform, no route exposes them, and `ANALYTICS_REFRESHED` is never emitted.
-- **Prerequisite.** Live publishing with real platform accounts: today only YouTube has a real adapter and `YTVIDEO_SOCIAL_PROVIDER` defaults to `stub` (FR-031). Each platform's insights API needs its own access.
+- **Prerequisite.** Live publishing with real platform accounts. Today `YTVIDEO_SOCIAL_PROVIDER` defaults to `stub`. Only YouTube (OAuth) and TikTok (cookie session or n8n sidecar) have live adapters; Instagram, LinkedIn and X fall back to the stub (`app/services/social/registry.py`; FR-031, FR-033). Each platform's insights API needs its own access.
 
 ### 004-share-links
 
@@ -84,7 +84,7 @@ From T017.
 
 From T017.
 
-- **User value.** Several people share one Reelsmith with roles (owner, member) and see only their workspace's jobs and clips.
+- **User value.** Several people share one Reelsmith with roles (`workspace_members.role`: owner, editor, viewer) and see only their workspace's jobs and clips.
 - **Already in the repo.**
   - Tables `workspaces` and `workspace_members` (`Workspace`, `WorkspaceMember`), with no service and no route.
   - `app/auth.py` `current_workspace_id`, which returns the user id, `local` in single-tenant mode.
@@ -96,4 +96,4 @@ From T017.
 ## Not on the roadmap
 
 - **Scheduled publishing** was dropped by owner decision (FR-032, T010). The `/calendar` page, `app/services/scheduler_service.py` and the `scheduled_posts` table remain; cleaning them up is task T045.
-- **Speaker diarisation and speaker-coloured captions** (W3.10) were deferred in ADR-003 §A.15 (`tasks/todo.md`).
+- **Speaker diarisation and speaker-coloured captions** (W3.10) were deferred: see `tasks/todo.md` and `docs/wave-3-gate.md`. ADR-003 only says speaker-coloured captions are paired with diarisation. The "ADR-003 §A.15" cited there does not exist in ADR-003.

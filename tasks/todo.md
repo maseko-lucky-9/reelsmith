@@ -176,6 +176,7 @@ The original acceptance criteria are preserved in `docs/archive/TASKS.md`.
 - **`pytest -q`.** 1968 passed, 21 deselected on `main` and on the branch (docs only).
 - **Links.** The markdown link check (`p8_links.py`, anchors included) found 79 relative links, 0 broken. It was mutation-checked on a probe tree with a broken file and a broken anchor.
 - **Secrets.** `gitleaks detect --log-opts origin/main..HEAD` found no leaks.
+- **Independent check.** A separate verifier pass re-checked about 170 of the added claims against the code. It found 2 false (in the roadmap stubs: TikTok's live adapters, the workspace roles), an ADR-003 "§A.15" reference that does not exist, and 3 imprecisions (one line number, the selection-rule order, the APScheduler mentions). All six were fixed before merge.
 
 **Left**
 

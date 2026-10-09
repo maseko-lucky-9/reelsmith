@@ -35,13 +35,17 @@
   `local_heuristic` is the real scorer. `stub` (`StubProposer`) returns one fixed 0 to 30 s segment and exists for tests. Any other value also enables discovery and falls back to the stub proposer (`get_segment_proposer`).
 - **Transcribe once.** `_discover_segments` (`:379`) extracts the whole source's 16 kHz wav and transcribes it once. It writes the words atomically to the `<source stem>.words.json` sidecar beside the source (`write_words_sidecar`, `segment_discovery.py:109`), scores candidate windows with `get_segment_proposer()` (the job's clip length range and prompt, the wav's RMS), then deletes the wav.
   - Each kept segment becomes a chapter. The chapter reuses the full-source words, rebased onto its own window (`rebase_words`, `:81`), instead of transcribing again.
-  - A later single-clip re-render reads the sidecar (`read_words_sidecar`, `orchestrator.py:559`).
-- **Selection.** `select_discovered` (`segment_discovery.py:184`) keeps highlights, not slices. It works greedily, one clip per step, in this order:
-  1. **Relative bar.** A segment must score at least `MIN_SCORE_RATIO = 0.6` of the best segment's score.
-  2. **Budget.** One clip per `SECONDS_PER_CLIP = 120` s of source, rounded half up, clamped to 1..`DEFAULT_MAX_CLIPS = 5` (`clip_budget`).
-  3. **Coverage cap.** The kept clips together may cover at most `MAX_COVERAGE = 0.5` of the source. The best segment is always kept, whatever its length.
-  4. **Near-duplicate penalty.** Each step takes the highest `score * (1 - redundancy)`, where `redundancy` is the largest share of a candidate's transcript content words already in one kept clip. A candidate at `REDUNDANCY_SKIP = 0.6` or above is skipped, and the adjusted score is held to the same bar.
-  5. **No overlap.** Clips do not overlap; touching ends are allowed.
+  - A later single-clip re-render reads the sidecar (`read_words_sidecar`, `orchestrator.py:560`).
+- **Selection.** `select_discovered` (`segment_discovery.py:184`) keeps highlights, not slices. It works greedily, one clip per step, under these rules:
+  - **Relative bar.** Applied first, as a pre-filter. A segment must score at least `MIN_SCORE_RATIO = 0.6` of the best segment's score.
+  - **Budget.** This is the loop limit: one clip per `SECONDS_PER_CLIP = 120` s of source, rounded half up, clamped to 1..`DEFAULT_MAX_CLIPS = 5` (`clip_budget`).
+  - **Per-step checks, in this order.** Each step drops a candidate that:
+    1. overlaps a kept clip (touching ends are allowed);
+    2. would take the kept clips past `MAX_COVERAGE = 0.5` of the source (the first pick is exempt, so the best segment is always kept);
+    3. is at `REDUNDANCY_SKIP = 0.6` or more redundant, where `redundancy` is the largest share of its transcript content words already in one kept clip;
+    4. has an adjusted score, `score * (1 - redundancy)`, below the same bar.
+
+    The highest adjusted score wins the step.
 - **Fallback.** A source shorter than the minimum clip, no kept segment, or any discovery error keeps the single "Full Video" chapter. The short-source and error cases emit `StageSkipped(segment_proposer, reason)`. Discovery never fails the job; cancellation propagates.
 - **Events and fields.** `SegmentsProposed` is emitted, then one `SegmentScored` per kept segment. The clip stores `virality_score`, `score_breakdown` and the proposer's `summary`.
 
