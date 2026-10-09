@@ -43,6 +43,37 @@ FLAT sum of half-open per-segment terms (ffmpeg's expression parser limits
 nesting depth, so a chain of nested ``if()`` cannot hold 64 keyframes). crop
 evaluates ``x`` for every frame, with ``t`` = seconds since the first kept
 frame (the chapter start), and rounds it down to an even column for 4:2:0.
+
+B-roll (``broll``): each insert is one more input, looped and cut to its
+window, shifted onto the clip's frame grid, cover-fitted to the canvas and
+overlaid on the composite BEFORE the captions, so captions stay on top::
+
+    -stream_loop -1 -t LEN -i insert                       (after captions)
+    [k:v] setpts=PTS-STARTPTS+T0/TB, fps=FPS,
+          scale=W:H:force_original_aspect_ratio=increase, crop=W:H,
+          setsar=1, format=yuv420p                       [brI]
+    [b][br0] overlay=0:0:enable='gte(t,LO)*lt(t,HI)':eof_action=pass  [b0]
+    [b0][br1] overlay=...                                 [b1]
+    [b1][2:v] overlay=CX:CY:eof_action=pass               [c]   captions
+
+* The pts trap: an input starts at ITS OWN pts 0, so without the shift a
+  window starting after the insert's length finds it already at EOF (nothing
+  shown with ``eof_action=pass``, a frozen last frame with the default
+  ``repeatlast``). ``T0`` is the time of the first output frame the window
+  covers, so the insert's frame 0 lands exactly there; ``fps`` puts every
+  insert frame on the clip's grid, so overlay's default "last frame <= t"
+  sync is exact (no ``ts_sync_mode=nearest`` needed).
+* Window: output frame k shows the insert iff start <= k/FPS < start +
+  duration, decided in exact rationals. The gate's bounds ``LO``/``HI`` sit
+  half a frame before the first covered and the first uncovered frame, so
+  a floating-point ``t`` can never flip an edge frame. ``LEN`` is exactly
+  the covered span (the fps filter's EOF rounding fills its last frame), so
+  a short insert loops over the whole window, and ``eof_action=pass``
+  stops anything lingering after it.
+* Grid and audio: overlay emits one frame per MAIN frame with the main
+  frame's timestamp (the inserts never drive output frames), so the settb
+  grid, frame count and duration are those of the render without B-roll.
+  Insert audio is never mapped (only ``-map 0:a:0?``).
 """
 
 import logging
@@ -249,6 +280,130 @@ def _pan_chain(geometry: clip_service.ReelGeometry, track: CropTrack) -> str:
     )
 
 
+# ── B-roll inserts ────────────────────────────────────────────────────────────
+
+MAX_BROLL_INSERTS = 4
+
+
+@dataclass(frozen=True)
+class BrollInsert:
+    """A clip shown full-canvas over ``[start, start + duration)``.
+
+    Times are seconds from the clip start (output t=0) and are compared at
+    microsecond precision. The insert plays from its own first frame, loops
+    if it is shorter than ``duration`` and is cover-fitted to the canvas; its
+    audio is never used.
+    """
+
+    path: str
+    start: float
+    duration: float
+
+
+def _exact(seconds: float) -> Fraction:
+    """``seconds`` rounded to microseconds, as an exact rational."""
+    return Fraction(f"{seconds:.{_TIME_DECIMALS}f}")
+
+
+def _normalise_broll(
+    broll: Sequence[BrollInsert] | None, clip_duration: float
+) -> tuple[BrollInsert, ...]:
+    """Timing rules only (no file access): rounded inserts sorted by start."""
+    if not broll:
+        return ()
+    if len(broll) > MAX_BROLL_INSERTS:
+        raise ValueError(
+            f"at most {MAX_BROLL_INSERTS} B-roll inserts per clip, got {len(broll)}"
+        )
+    inserts = []
+    for insert in broll:
+        if not (math.isfinite(insert.start) and math.isfinite(insert.duration)):
+            raise ValueError(f"B-roll insert {insert.path}: times are not finite")
+        start = round(insert.start, _TIME_DECIMALS)
+        duration = round(insert.duration, _TIME_DECIMALS)
+        if duration <= 0:
+            raise ValueError(
+                f"B-roll insert {insert.path}: duration must be > 0, got {duration}"
+            )
+        if start < 0:
+            raise ValueError(
+                f"B-roll insert {insert.path}: start must be >= 0, got {start}"
+            )
+        if _exact(start) + _exact(duration) > _exact(clip_duration):
+            raise ValueError(
+                f"B-roll insert {insert.path}: ends at {start + duration:g} s, "
+                f"past the clip end ({clip_duration:g} s)"
+            )
+        inserts.append(BrollInsert(insert.path, start, duration))
+    inserts.sort(key=lambda i: (i.start, i.duration))
+    for a, b in zip(inserts, inserts[1:]):
+        if _exact(a.start) + _exact(a.duration) > _exact(b.start):
+            raise ValueError(
+                f"B-roll inserts overlap: {a.path} [{a.start:g}, "
+                f"{a.start + a.duration:g}) and {b.path} from {b.start:g}"
+            )
+    return tuple(inserts)
+
+
+def validate_broll(
+    broll: Sequence[BrollInsert] | None, clip_duration: float
+) -> tuple[BrollInsert, ...]:
+    """Check B-roll inserts against a clip of ``clip_duration`` seconds.
+
+    Every file must exist; each window needs ``duration > 0``, ``start >= 0``
+    and ``start + duration <= clip_duration``; windows may touch but not
+    overlap; at most ``MAX_BROLL_INSERTS``. Returns the inserts sorted by
+    start (``()`` for ``None`` or empty). Raises ``ValueError``.
+    """
+    inserts = _normalise_broll(broll, clip_duration)
+    for insert in inserts:
+        if not Path(insert.path).is_file():
+            raise ValueError(f"B-roll insert {insert.path} does not exist")
+    return inserts
+
+
+def _broll_frames(insert: BrollInsert, fps: Fraction) -> tuple[int, int]:
+    """Output frames ``[first, end)`` the insert covers: every k with
+    ``start <= k / fps < start + duration``, in exact arithmetic."""
+    t0 = _exact(insert.start)
+    return math.ceil(t0 * fps), math.ceil((t0 + _exact(insert.duration)) * fps)
+
+
+def _broll_input(insert: BrollInsert, fps: Fraction) -> list[str]:
+    """Looped input cut to exactly the span of output frames it covers."""
+    first, end = _broll_frames(insert, fps)
+    length = float((end - first) / fps)
+    return ["-stream_loop", "-1", "-t", f"{length:.6f}", "-i", str(insert.path)]
+
+
+def _broll_filters(
+    insert: BrollInsert,
+    index: int,
+    n: int,
+    under: str,
+    fps: Fraction,
+    geometry: clip_service.ReelGeometry,
+) -> list[str]:
+    """Insert chain ``[brN]`` and its overlay on ``[under]`` into ``[bN]``."""
+    canvas_w, canvas_h = geometry.canvas_size
+    first, end = _broll_frames(insert, fps)
+    offset = Fraction(first) / fps
+    # gate bounds half a frame before the first covered / uncovered frame
+    lo = max(Fraction(0), (first - Fraction(1, 2)) / fps)
+    hi = (end - Fraction(1, 2)) / fps
+
+    def t_(v: Fraction) -> str:
+        return _num(float(v), _TIME_DECIMALS)
+
+    return [
+        f"[{index}:v]setpts=PTS-STARTPTS+{t_(offset)}/TB,fps={_rate(fps)},"
+        f"scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=increase,"
+        f"crop={canvas_w}:{canvas_h},setsar=1,format=yuv420p[br{n}]",
+        f"[{under}][br{n}]overlay=x=0:y=0:"
+        f"enable='gte(t,{t_(lo)})*lt(t,{t_(hi)})':eof_action=pass[b{n}]",
+    ]
+
+
 def background_still(
     src: str,
     start: float,
@@ -280,12 +435,19 @@ def build_reel_argv(
     captions: caption_track.CaptionTrack | None,
     captions_dir: str | None,
     crop_track: CropTrack | None = None,
+    broll: Sequence[BrollInsert] | None = None,
 ) -> list[str]:
     """ffmpeg argv for one reel (see module docstring for the graph).
 
     ``crop_track`` replaces the letterboxed inset with the moving full-bleed
     crop; ``None`` leaves the graph byte-for-byte as before.
+
+    ``broll`` adds one looped input per insert (after the captions input) and
+    overlays them, in start order, between the composite and the captions.
+    Timing is validated here (``ValueError``) but files are not touched;
+    ``None`` or empty leaves the argv byte-for-byte as before.
     """
+    inserts = _normalise_broll(broll, duration)
     canvas_w, _canvas_h = geometry.canvas_size
     fps = grid_rate(fps)
     timebase = math.lcm(fps.numerator, 1000)
@@ -310,12 +472,20 @@ def build_reel_argv(
             "-f", "concat", "-safe", "0",
             "-i", str(Path(captions_dir) / captions.list_name),
         ]  # fmt: skip
+    composite = "b"
+    for n, insert in enumerate(inserts):
+        index = inputs.count("-i")
+        inputs += _broll_input(insert, fps)
+        graph += _broll_filters(insert, index, n, composite, fps, geometry)
+        composite = f"b{n}"
+    if captions is not None:
         graph.append(
-            f"[b][2:v]overlay=x={captions.x}:y={captions.y}:eof_action=pass[c]"
+            f"[{composite}][2:v]overlay=x={captions.x}:y={captions.y}"
+            ":eof_action=pass[c]"
         )
         last = "c"
     else:
-        last = "b"
+        last = composite
     graph.append(f"[{last}]{_EVEN_CROP}[v]")
     return [
         "ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
@@ -372,6 +542,7 @@ def render_clip(
     word_timings=None,
     caption_words_per_segment: int = 3,
     crop_track: CropTrack | None = None,
+    broll: Sequence[BrollInsert] | None = None,
 ) -> str:
     """Render ``[start, end)`` of ``video_path`` to ``output_path``.
 
@@ -384,6 +555,11 @@ def render_clip(
     source over time instead of letterboxing it: keyframes are
     ``(seconds from start, crop left edge in source px)``, see
     ``crop_x_expr``. The output size, frame grid and audio are unchanged.
+
+    ``broll`` (reel renders only) shows each ``BrollInsert`` full-canvas over
+    its window, under the captions and over the letterbox or pan composite;
+    see ``validate_broll`` for the rules (checked before any work starts).
+    The output size, frame grid and audio are unchanged.
     """
     log.info(
         "Rendering clip %s [%.3f, %.3f] -> %s", video_path, start, end, output_path
@@ -391,6 +567,7 @@ def render_clip(
     if start < 0 or end <= start:
         raise ValueError(f"invalid render window start={start} end={end}")
     duration = end - start
+    inserts = validate_broll(broll, duration)
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     fps = ffmpeg_tools.fps(video_path)
 
@@ -398,6 +575,10 @@ def render_clip(
         if crop_track is not None:
             raise ValueError(
                 "crop_track needs a reel render (word_timings or captions_path)"
+            )
+        if inserts:
+            raise ValueError(
+                "broll needs a reel render (word_timings or captions_path)"
             )
         log.info("No captions provided; rendering clip without subtitles")
         argv = build_trim_argv(
@@ -441,6 +622,7 @@ def render_clip(
             captions=track,
             captions_dir=work,
             crop_track=crop_track,
+            broll=inserts,
         )
         _run_atomically(argv, output_path)
     log.info("Render complete  output=%s", output_path)
