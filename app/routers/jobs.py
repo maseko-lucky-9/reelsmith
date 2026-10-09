@@ -179,7 +179,13 @@ async def get_job(job_id: str, request: Request) -> JobState:
         raise HTTPException(status_code=404, detail=f"job not found: {job_id}") from e
 
 
-_TERMINAL_TYPES = {EventType.JOB_COMPLETED, EventType.JOB_FAILED}
+# The stream ends after one of these. A failed reprompt ends with
+# RepromptFailed (the job stays completed, so no JobCompleted/JobFailed).
+_TERMINAL_TYPES = {
+    EventType.JOB_COMPLETED,
+    EventType.JOB_FAILED,
+    EventType.REPROMPT_FAILED,
+}
 
 
 @router.get("/{job_id}/events")

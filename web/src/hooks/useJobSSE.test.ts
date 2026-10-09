@@ -179,7 +179,8 @@ describe('useJobSSE — named events (real browser delivery)', () => {
     expect(keys.filter((k) => k === JSON.stringify(['clips', JOB])).length).toBe(1)
   })
 
-  it.each(['JobCompleted', 'JobFailed'])('%s invalidates job, clips AND the jobs list, then closes', (type) => {
+  // RepromptFailed: a failed reprompt ends the stream (the job stays completed).
+  it.each(['JobCompleted', 'JobFailed', 'RepromptFailed'])('%s invalidates job, clips AND the jobs list, then closes', (type) => {
     const { qc, invalidate } = setup(JOB)
     const es = latestEs()
     act(() => emit(es, type, 'ev-term'))

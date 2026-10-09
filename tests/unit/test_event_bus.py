@@ -81,3 +81,56 @@ async def test_job_id_filter_only_delivers_matching_job():
     await bus.publish(Event(type=EventType.JOB_COMPLETED, job_id="j1"))
     await asyncio.wait_for(task, timeout=1.0)
     assert [e.job_id for e in received] == ["j1", "j1"]
+
+
+async def _replayed(bus: AsyncEventBus, job_id: str) -> list[Event]:
+    """The events a new subscriber to ``job_id`` gets from the replay history."""
+    received: list[Event] = []
+
+    async def consume():
+        async for event in bus.subscribe(job_id=job_id):
+            received.append(event)
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    return received
+
+
+async def test_forget_drops_only_that_jobs_replay_history():
+    """A reprompt forgets the job's old run, so a new SSE subscriber is not
+    handed the old JobCompleted (and closed) before the reprompt's events."""
+    bus = AsyncEventBus()
+    await bus.publish(Event(type=EventType.FOLDER_CREATED, job_id="j1"))
+    await bus.publish(Event(type=EventType.JOB_COMPLETED, job_id="j1"))
+    other = Event(type=EventType.JOB_COMPLETED, job_id="j2")
+    await bus.publish(other)
+
+    assert await bus.forget("j1") == 2
+
+    assert await _replayed(bus, "j1") == []
+    assert await _replayed(bus, "j2") == [other]
+
+
+async def test_forget_keeps_live_subscribers_and_later_events():
+    bus = AsyncEventBus()
+    await bus.publish(Event(type=EventType.JOB_COMPLETED, job_id="j1"))
+    received: list[Event] = []
+
+    async def consume():
+        async for event in bus.subscribe(job_id="j1"):
+            received.append(event)
+            if len(received) == 2:
+                return
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0)
+    await bus.forget("j1")
+    later = Event(type=EventType.CLIP_RENDERED, job_id="j1")
+    await bus.publish(later)
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert received[1] is later
+    assert await _replayed(bus, "j1") == [later]
