@@ -196,7 +196,7 @@ A creator exports a clip for Premiere or DaVinci, or downloads many clips with a
 | ID | Requirement | Status | Evidence |
 |---|---|---|---|
 | FR-060 | The system MUST require an API key on every route when `YTVIDEO_REQUIRE_AUTH=true`. | Implemented (API routes only: `/docs`, `/redoc`, `/openapi.json` and the `serve_frontend` static mount are not API routes, so the app-level `dependencies` in `create_app` do not apply and they stay open) | `tests/contract/test_auth.py`: `/health`, `/clips`, `/jobs` return 401 with no key or a wrong key, 200 with `Authorization: Bearer <key>` or `?token=<key>`; open when auth is off; the docs bypass is pinned. The static mount bypass is from reading `app/main.py:242-245`, not tested. |
-| FR-061 | The system MUST persist state in SQLite or PostgreSQL via Alembic migrations. | Implemented | `docs/db-parity.md`; 16 revisions in `alembic/versions/` |
+| FR-061 | The system MUST persist state in SQLite or PostgreSQL via Alembic migrations. | Implemented | `docs/db-parity.md`; 16 revisions in `alembic/versions/`. Every `clips` column the pipeline writes round-trips through both job stores (T029: the SQL store used to drop `ai_hook_text`, `ai_hook_audio_path`, `broll_assets`, `caption_style`, `captions_burnt_path` and `retired`); `tests/unit/test_job_store_clip_roundtrip.py` on SQLite. `JobStore.retire_clips(job_id, clip_ids)` flags a job's clips retired and returns how many it retired; it deletes no files (`tests/unit/test_job_store_retire_clips.py`). |
 | FR-062 | The system MUST serve the React UI when `YTVIDEO_SERVE_FRONTEND=true`. | Untested | `app/main.py`; no backend test covers `serve_frontend` (the Vitest suite tests components only) |
 
 ### Scaffolded or missing surfaces
