@@ -79,7 +79,7 @@ The `/jobs/$jobId` page renders a per-stage timeline while the pipeline runs. St
 | Video editing | ffmpeg (bundled via imageio-ffmpeg) + PyAV |
 | Transcription | faster-whisper (word-level) |
 | Segment scoring | NumPy + standard library (wav RMS, word timings); VADER and spaCy optional |
-| Reframe | YuNet face detector on onnxruntime (already a dependency); the 232 KB model is downloaded on first `face_track` use and SHA-256 checked ([ADR-005](docs/decisions/005-face-track-reframe.md)) |
+| Reframe | YuNet face detector on onnxruntime (already a dependency); the 232 KB model is downloaded on first `face_track` use and SHA-256 checked ([ADR-006](docs/decisions/006-face-track-reframe.md)) |
 | Captions | pysrt / webvtt-py |
 | Subtitle images | Pillow + NumPy |
 | UI | React 19 + Vite 8 + shadcn/ui |
