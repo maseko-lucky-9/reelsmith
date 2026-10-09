@@ -41,6 +41,21 @@ jobs:
           YTVIDEO_JOB_STORE: sql
         run: alembic upgrade head
 
+      # Models must equal the migrated schema (T018): any drift fails CI.
+      - name: Check models match migrations
+        env:
+          YTVIDEO_DB_URL: postgresql+asyncpg://reelsmith:reelsmith@localhost:5432/reelsmith
+          YTVIDEO_JOB_STORE: sql
+        run: alembic check
+
+      # Offline mode renders every revision (incl. data migrations) as SQL
+      # for the Postgres dialect without touching the database.
+      - name: Render migrations as offline SQL
+        env:
+          YTVIDEO_DB_URL: postgresql+asyncpg://reelsmith:reelsmith@localhost:5432/reelsmith
+          YTVIDEO_JOB_STORE: sql
+        run: alembic upgrade head --sql > /dev/null
+
       # faster-whisper `base` (~145 MB) for tests/integration/test_whisper_real.py
       - name: Cache Hugging Face models
         uses: actions/cache@v6
