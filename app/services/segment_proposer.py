@@ -1,4 +1,5 @@
 """Clip segment proposer with heuristic virality scoring."""
+
 from __future__ import annotations
 
 import json
@@ -43,14 +44,22 @@ class SegmentProposerProtocol(Protocol):
 
 
 class StubProposer:
-    def propose(self, word_timings, audio_path, chapters, duration) -> list[ProposedSegment]:
-        return [ProposedSegment(start=0.0, end=min(30.0, duration), title="Stub Clip", score=42)]
+    def propose(
+        self, word_timings, audio_path, chapters, duration
+    ) -> list[ProposedSegment]:
+        return [
+            ProposedSegment(
+                start=0.0, end=min(30.0, duration), title="Stub Clip", score=42
+            )
+        ]
 
 
 class LocalHeuristicProposer:
     """Scores candidate windows using five local heuristic features."""
 
-    def __init__(self, weights: dict[str, float], min_secs: int = 20, max_secs: int = 60) -> None:
+    def __init__(
+        self, weights: dict[str, float], min_secs: int = 20, max_secs: int = 60
+    ) -> None:
         self.weights = weights
         self.min_secs = min_secs
         self.max_secs = max_secs
@@ -100,14 +109,16 @@ class LocalHeuristicProposer:
             score_raw = sum(breakdown[k] * self.weights.get(k, 0.0) for k in breakdown)
             score = min(99, max(0, round(score_raw * 99)))
 
-            results.append(ProposedSegment(
-                start=start,
-                end=end,
-                title=_extract_title(text),
-                summary=text[:200],
-                score=score,
-                score_breakdown={k: round(v, 3) for k, v in breakdown.items()},
-            ))
+            results.append(
+                ProposedSegment(
+                    start=start,
+                    end=end,
+                    title=_extract_title(text),
+                    summary=text[:200],
+                    score=score,
+                    score_breakdown={k: round(v, 3) for k, v in breakdown.items()},
+                )
+            )
 
         results.sort(key=lambda s: s.score, reverse=True)
         return results
@@ -133,7 +144,6 @@ class LocalHeuristicProposer:
 
     def _load_rms(self, audio_path: str):
         import librosa  # type: ignore[import]
-        import numpy as np
 
         y, sr = librosa.load(audio_path, sr=None, mono=True)
         rms = librosa.feature.rms(y=y)[0]
@@ -142,7 +152,8 @@ class LocalHeuristicProposer:
 
     def _vad_speech_ratio(self, audio_path: str) -> dict[float, float]:
         import webrtcvad  # type: ignore[import]
-        import wave, array as arr
+        import wave
+        import array as arr
 
         vad = webrtcvad.Vad(2)
 
@@ -169,7 +180,11 @@ class LocalHeuristicProposer:
         first_3s = [w for w in words if getattr(w, "start", 0) - start <= 3]
         first_text = " ".join(getattr(w, "word", str(w)) for w in first_3s).lower()
 
-        patterns = [r"\?", r"^(how|why|what|when|who|never|always|stop|start|you need)", r"\d+"]
+        patterns = [
+            r"\?",
+            r"^(how|why|what|when|who|never|always|stop|start|you need)",
+            r"\d+",
+        ]
         for p in patterns:
             if re.search(p, first_text):
                 score += 0.33
@@ -178,15 +193,20 @@ class LocalHeuristicProposer:
             frames, rmses = rms
             mask = (frames >= start) & (frames <= start + 3)
             if mask.any():
-                score = (score + float(rmses[mask].mean()) / (float(rmses.max()) + 1e-9)) / 2
+                score = (
+                    score + float(rmses[mask].mean()) / (float(rmses.max()) + 1e-9)
+                ) / 2
 
         return min(1.0, score)
 
     def _emotional_flow(self, text: str) -> float:
         try:
             from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer  # type: ignore[import]
+
             analyzer = SentimentIntensityAnalyzer()
-            sentences = [s.strip() for s in re.split(r"[.!?]", text) if len(s.strip()) > 3]
+            sentences = [
+                s.strip() for s in re.split(r"[.!?]", text) if len(s.strip()) > 3
+            ]
             if not sentences:
                 return 0.0
             scores = [abs(analyzer.polarity_scores(s)["compound"]) for s in sentences]
@@ -199,11 +219,14 @@ class LocalHeuristicProposer:
     def _perceived_value(self, text: str) -> float:
         try:
             import spacy  # type: ignore[import]
+
             nlp = spacy.load("en_core_web_sm")
             doc = nlp(text[:500])
             entities = len(doc.ents)
             numbers = sum(1 for t in doc if t.like_num)
-            how_to = len(re.findall(r"\b(how|steps?|tips?|ways?|methods?)\b", text.lower()))
+            how_to = len(
+                re.findall(r"\b(how|steps?|tips?|ways?|methods?)\b", text.lower())
+            )
             total = len(doc) or 1
             return min(1.0, (entities + numbers * 2 + how_to * 3) / (total * 0.3))
         except Exception:  # noqa: BLE001
@@ -236,15 +259,38 @@ def _variance(vals: list[float]) -> float:
 
 def _extract_title(text: str) -> str:
     sentences = [s.strip() for s in re.split(r"[.!?]", text) if s.strip()]
-    return (sentences[0][:80] if sentences else text[:80])
+    return sentences[0][:80] if sentences else text[:80]
 
 
 def filter_word_timings(word_timings: list[Any], start: float, end: float) -> list[Any]:
     """Return word timings whose midpoint falls within [start, end]."""
-    return [
-        w for w in word_timings
-        if start <= getattr(w, "start", 0) < end
-    ]
+    return [w for w in word_timings if start <= getattr(w, "start", 0) < end]
+
+
+def select_segments(
+    segments: list[ProposedSegment], max_clips: int, min_score: int
+) -> list[ProposedSegment]:
+    """Pick the best non-overlapping segments, returned in start-time order.
+
+    Segments scoring below ``min_score`` are dropped (``score == min_score`` is
+    kept). The rest are taken greedily by score (ties: earliest start), and a
+    segment that overlaps one already picked is skipped. Touching segments
+    (one's ``end`` equals the other's ``start``) do not overlap.
+    """
+    if max_clips <= 0:
+        return []
+    ranked = sorted(
+        (s for s in segments if s.score >= min_score),
+        key=lambda s: (-s.score, s.start, s.end),
+    )
+    picked: list[ProposedSegment] = []
+    for seg in ranked:
+        if len(picked) >= max_clips:
+            break
+        if any(seg.start < p.end and p.start < seg.end for p in picked):
+            continue
+        picked.append(seg)
+    return sorted(picked, key=lambda s: (s.start, s.end))
 
 
 def get_segment_proposer() -> SegmentProposerProtocol:
@@ -256,6 +302,7 @@ def get_segment_proposer() -> SegmentProposerProtocol:
     if settings.segment_provider == "local_heuristic":
         try:
             import librosa  # noqa: F401  # type: ignore[import]
+
             return LocalHeuristicProposer(
                 weights=settings.score_weights_dict(),
                 min_secs=settings.target_clip_seconds_min,
