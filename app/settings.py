@@ -25,7 +25,8 @@ def _default_font_path() -> str | None:
 
 # Anchor .env to the project root (app/settings.py → app/ → project root),
 # so the path is CWD-independent regardless of where uvicorn is launched from.
-_ENV_FILE = str(Path(__file__).resolve().parent.parent / ".env")
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_ENV_FILE = str(_PROJECT_ROOT / ".env")
 
 
 class Settings(BaseSettings):
@@ -53,7 +54,10 @@ class Settings(BaseSettings):
     max_thread_workers: int = 4
 
     # ── Pipeline defaults ─────────────────────────────────────────────────
-    default_download_path: str = "/tmp/yt"
+    # Downloaded and uploaded source videos (kept for re-render) and job
+    # output folders. Not under /tmp: macOS clears it. Gitignored; created on
+    # first use.
+    default_download_path: str = str(_PROJECT_ROOT / "data" / "downloads")
     default_caption_format: str = "srt"
     default_target_aspect_ratio: float = 9 / 16
     default_transcription_language: str = "en-US"
