@@ -102,7 +102,8 @@ async def rerender_clip(
         "target_aspect_ratio": job.target_aspect_ratio,
         "language": job.language,
         "pipeline_options": job.pipeline_options.model_dump(),
-        # Passed through for API compatibility; reframe is unwired (task T012).
+        # Passed through for API compatibility and ignored: the reframe
+        # provider is the server's YTVIDEO_REFRAME_PROVIDER (FR-010).
         "reframe_provider": req.reframe_provider,
         "regenerate_copy": req.regenerate_copy,
     }
