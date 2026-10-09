@@ -1,0 +1,236 @@
+"""Pure helpers behind clip discovery for sources without chapters (FR-009)."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from app.domain.models import PipelineOptions
+from app.services import segment_discovery as sd
+from app.services.segment_proposer import ProposedSegment
+from app.services.transcription_service import WordTiming
+
+
+# ── rebase_words ──────────────────────────────────────────────────────────────
+
+
+def test_rebase_words_shifts_into_window_time():
+    words = [WordTiming("a", 10.0, 10.5), WordTiming("b", 11.0, 11.4)]
+
+    rebased = sd.rebase_words(words, 10.0, 20.0)
+
+    assert [(w.word, w.start, w.end) for w in rebased] == [
+        ("a", 0.0, 0.5),
+        ("b", 1.0, pytest.approx(1.4)),
+    ]
+
+
+def test_rebase_words_drops_words_outside_the_window():
+    words = [
+        WordTiming("before", 1.0, 2.0),
+        WordTiming("touching-start", 3.0, 5.0),  # ends exactly at the window start
+        WordTiming("inside", 6.0, 7.0),
+        WordTiming("touching-end", 9.0, 9.5),  # starts exactly at the window end
+        WordTiming("after", 12.0, 13.0),
+    ]
+
+    rebased = sd.rebase_words(words, 5.0, 9.0)
+
+    assert [w.word for w in rebased] == ["inside"]
+
+
+def test_rebase_words_clamps_words_straddling_the_edges():
+    words = [WordTiming("left", 4.5, 5.5), WordTiming("right", 8.5, 9.8)]
+
+    rebased = sd.rebase_words(words, 5.0, 9.0)
+
+    assert [(w.word, w.start, w.end) for w in rebased] == [
+        ("left", 0.0, 0.5),
+        ("right", 3.5, 4.0),
+    ]
+    assert all(0.0 <= w.start <= w.end <= 4.0 for w in rebased)
+
+
+def test_rebase_words_accepts_dicts_and_leaves_the_input_alone():
+    words = [{"word": "hi", "start": 2.0, "end": 2.5}]
+
+    rebased = sd.rebase_words(words, 1.0, 3.0)
+
+    assert [(w.word, w.start, w.end) for w in rebased] == [("hi", 1.0, 1.5)]
+    assert words == [{"word": "hi", "start": 2.0, "end": 2.5}]
+
+
+# ── words sidecar ─────────────────────────────────────────────────────────────
+
+
+def test_sidecar_path_sits_next_to_the_source(tmp_path: Path):
+    video = tmp_path / "my.talk.mp4"
+
+    assert sd.words_sidecar_path(str(video)) == tmp_path / "my.talk.words.json"
+
+
+def test_sidecar_round_trip_is_a_list_of_word_dicts(tmp_path: Path):
+    video = tmp_path / "video.mp4"
+    words = [WordTiming("hello", 0.0, 0.4), WordTiming("world", 0.5, 0.9)]
+
+    path = sd.write_words_sidecar(str(video), words)
+
+    assert json.loads(path.read_text()) == [
+        {"word": "hello", "start": 0.0, "end": 0.4},
+        {"word": "world", "start": 0.5, "end": 0.9},
+    ]
+    assert sd.read_words_sidecar(str(video)) == words
+    # Atomic write: only the sidecar is left behind.
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["video.words.json"]
+
+
+def test_read_sidecar_missing_or_corrupt_is_none(tmp_path: Path):
+    video = tmp_path / "video.mp4"
+    assert sd.read_words_sidecar(str(video)) is None
+
+    sd.words_sidecar_path(str(video)).write_text("{not json")
+    assert sd.read_words_sidecar(str(video)) is None
+
+    sd.words_sidecar_path(str(video)).write_text('{"word": "x"}')
+    assert sd.read_words_sidecar(str(video)) is None
+
+
+# ── relative min score (calibration) ──────────────────────────────────────────
+
+
+def _seg(score: int, start: float = 0.0) -> ProposedSegment:
+    return ProposedSegment(start=start, end=start + 30.0, score=score)
+
+
+def test_relative_min_score_is_forty_percent_of_the_best():
+    # PR #43's heuristic scores land around 5-40 on real input; a fixed bar
+    # such as 50 would drop every one of these.
+    segments = [_seg(38), _seg(30), _seg(14), _seg(9)]
+
+    assert sd.relative_min_score(segments) == 15  # floor(0.4 * 38)
+
+
+def test_relative_min_score_has_a_floor_of_zero():
+    assert sd.relative_min_score([]) == 0
+    assert sd.relative_min_score([_seg(0), _seg(0)]) == 0
+
+
+def test_select_discovered_keeps_low_but_relatively_strong_segments():
+    segments = [
+        _seg(38, 0.0),
+        _seg(30, 40.0),
+        _seg(14, 80.0),  # 37% of the best: dropped
+        _seg(16, 120.0),  # 42% of the best: kept
+    ]
+
+    picked = sd.select_discovered(segments, max_clips=5)
+
+    assert [s.score for s in picked] == [38, 30, 16]
+
+
+def test_select_discovered_honours_max_clips():
+    segments = [_seg(20 + i, 40.0 * i) for i in range(8)]
+
+    picked = sd.select_discovered(segments, max_clips=sd.DEFAULT_MAX_CLIPS)
+
+    assert len(picked) == 5
+    assert [s.score for s in picked] == [23, 24, 25, 26, 27]
+
+
+# ── clip length range ─────────────────────────────────────────────────────────
+
+
+def test_clip_length_range_defaults_to_settings(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(sd.settings, "target_clip_seconds_min", 20)
+    monkeypatch.setattr(sd.settings, "target_clip_seconds_max", 60)
+
+    assert sd.clip_length_range(PipelineOptions()) == (20, 60)
+
+
+def test_clip_length_range_prefers_the_job_options(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(sd.settings, "target_clip_seconds_min", 20)
+    monkeypatch.setattr(sd.settings, "target_clip_seconds_max", 60)
+
+    opts = PipelineOptions(target_length_min_seconds=15, target_length_max_seconds=45)
+    assert sd.clip_length_range(opts) == (15, 45)
+    # A min above the configured max widens the max instead of inverting.
+    assert sd.clip_length_range(PipelineOptions(target_length_min_seconds=90)) == (
+        90,
+        90,
+    )
+
+
+# ── chapters from segments ────────────────────────────────────────────────────
+
+
+def test_segments_to_chapters_matches_the_chapter_shape():
+    segments = [
+        ProposedSegment(
+            start=10.0,
+            end=40.0,
+            title="Why it works",
+            summary="s1",
+            score=31,
+            score_breakdown={"hook": 0.5},
+        ),
+        ProposedSegment(start=50.0, end=95.0, title="", summary="s2", score=20),
+    ]
+
+    chapters = sd.segments_to_chapters(segments, safe_end=90.0)
+
+    assert chapters == [
+        {
+            "index": 0,
+            "title": "Why it works",
+            "start": 10.0,
+            "end": 40.0,
+            "virality_score": 31,
+            "score_breakdown": {"hook": 0.5},
+            "summary": "s1",
+        },
+        {
+            "index": 1,
+            "title": "Clip 2",
+            "start": 50.0,
+            "end": 90.0,
+            "virality_score": 20,
+            "score_breakdown": {},
+            "summary": "s2",
+        },
+    ]
+
+
+def test_segments_to_chapters_drops_windows_past_the_safe_end():
+    segments = [
+        ProposedSegment(start=0.0, end=30.0, score=10),
+        ProposedSegment(start=89.8, end=120.0, score=12),
+    ]
+
+    chapters = sd.segments_to_chapters(segments, safe_end=90.0)
+
+    assert [(c["index"], c["start"], c["end"]) for c in chapters] == [(0, 0.0, 30.0)]
+
+
+# ── proposer factory honours the job's clip length range ─────────────────────
+
+
+def test_get_segment_proposer_takes_the_clip_length_range(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from app.services.segment_proposer import (
+        LocalHeuristicProposer,
+        get_segment_proposer,
+    )
+
+    monkeypatch.setattr(sd.settings, "segment_provider", "local_heuristic")
+    monkeypatch.setattr(sd.settings, "target_clip_seconds_min", 20)
+    monkeypatch.setattr(sd.settings, "target_clip_seconds_max", 60)
+
+    default = get_segment_proposer()
+    custom = get_segment_proposer(min_secs=15, max_secs=45)
+
+    assert isinstance(custom, LocalHeuristicProposer)
+    assert (default.min_secs, default.max_secs) == (20, 60)
+    assert (custom.min_secs, custom.max_secs) == (15, 45)

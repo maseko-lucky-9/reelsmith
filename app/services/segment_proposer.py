@@ -554,14 +554,18 @@ def select_segments(
     return sorted(picked, key=lambda s: (s.start, s.end))
 
 
-def get_segment_proposer() -> SegmentProposerProtocol:
+def get_segment_proposer(
+    *, min_secs: int | None = None, max_secs: int | None = None
+) -> SegmentProposerProtocol:
+    """The configured proposer; ``min_secs``/``max_secs`` override the
+    ``target_clip_seconds_*`` settings (a job's clip length range)."""
     from app.settings import settings
 
     if settings.segment_provider == "local_heuristic":
         return LocalHeuristicProposer(
             weights=settings.score_weights_dict(),
-            min_secs=settings.target_clip_seconds_min,
-            max_secs=settings.target_clip_seconds_max,
+            min_secs=min_secs or settings.target_clip_seconds_min,
+            max_secs=max_secs or settings.target_clip_seconds_max,
         )
     # "stub", and "chapter" mode (proposer not used in that path)
     return StubProposer()
