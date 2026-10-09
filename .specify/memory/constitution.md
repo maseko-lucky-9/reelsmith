@@ -57,7 +57,6 @@ Source: `docs/decisions/001–004`, `CLAUDE.md`.
 | E3 | III | `app/services/platforms/_yt_dlp_base.py:17` | Format `bestvideo+bestaudio` makes yt-dlp merge with whichever `ffmpeg` is on `PATH`; no `ffmpeg_location` is set | tasks T003 |
 | E4 | III | `app/routers/jobs.py:59,87` | Shells out to the `yt-dlp` CLI on `PATH` | tasks T003 |
 | E5 | VI | `.pre-commit-config.yaml`, `.github/workflows/ci.yml` | Gitleaks is configured but no hook is installed in `.git/hooks` and CI has no gitleaks step | tasks T004 |
-| E6 | II | `CLAUDE.md` | Says "all inter-service communication goes through the event bus"; services import each other directly. The principle above is the accurate statement | tasks T005 |
 
 ## Governance
 

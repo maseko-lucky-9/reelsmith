@@ -10,7 +10,7 @@ Open work is tracked per feature in `specs/*/tasks.md`; this file keeps the fini
 
 | Spec | Tasks | State |
 |---|---|---|
-| [001 Reelsmith baseline](../specs/001-reelsmith-baseline/spec.md) | [tasks.md](../specs/001-reelsmith-baseline/tasks.md) | 23 open (constitution exceptions, defects, unwired code, tooling) |
+| [001 Reelsmith baseline](../specs/001-reelsmith-baseline/spec.md) | [tasks.md](../specs/001-reelsmith-baseline/tasks.md) | 20 open (constitution exceptions, defects, unwired code, tooling) |
 
 Constitution: [.specify/memory/constitution.md](../.specify/memory/constitution.md)
 
