@@ -60,6 +60,9 @@ async def dislike_clip(clip_id: str, request: Request) -> dict[str, Any]:
 
 class RerenderRequest(BaseModel):
     reframe_provider: str = "letterbox"
+    # False re-renders the video only: the clip keeps its title, summary,
+    # hashtags and AI hook text instead of having them regenerated.
+    regenerate_copy: bool = True
 
 
 @router.post("/{clip_id}/rerender", status_code=202)
@@ -101,6 +104,7 @@ async def rerender_clip(
         "pipeline_options": job.pipeline_options.model_dump(),
         # Passed through for API compatibility; reframe is unwired (task T012).
         "reframe_provider": req.reframe_provider,
+        "regenerate_copy": req.regenerate_copy,
     }
     if hasattr(request.app.state, "job_queue"):
         await request.app.state.job_queue.put((job.job_id, payload))

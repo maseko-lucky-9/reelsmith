@@ -282,3 +282,111 @@ async def test_rerender_cancellation_propagates(
 
     assert (await store.get(JOB_ID)).status == "completed"
     assert not (layout["clips"] / "_tmp" / f"{JOB_ID}-rerender-{CLIP_ID[:8]}").exists()
+
+
+@pytest.mark.parametrize(
+    ("prior_status", "expected"),
+    [("completed", "completed"), ("failed", "failed"), (None, "completed")],
+)
+async def test_failed_rerender_resets_chapter_status(
+    layout, render_calls, monkeypatch, prior_status, expected
+):
+    """T028(a): a render that raises must not leave the chapter ``rendering``.
+
+    Only the memory store keeps chapter status (the SQL store persists no
+    chapter status), so this runs on the memory store.
+    """
+    store = InMemoryJobStore()
+    await _seed(store, layout)
+    if prior_status is not None:
+        await store.upsert_chapter(
+            JOB_ID, lambda c: setattr(c, "status", prior_status), 1
+        )
+    before_clip = dict(await store.get_clip(CLIP_ID))
+
+    def _boom(*args: Any, **kwargs: Any) -> str:
+        raise RuntimeError("ffmpeg exploded")
+
+    monkeypatch.setattr(orch.render_service, "render_clip", _boom)
+
+    await orch._run_job(_trigger(), AsyncEventBus(), store)
+
+    job = await store.get(JOB_ID)
+    assert job.chapters[1].status == expected
+    assert await store.get_clip(CLIP_ID) == before_clip
+    assert job.status == "completed"
+
+
+@pytest.fixture
+def copy_calls(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    """Stub the social-copy generators (LLM) and count their calls."""
+    calls = {"social": 0, "hook": 0}
+
+    def _social(title, transcript, *args, **kwargs):
+        calls["social"] += 1
+        return "new summary", ["#new"]
+
+    def _hook(transcript, **kwargs):
+        calls["hook"] += 1
+        return "new hook"
+
+    monkeypatch.setattr(orch.settings, "ollama_enabled", True)
+    monkeypatch.setattr(orch.ollama_service, "generate_social_content", _social)
+    monkeypatch.setattr(orch.ai_hook_service, "generate_hook", _hook)
+    return calls
+
+
+async def _seed_copy(store: Any, layout: dict[str, Path]) -> None:
+    await _seed(store, layout)
+    await store.upsert_clip(
+        JOB_ID,
+        CLIP_ID,
+        lambda c: c.update(
+            {
+                "summary": "old summary",
+                "hashtags": ["#old"],
+                "ai_hook_text": "old hook",
+            }
+        ),
+    )
+
+
+def _copy_view(clip: dict[str, Any]) -> tuple[Any, ...]:
+    return (clip["title"], clip["summary"], clip["hashtags"], clip["ai_hook_text"])
+
+
+_HOOK_ON = PipelineOptions(audio_enhance=False, ai_hook=True).model_dump()
+
+
+async def test_rerender_without_copy_keeps_title_summary_hashtags_and_hook(
+    store, layout, render_calls, copy_calls
+):
+    """T028 (d): ``regenerate_copy=False`` re-renders the video only."""
+    await _seed_copy(store, layout)
+
+    await orch._run_job(
+        _trigger(pipeline_options=_HOOK_ON, regenerate_copy=False),
+        AsyncEventBus(),
+        store,
+    )
+
+    assert len(render_calls) == 1
+    clip = await store.get_clip(CLIP_ID)
+    assert _copy_view(clip) == ("Outro", "old summary", ["#old"], "old hook")
+    assert clip["transcript"] == "new words"
+    assert copy_calls == {"social": 0, "hook": 0}
+
+
+@pytest.mark.parametrize("flag", [{}, {"regenerate_copy": True}])
+async def test_rerender_regenerates_copy_by_default(
+    store, layout, render_calls, copy_calls, flag
+):
+    await _seed_copy(store, layout)
+
+    await orch._run_job(
+        _trigger(pipeline_options=_HOOK_ON, **flag), AsyncEventBus(), store
+    )
+
+    clip = await store.get_clip(CLIP_ID)
+    assert _copy_view(clip) == ("Outro", "new summary", ["#new"], "new hook")
+    assert copy_calls == {"social": 1, "hook": 1}

@@ -61,6 +61,7 @@ export function ClipEditorPage() {
   const [duration, setDuration] = useState(0)
   const [activeWordIdx, setActiveWordIdx] = useState<number | null>(null)
   const [transcriptOnly, setTranscriptOnly] = useState(false)
+  const [regenerateCopy, setRegenerateCopy] = useState(true)
   const editor = useTimelineEditor(clipId)
 
   const clipsQuery = useQuery({
@@ -70,7 +71,8 @@ export function ClipEditorPage() {
   const clip = (clipsQuery.data ?? []).find((c) => c.clip_id === clipId)
 
   const rerenderMutation = useMutation({
-    mutationFn: () => api.rerenderClip(clipId, { reframe_provider: 'letterbox' }),
+    mutationFn: () =>
+      api.rerenderClip(clipId, { reframe_provider: 'letterbox', regenerate_copy: regenerateCopy }),
     onSuccess: () => toast.success('Re-render queued'),
     onError: (err) => {
       const detail = apiErrorDetail(err)
@@ -239,6 +241,16 @@ export function ClipEditorPage() {
           ) : (
             <p className="text-zinc-500 text-xs">No transcript available.</p>
           )}
+
+          <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={regenerateCopy}
+              onChange={(e) => setRegenerateCopy(e.target.checked)}
+              className="accent-white"
+            />
+            Regenerate title, summary and hashtags
+          </label>
 
           <button
             onClick={() => rerenderMutation.mutate()}
