@@ -59,6 +59,7 @@ app/db/                  — SQLAlchemy ORM models + alembic migrations
 
 The `/jobs/$jobId` page renders a per-stage timeline while the pipeline runs. Stages: prepare workspace → download source → detect chapters → extract clips → transcribe → caption → render → thumbnails+social → export & manifest → done. Per-chapter stages show `N/M` sub-progress.
 
+- **Live updates, no polling:** the backend sends named SSE events, and `useJobSSE` registers a listener for every backend event type. Each event refreshes only that job and its clips. The job page has no `refetchInterval`, and the stream is open only while the job is `pending`/`running`.
 - **Data plane:** `useJobSSE` mirrors every SSE event into the React Query cache `['job-events', jobId]`. `deriveStageStates(jobState, events)` is a pure helper — `JobState` is the source of truth, events are a low-latency optimisation. Max-merge reconciliation between SSE counts and `JobState.chapters[i]` artifact fields means a stage never un-completes (kills SSE-reconnect drift and tab-refocus races in one rule).
 - **Accessibility:** single visually-hidden `role="status" aria-live="polite"` region announces only stage transitions (~10/job, not ~60). Active row gets `aria-current="step"` plus a static emerald left-border so reduced-motion users still get a non-animation cue.
 - **Resilience:** `<TimelineErrorBoundary>` wraps the component; a malformed `JobState` falls back without blanking the page.
@@ -71,13 +72,15 @@ The `/jobs/$jobId` page renders a per-stage timeline while the pipeline runs. St
 | Database | Postgres 16 + SQLAlchemy 2 async + Alembic |
 | Video download | yt-dlp (YouTube / Facebook / TikTok / Instagram via PlatformAdapter registry) |
 | Video editing | ffmpeg (bundled via imageio-ffmpeg) + PyAV |
-| Transcription | Whisper (word-level) |
+| Transcription | faster-whisper (word-level) |
 | Virality scoring | librosa + VADER + spaCy + webrtcvad |
-| Reframe | MediaPipe face detection |
+| Reframe | MediaPipe face detection (optional, not in `requirements.txt`; `face_track` falls back to a centre crop without it) |
 | Captions | pysrt / webvtt-py |
 | Subtitle images | Pillow + NumPy |
 | UI | React 19 + Vite 8 + shadcn/ui |
 | Tests | pytest + vitest |
+
+**Performance & dependencies.** Each reel renders in a single ffmpeg pass from the source. MoviePy has been removed, and the binary is the one bundled by `imageio-ffmpeg`, never a system ffmpeg. `av` is pinned at 18.1.0 because 19.x breaks faster-whisper 1.2.1. Measured numbers and the deliberate output changes are recorded in [ADR-004](docs/decisions/004-ffmpeg-render-pipeline.md); the concurrency model is described in [docs/architecture.md](docs/architecture.md).
 
 ## Environment Variables
 
@@ -85,8 +88,10 @@ See `.env.example` for the full list. Key settings:
 
 | Variable | Default | Description |
 |---|---|---|
-| `YTVIDEO_JOB_STORE` | `memory` | `memory` or `sql` |
-| `YTVIDEO_DB_URL` | `postgresql+asyncpg://reelsmith:reelsmith@localhost/reelsmith` | Postgres connection |
+| `YTVIDEO_JOB_STORE` | `sql` | `sql` or `memory` |
+| `YTVIDEO_DB_URL` | `sqlite+aiosqlite:///./reelsmith.db` | Database URL (`.env.example` points it at the docker-compose Postgres) |
+| `YTVIDEO_MAX_CONCURRENT_JOBS` | `1` | Pipelines running at once; extra jobs wait as `pending` |
+| `YTVIDEO_MAX_PARALLEL_CHAPTERS` | `1` | Chapters processed concurrently within a job |
 | `YTVIDEO_SEGMENT_PROVIDER` | `chapter` | `chapter`, `local_heuristic`, or `stub` |
 | `YTVIDEO_REFRAME_PROVIDER` | `letterbox` | `letterbox`, `face_track`, or `stub` |
 | `YTVIDEO_SERVE_FRONTEND` | `false` | Serve built React app from FastAPI |
