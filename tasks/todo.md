@@ -10,9 +10,42 @@ Open work is tracked per feature in `specs/*/tasks.md`; this file keeps the fini
 
 | Spec | Tasks | State |
 |---|---|---|
-| [001 Reelsmith baseline](../specs/001-reelsmith-baseline/spec.md) | [tasks.md](../specs/001-reelsmith-baseline/tasks.md) | 6 open (constitution exceptions, defects, unwired code, tooling) |
+| [001 Reelsmith baseline](../specs/001-reelsmith-baseline/spec.md) | [tasks.md](../specs/001-reelsmith-baseline/tasks.md) | 13 open: T021, T032 (lint, wait on a `pyproject.toml` OK), T033 (disk growth), backlog T036-T045 |
+| [002-007 roadmap stubs](../specs/README.md) | none yet | stubs only: caption/brand pipeline, analytics, share links, webhooks, API tokens, workspaces |
 
 Constitution: [.specify/memory/constitution.md](../.specify/memory/constitution.md)
+
+### Spec Kit programme (baseline tasks) — ✅ SHIPPED 2026-10-09 (PRs #27-#54)
+
+All merged on 2026-10-09, in merge order. PR #32 (gitleaks red proof) was closed unmerged.
+
+- #27 docs: Spec Kit adopted (constitution, baseline spec, tasks)
+- #28 like/dislike persisted; single-clip re-render in place (T006, T007)
+- #29 bulk export skips retired clips (T009)
+- #30 CLAUDE.md aligned with principle II; ADR-003 superseded note; Pages build (T005, T023)
+- #31 gitleaks in CI (T004)
+- #34 migrations aligned with models (T018)
+- #33 tests: min_score, auth, unsupported platform; 3.12-only skips (T019, T024, T026, T027)
+- #35 retention janitor tested; Linux caption goldens (T020, T025)
+- #36 env read through Settings (T001, T002)
+- #37 CI actions pinned to SHAs
+- #38 stage events emitted (T016)
+- #40 unused settings and dead SSE heartbeat removed (T014, T015)
+- #41 scheduled publishing dropped (T010)
+- #42 per-job output folders; downloads out of `/tmp` (T030, T031)
+- #43 numpy-only heuristic proposer (T011 part 1)
+- #44 crop track in the one-pass render (T012)
+- #45 UI stops advertising missing features (T013, T017 UI halves)
+- #46 SQL store keeps every clip field; `retire_clips` (T029)
+- #47 yt-dlp uses the bundled ffmpeg; server-side download path default (T003, T035)
+- #48 re-render follow-ups; `video_path` backfill (T028)
+- #49 clip discovery in chapterless sources (T011)
+- #50 every route at `/x` and `/api/x` (T034, ADR-005)
+- #51 reprompt from the retained source (T008)
+- #53 B-roll overlays in the render (T012)
+- #52 face-tracked reframe (T012, ADR-006)
+- #54 B-roll planner and providers (T012)
+- #55 docs close-out (this review): ADR-006/007, roadmap stubs, spec re-verified, backlog T036-T045 (T011, T013, T017)
 
 ### Parity programme T-01…T-07 — ✅ SHIPPED (`29e0b6d`, PR #4)
 
@@ -118,3 +151,35 @@ The original acceptance criteria are preserved in `docs/archive/TASKS.md`.
 | Wave 2 | 12 | suite reaches 370/370 | 119/119 | animated captions, voice-over, demucs, filler/transitions/profanity, brand vocab + multi-font, SSE heartbeat |
 | Wave 3 | 10 | suite reaches 408/408 | 119/119 | workspaces + scheduler (Postgres SKIP LOCKED) + analytics + share links + webhooks + api tokens + bulk export + auth/capabilities; W3.10 deferred |
 | Total | **52** | **408 / 408** | **119 / 119** | local main 64 commits ahead of origin/main; nothing pushed |
+
+---
+
+## Review: Spec Kit programme close-out (2026-10-09)
+
+**Done**
+
+- **Baseline tasks.** 32 of T001-T035 are ticked. T013 and T017 are ticked as MOVED to roadmap specs 002-007, not built. T021, T032 and T033 stay open.
+- **ADRs.** The two ADRs numbered 005 were split: the face-track ADR is now 006. Clip discovery and reprompt got ADR-007. ADR-001…007 are indexed in the README and the baseline plan.
+- **README and `docs/architecture.md`.** They now separate the default pipeline, the opt-in stages (discovery and reprompt, face-track reframe, B-roll), what was removed (scheduled publishing) and the code no job uses. `YTVIDEO_DEFAULT_DOWNLOAD_PATH` is documented.
+- **Spec 001.** Every row was re-checked against `67dd68d`. Status wording changed for FR-009, FR-016 (opt-in), FR-020 (plan only) and FR-013 (SQL store only), and the counts were re-run. A *Changes since baseline* table was added.
+- **Roadmap and backlog.** The stubs live in `specs/README.md`. The backlog is T036-T045 in `specs/001-reelsmith-baseline/tasks.md`.
+
+**Verified how**
+
+- **Claims.** Each changed claim was checked by reading or grepping the code at `67dd68d`. File and line citations are in spec 001 and ADR-007.
+- **Counts, by command.** `create_app().openapi()["paths"]` gives 46 operations on 38 paths. `len(EventType)` is 40. `Base.metadata.tables` has 16 tables. `ls alembic/versions` lists 17 revisions.
+- **Probes.**
+  - `serve_frontend` deep links return JSON 404s (T036).
+  - `GET /api/clips/{id}` returns 404 (T037).
+  - A map of which `EventType` members `app/` emits backs the never-emitted list.
+  - `ruff check --target-version py314 .` gives 91 findings (T032).
+- **`pytest -q`.** 1968 passed, 21 deselected on `main` and on the branch (docs only).
+- **Links.** The markdown link check (`p8_links.py`, anchors included) found 79 relative links, 0 broken. It was mutation-checked on a probe tree with a broken file and a broken anchor.
+- **Secrets.** `gitleaks detect --log-opts origin/main..HEAD` found no leaks.
+- **Independent check.** A separate verifier pass re-checked about 170 of the added claims against the code. It found 2 false (in the roadmap stubs: TikTok's live adapters, the workspace roles), an ADR-003 "§A.15" reference that does not exist, and 3 imprecisions (one line number, the selection-rule order, the APScheduler mentions). All six were fixed before merge.
+
+**Left**
+
+- **Open tasks.** 13: T021 and T032 (wait on an OK for the `pyproject.toml` change), T033 (disk growth), and the backlog T036-T045.
+- **Owner decisions.** T040 (ranking and the `segment_provider` default, gate G1), T043 (docs routes and auth), T044 (`requirements.txt` edit). Gate G2 (face track) is not signed off.
+- **Roadmap.** Specs 002-007 are stubs; none has a `specs/00N-*/` directory yet.

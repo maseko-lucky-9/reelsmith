@@ -6,7 +6,7 @@ This plan describes the system as built. It does not duplicate the design docume
 
 ## Summary
 
-FastAPI backend with an asyncio orchestrator that turns a video URL into captioned vertical clips, plus a React/Vite dashboard. Design is recorded in [docs/architecture.md](../../docs/architecture.md) and ADR-[001](../../docs/decisions/001-react-dashboard.md), [002](../../docs/decisions/002-opus-clip-ui-redesign.md), [003](../../docs/decisions/003-opusclip-feature-parity.md), [004](../../docs/decisions/004-ffmpeg-render-pipeline.md).
+FastAPI backend with an asyncio orchestrator that turns a video URL into captioned vertical clips, plus a React/Vite dashboard. Design is recorded in [docs/architecture.md](../../docs/architecture.md) and ADR-[001](../../docs/decisions/001-react-dashboard.md), [002](../../docs/decisions/002-opus-clip-ui-redesign.md), [003](../../docs/decisions/003-opusclip-feature-parity.md), [004](../../docs/decisions/004-ffmpeg-render-pipeline.md), [005](../../docs/decisions/005-api-route-prefix.md) (route prefix), [006](../../docs/decisions/006-face-track-reframe.md) (face-tracked reframe), [007](../../docs/decisions/007-clip-discovery-and-reprompt.md) (clip discovery and reprompt).
 
 ## Technical Context
 
@@ -18,7 +18,7 @@ FastAPI backend with an asyncio orchestrator that turns a video URL into caption
 **Project Type**: web application (API + SPA)
 **Performance Goals**: see SC-001 in the spec (measured, not targeted)
 **Constraints**: bundled ffmpeg only; offline default test run
-**Scale/Scope**: 46 HTTP operations, 38 event types, 16 tables, 18 web routes
+**Scale/Scope**: 46 HTTP operations, 40 event types, 16 tables, 18 web routes (counted at `67dd68d`; 38 event types at `40ab44d`)
 
 ## Constitution Check
 
@@ -31,7 +31,7 @@ FastAPI backend with an asyncio orchestrator that turns a video URL into caption
 | V. Additive migrations, both engines | Holds (model drift fixed in T018) | `docs/db-parity.md`, `tests/unit/test_alembic_parity.py`, `ci.yml` `alembic check` + offline `--sql` (Postgres) |
 | VI. Secrets | Holds (E5 fixed in T004) | `token_vault.py`; gitleaks in `ci.yml` |
 | VII. React dashboard is the UI | Holds | `tests/unit/test_no_streamlit_in_app.py` |
-| VIII. Decisions recorded | Holds | `docs/decisions/` |
+| VIII. Decisions recorded | Holds (the two ADRs numbered 005 were split: the face-track ADR is now 006; discovery and reprompt got ADR-007) | `docs/decisions/` 001-007, indexed in `README.md`; roadmap in `specs/README.md` |
 
 ## Project Structure
 

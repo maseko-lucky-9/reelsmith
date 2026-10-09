@@ -1,9 +1,10 @@
-# ADR-005: Face-Tracked Reframe with YuNet on onnxruntime
+# ADR-006: Face-Tracked Reframe with YuNet on onnxruntime
 
 **Status:** Accepted (provider default stays `letterbox` until the owner signs off gate G2)
 **Date:** 2026-10-09
 **Author:** Thulani Maseko
 **Implements:** FR-010 (reframe half of T012)
+**Numbering:** merged as `005-face-track-reframe.md` (PR #52) alongside [ADR-005](005-api-route-prefix.md) (PR #50); renumbered to 006 in the Spec Kit close-out. The content is unchanged.
 
 ## Context
 

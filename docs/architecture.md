@@ -3,7 +3,7 @@
 ## Event Flow
 
 ```
-POST /jobs   (uploads, generate and clip-rerender routers enqueue the same way)
+POST /jobs   (uploads, generate, clip-rerender and reprompt routers enqueue the same way)
     │
     ▼
 job_queue (asyncio.Queue) → queue worker → AsyncEventBus.publish(VIDEO_REQUESTED)
@@ -13,6 +13,7 @@ run_orchestrator  (max_concurrent_jobs semaphore around each _run_job;
     │              jobs waiting for a slot stay "pending")
     ├─ FOLDER_CREATED
     ├─ VIDEO_DOWNLOADED
+    ├─ SEGMENTS_PROPOSED, SEGMENT_SCORED  (opt-in clip discovery, no-chapter sources only)
     ├─ CHAPTERS_DETECTED
     ├─ [per chapter/segment fan-out: asyncio.TaskGroup, max_parallel_chapters;
     │    first failing chapter cancels the rest (their ffmpeg is killed)
@@ -22,7 +23,8 @@ run_orchestrator  (max_concurrent_jobs semaphore around each _run_job;
     │   ├─ CHAPTER_TRANSCRIBED
     │   ├─ FILLERS_REMOVED
     │   ├─ CAPTIONS_GENERATED
-    │   ├─ CLIP_RENDERED
+    │   ├─ BROLL_APPLIED           (opt-in B-roll; before the render)
+    │   ├─ CLIP_RENDERED           (opt-in face-track reframe runs just before it)
     │   ├─ THUMBNAIL_GENERATED
     │   ├─ AI_HOOK_GENERATED
     │   └─ SOCIAL_CONTENT_GENERATED
@@ -30,14 +32,23 @@ run_orchestrator  (max_concurrent_jobs semaphore around each _run_job;
     ├─ MANIFEST_CREATED
     ├─ JOB_COMPLETED
     └─ JOB_FAILED
-    (STAGE_SKIPPED for each stage turned off in PipelineOptions)
+    (STAGE_SKIPPED for each stage turned off in PipelineOptions, and with a
+     reason when reframe or B-roll falls back or discovery is skipped or fails)
+    A reprompt of a completed job ends with JOB_REPROMPTED + JOB_COMPLETED,
+    or REPROMPT_FAILED; it never emits JOB_FAILED (see Reprompt).
 
 React SSE: GET /jobs/:id/events → EventSource streams events above
 ```
 
+**Not in the pipeline.** Animated captions, transitions, brand vocabulary, the profanity filter and voice-over exist as services with unit tests, but the orchestrator imports none of them (the `TODO(orchestrator-wiring-wave-2)` note in `_process_chapter`), and brand templates are stored but not applied to renders. Analytics, share links, webhooks and API tokens have tables and services but no routes of their own, and workspaces have tables only. All are roadmap specs, see [specs/README.md](../specs/README.md).
+
+## Clip Discovery
+
+Opt-in (FR-009, [ADR-007](decisions/007-clip-discovery-and-reprompt.md)): with `YTVIDEO_SEGMENT_PROVIDER=local_heuristic` (default `chapter`), a source without chapters is transcribed once, its words are saved as the `<source stem>.words.json` sidecar, and the best-scoring windows become the chapters (`_discover_segments`, `segment_discovery.select_discovered`): at least 60% of the best score, one clip per 120 s of source (1 to 5), at most half the source covered, near-duplicates penalised. `SEGMENTS_PROPOSED` and `SEGMENT_SCORED` are emitted before `CHAPTERS_DETECTED`. A short source, no kept segment or any error falls back to the single "Full Video" chapter, which is also what the default `chapter` provider always produces.
+
 ## Reprompt
 
-`POST /jobs/{id}/reprompt` (completed job, source still on disk) queues `{reprompt: true, prompt, length range or start/end}` like a clip re-render; `_run_job` hands it to `_reprompt_job`, which:
+Decision record: [ADR-007](decisions/007-clip-discovery-and-reprompt.md). `POST /jobs/{id}/reprompt` (completed job, source still on disk) queues `{reprompt: true, prompt, length range or start/end}` like a clip re-render; `_run_job` hands it to `_reprompt_job`, which:
 
 - forgets the job's replay history (`AsyncEventBus.forget`), so a new SSE stream is not closed by the previous run's `JOB_COMPLETED`; the router does this too when it accepts;
 - reuses the source's `.words.json` sidecar (or transcribes the source once), then proposes with the prompt and length range (discovery's `select_discovered`), or takes the one requested time range;
@@ -63,7 +74,7 @@ The API is served at both `/x` and `/api/x`. Routers are mounted without a prefi
 
 Two optional inputs extend the same graph (FR-010): `broll` is passed by the orchestrator's B-roll step (below); `crop_track` is passed by the face-tracked reframe step below. `crop_track` pans a canvas-aspect crop of the source instead of the letterboxed inset. `broll` (up to four `BrollInsert`s) adds one looped input per insert, cover-fits it to the canvas and overlays it full-canvas over its half-open window, above the inset composite and below the captions. Frame grid, duration and audio stay those of the render without them (ADR-004, B-roll addendum).
 
-**Face-tracked reframe** (FR-010, [ADR-005](decisions/005-face-track-reframe.md)). With the job's `reframe` option on and `YTVIDEO_REFRAME_PROVIDER=face_track` (default `letterbox`), `orchestrator._reframe_step` runs `reframe_service.face_track` in a worker thread (`to_thread_cancellable`) just before the render, for new renders and re-renders alike. It decodes the chapter with PyAV at 2 fps (rotation applied, fitted into 640x640), finds faces with YuNet on onnxruntime (`face_detector`; the 232 KB model is downloaded on first use into `YTVIDEO_REFRAME_MODEL_DIR` and checked against a pinned SHA-256), follows the largest face with a zero-phase-smoothed, dead-zoned, speed-capped crop position and passes at most 64 keyframes to `render_clip(crop_track=...)`, which pans a full-height 9:16 window instead of the letterboxed inset. A split screen, several faces of similar size, no face, a source with no pan room or any error emits `StageSkipped(reframe, reason)` and leaves the letterbox render unchanged; cancellation propagates.
+**Face-tracked reframe** (FR-010, [ADR-006](decisions/006-face-track-reframe.md)). With the job's `reframe` option on and `YTVIDEO_REFRAME_PROVIDER=face_track` (default `letterbox`), `orchestrator._reframe_step` runs `reframe_service.face_track` in a worker thread (`to_thread_cancellable`) just before the render, for new renders and re-renders alike. It decodes the chapter with PyAV at 2 fps (rotation applied, fitted into 640x640), finds faces with YuNet on onnxruntime (`face_detector`; the 232 KB model is downloaded on first use into `YTVIDEO_REFRAME_MODEL_DIR` and checked against a pinned SHA-256), follows the largest face with a zero-phase-smoothed, dead-zoned, speed-capped crop position and passes at most 64 keyframes to `render_clip(crop_track=...)`, which pans a full-height 9:16 window instead of the letterboxed inset. A split screen, several faces of similar size, no face, a source with no pan room or any error emits `StageSkipped(reframe, reason)` and leaves the letterbox render unchanged; cancellation propagates.
 
 ## B-roll
 
@@ -71,7 +82,7 @@ Two optional inputs extend the same graph (FR-010): `broll` is passed by the orc
 
 - **Plan.** `broll_planner.plan_broll(words, duration)` is pure and deterministic: at most two 3 s windows on the clip's own clock, none starting before 3.0 s or ending after `duration - 2.0` s, at least 1 s apart. Each window's query is the longest token spoken inside it (lowercase, at least 4 letters, letters only, not one of the segment proposer's stopwords); windows are ranked by query length, then earliest start, one window per query. A clip under 8 s gets none.
 - **Fetch.** `broll_service.fetch_all` asks the provider for each query, two at a time on the event loop. `local` matches keyword-named `*.mp4` files in `YTVIDEO_BROLL_LIBRARY_DIR`; `pexels` (`broll_pexels_service`) searches Pexels videos with `YTVIDEO_PEXELS_API_KEY`, downloads at most 50 MB from `*.pexels.com` hosts only and caches by Pexels video id in `YTVIDEO_BROLL_CACHE_DIR`. A failed or empty query, or a file that does not decode, drops that one insert.
-- **Render and record.** Found assets become `BrollInsert`s for `render_clip(broll=...)`; `BRollApplied` reports them and the clip's `broll_assets` keeps `query, start, duration, provider, asset_id, author, source_url, path`. The export manifest's `broll_credits` column credits each asset (Pexels asks for the videographer and a link).
+- **Render and record.** Found assets become `BrollInsert`s for `render_clip(broll=...)`; `BRollApplied` reports them and the clip's `broll_assets` keeps `query, start, duration, provider, asset_id, author, source_url, path`. The job's export `manifest.csv` (`manifest_service`) has a `broll_credits` column that credits each asset (Pexels asks for the videographer and a link). The bulk-export zip's manifest has no such column, and the UI does not show credits yet (task T039).
 - **Never fatal.** Any error, or nothing found, emits `StageSkipped(broll, reason)` and the reel renders without B-roll; cancellation propagates. A re-render goes through the same step, so it refreshes (or clears) `broll_assets`.
 
 ## Live Progress (SSE)
@@ -88,7 +99,7 @@ Two optional inputs extend the same graph (FR-010): `broll` is passed by the orc
 | Feature | Setting | Values |
 |---|---|---|
 | Transcription | `YTVIDEO_TRANSCRIPTION_PROVIDER` | `whisper`, `stub` |
-| Segment scoring | `YTVIDEO_SEGMENT_PROVIDER` | `chapter`, `local_heuristic`, `stub` |
+| Segment scoring | `YTVIDEO_SEGMENT_PROVIDER` | `chapter` (default: no discovery, one "Full Video" clip per chapterless source), `local_heuristic`, `stub` (one fixed 0-30 s segment, for tests); any value but `chapter` turns discovery on |
 | Reframe | `YTVIDEO_REFRAME_PROVIDER` | `letterbox` (default), `face_track`; any other value is `letterbox` |
 | B-Roll | `YTVIDEO_BROLL_PROVIDER` | `none` (default), `local`, `pexels` |
 | Job store | `YTVIDEO_JOB_STORE` | `memory`, `sql` |

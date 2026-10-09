@@ -6,7 +6,7 @@ Learning project: YouTube-to-reels pipeline. FastAPI backend + React UI (`web/`)
 
 ## Tech Stack
 
-- **Python 3.14** (CI; 3.12 is not supported: 4 orchestrator concurrency tests fail there, see PR #25), with `asyncio`
+- **Python 3.14** (CI; 3.12 is not supported: its `TaskGroup` leaves `cancelling()==1` after a chapter fails, so 4 orchestrator concurrency tests are skipped below 3.13, see PR #25 and T019), with `asyncio`
 - **FastAPI** — HTTP API + SSE job progress
 - **yt-dlp** — video download
 - **ffmpeg** (bundled `imageio-ffmpeg` binary) + **PyAV** — one-pass rendering, probing, frame grabs (`app/services/ffmpeg_tools.py`)
@@ -49,4 +49,5 @@ Always run `pytest` after code changes before committing.
 
 - Constitution: `.specify/memory/constitution.md`. Baseline spec: `specs/001-reelsmith-baseline/spec.md` (status-tagged inventory).
 - New work: `/speckit-specify` → `/speckit-plan` → `/speckit-tasks` → `/speckit-implement`, one `specs/NNN-<slug>/` per feature.
-- Open tasks live in each `specs/*/tasks.md`; `tasks/todo.md` indexes them and holds the finished parity history.
+- Open tasks live in each `specs/*/tasks.md`; `tasks/todo.md` indexes them and holds the finished history. `specs/README.md` indexes the specs and the roadmap stubs (002-007). Decisions: `docs/decisions/` (ADR-001…007).
+- Opt-in stages (defaults off): clip discovery and reprompt (`YTVIDEO_SEGMENT_PROVIDER=local_heuristic`), face-tracked reframe (`YTVIDEO_REFRAME_PROVIDER=face_track`), B-roll (`YTVIDEO_BROLL_PROVIDER=local|pexels`).
