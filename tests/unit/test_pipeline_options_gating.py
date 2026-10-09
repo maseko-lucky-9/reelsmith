@@ -233,7 +233,10 @@ async def test_all_on_identical_to_full_pipeline(tmp_path, monkeypatch):
 
     Note: ai_hook and filler_removal default to False (opt-in per W1.7/W2.5),
     so "all on" must turn them on explicitly. The original regression intent
-    is preserved: no STAGE_SKIPPED events when every gated stage is enabled.
+    is preserved: no STAGE_SKIPPED events when every gated stage is enabled,
+    except B-roll, which also needs a provider: with the default
+    ``broll_provider=none`` each chapter reports StageSkipped(broll,
+    "no provider") (T012).
     """
     opts = PipelineOptions(ai_hook=True, filler_removal=True)
     events, store = await _run_pipeline(tmp_path, opts, monkeypatch)
@@ -248,9 +251,14 @@ async def test_all_on_identical_to_full_pipeline(tmp_path, monkeypatch):
     assert EventType.CLIP_RENDERED in types
     assert types[-1] is EventType.JOB_COMPLETED
 
-    # No STAGE_SKIPPED events when all on
+    # No STAGE_SKIPPED events when all on, but the provider-less B-roll stage
     skip_events = [e for e in events if e.type == EventType.STAGE_SKIPPED]
-    assert len(skip_events) == 0
+    rendered = [e.payload["chapter_index"] for e in events if e.type == EventType.CLIP_RENDERED]
+    assert rendered == [0]
+    assert sorted(
+        (e.payload["stage_id"], e.payload["chapter_index"], e.payload["reason"])
+        for e in skip_events
+    ) == [("broll", i, "no provider") for i in sorted(rendered)]
 
     final = await store.get("job-gate")
     assert final.status == "completed"

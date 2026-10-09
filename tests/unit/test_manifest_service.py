@@ -85,3 +85,55 @@ def test_none_hashtags_written_as_empty_json_array(tmp_path):
 
     rows = _read_csv(str(tmp_path / "manifest.csv"))
     assert json.loads(rows[0]["hashtags"]) == []
+
+
+# ── B-roll credits (FR-010, T012) ─────────────────────────────────────────────
+
+
+def _broll(provider, asset_id, author, url, query="ocean"):
+    return {
+        "query": query, "start": 5.0, "duration": 3.0, "provider": provider,
+        "asset_id": asset_id, "author": author, "source_url": url, "path": f"/c/{asset_id}.mp4",
+    }  # fmt: skip
+
+
+def test_broll_credits_column_is_last():
+    assert COLUMNS[-1] == "broll_credits"
+
+
+def test_each_broll_asset_is_credited(tmp_path):
+    clip = {
+        "start": 0, "end": 30,
+        "broll_assets": [
+            _broll("pexels", "1234", "Jane Doe", "https://www.pexels.com/video/1234/"),
+            _broll("local", "forest.mp4", "", "", query="forest"),
+        ],
+    }  # fmt: skip
+    write_manifest([clip], str(tmp_path))
+
+    rows = _read_csv(str(tmp_path / "manifest.csv"))
+    assert json.loads(rows[0]["broll_credits"]) == [
+        {
+            "provider": "pexels",
+            "author": "Jane Doe",
+            "source_url": "https://www.pexels.com/video/1234/",
+        },
+        {"provider": "local", "author": "", "source_url": ""},
+    ]
+
+
+def test_the_same_asset_is_credited_once(tmp_path):
+    asset = _broll("pexels", "1234", "Jane Doe", "https://www.pexels.com/video/1234/")
+    clip = {"start": 0, "end": 30, "broll_assets": [asset, {**asset, "start": 20.0}]}
+    write_manifest([clip], str(tmp_path))
+
+    rows = _read_csv(str(tmp_path / "manifest.csv"))
+    assert len(json.loads(rows[0]["broll_credits"])) == 1
+
+
+@pytest.mark.parametrize("assets", [None, []])
+def test_a_clip_without_broll_has_no_credits(tmp_path, assets):
+    write_manifest([{"start": 0, "end": 5, "broll_assets": assets}], str(tmp_path))
+
+    rows = _read_csv(str(tmp_path / "manifest.csv"))
+    assert json.loads(rows[0]["broll_credits"]) == []

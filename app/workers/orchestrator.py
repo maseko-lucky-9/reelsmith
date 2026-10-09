@@ -17,6 +17,8 @@ from app.domain.models import ChapterArtifacts, JobState, PipelineOptions
 from app.services import (
     ai_hook_service,
     audio_enhance_service,
+    broll_planner,
+    broll_service,
     caption_service,
     clip_service,
     download_service,
@@ -1338,6 +1340,12 @@ async def _process_chapter(
     # Caption images are drawn and burned in by render_clip (one PNG per unique
     # caption, cropped); ChapterArtifacts.image_paths stays [] for the API/UI.
 
+    # ── B-roll (gated on render + broll; settings.broll_provider) ────────────
+    broll_inserts, broll_assets = await _broll_step(
+        job_id=job_id, index=index, words=words, duration=chapter_duration,
+        opts=opts, bus=bus,
+    )
+
     # ── Render final clip (gated on render) ──────────────────────────────────
     output_path: str | None = None
     safe_title = _sanitize(title)
@@ -1358,6 +1366,7 @@ async def _process_chapter(
                 captions_path,
                 target_aspect_ratio,
                 word_timings=words,
+                broll=broll_inserts,
                 caption_words_per_segment=settings.caption_words_per_segment,
             ),
             timeout=settings.render_timeout_seconds,
@@ -1423,6 +1432,7 @@ async def _process_chapter(
             "output_path": output_path,
             "thumbnail_path": thumbnail_path,
             "transcript": text,
+            "broll_assets": broll_assets,
         })
         if regenerate_copy:
             c["title"] = title
@@ -1510,3 +1520,78 @@ async def _process_chapter(
     )
 
     return output_path
+
+
+async def _broll_step(
+    *,
+    job_id: str,
+    index: int,
+    words: Sequence[Any],
+    duration: float,
+    opts: PipelineOptions,
+    bus: AsyncEventBus,
+) -> tuple[list[render_service.BrollInsert] | None, list[dict[str, Any]] | None]:
+    """B-roll inserts for the chapter's reel and their ``broll_assets``
+    records; ``(None, None)`` renders without B-roll.
+
+    Runs only when the job's ``render`` and ``broll`` options are on. With
+    ``settings.broll_provider == "none"`` (the default) it emits
+    ``StageSkipped(broll, reason="no provider")`` and does nothing else.
+    Otherwise ``broll_planner.plan_broll`` picks up to two 3 s windows over
+    the clip-relative ``words``, the provider fetches one clip per query (two
+    at a time, awaited on the loop; a failed or empty query drops its
+    insert) and ``BRollApplied`` reports what goes into the render. Never
+    fails the chapter: an error or nothing to show emits
+    ``StageSkipped(broll, reason)`` and the reel renders without B-roll.
+    Cancellation propagates.
+    """
+    if not (opts.render and opts.broll):
+        return None, None
+    provider_name = settings.broll_provider
+    if provider_name == "none":
+        reason = "no provider"
+    else:
+        step_t0 = time.perf_counter()
+        try:
+            provider = broll_service.get_broll_provider(provider_name)
+            plan = broll_planner.plan_broll(words, duration)
+            found = await broll_service.fetch_all(provider, [p.query for p in plan])
+            picks = [(p, a) for p, a in zip(plan, found) if a is not None]
+            inserts = [render_service.BrollInsert(a.path, p.start, p.duration) for p, a in picks]
+            render_service.validate_broll(inserts, duration)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — B-roll must never fail the chapter
+            log.exception("[%s] Chapter %d  B-roll failed; rendering without it", job_id, index)
+            reason = f"B-roll failed: {e}"
+        else:
+            if picks:
+                assets = [
+                    {
+                        "query": p.query, "start": p.start, "duration": p.duration,
+                        "provider": a.provider, "asset_id": a.asset_id, "author": a.author,
+                        "source_url": a.source_url, "path": a.path,
+                    }
+                    for p, a in picks
+                ]  # fmt: skip
+                log.info(
+                    "[%s] Chapter %d  B-roll (%.2fs)  provider=%s  inserts=%s",
+                    job_id, index, time.perf_counter() - step_t0, provider_name,
+                    [(a["query"], a["start"], a["asset_id"]) for a in assets],
+                )
+                await _emit(
+                    bus, EventType.BROLL_APPLIED, job_id,
+                    chapter_index=index, provider=provider_name, assets=assets,
+                )
+                return inserts, assets
+            reason = (
+                f"no B-roll found for: {', '.join(p.query for p in plan)}"
+                if plan
+                else "no keyword to illustrate"
+            )
+    log.info("[%s] Chapter %d  no B-roll: %s", job_id, index, reason)
+    await _emit(
+        bus, EventType.STAGE_SKIPPED, job_id,
+        stage_id="broll", chapter_index=index, reason=reason,
+    )
+    return None, None
