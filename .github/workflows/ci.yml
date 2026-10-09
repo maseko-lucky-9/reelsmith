@@ -70,3 +70,21 @@ jobs:
 
       - name: Build frontend
         run: cd web && pnpm build
+
+  # Constitution principle VI: secrets scan. On push/PR the action scans only
+  # the new commits; the allowlist in .gitleaks.toml covers full-history scans.
+  secrets:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write # gitleaks-action comments on PRs
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Scan for secrets with gitleaks
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml

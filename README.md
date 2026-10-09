@@ -30,7 +30,12 @@ YTVIDEO_JOB_STORE=memory uvicorn app.main:app --reload
 
 # 4. Start React dev server (separate terminal)
 cd web && pnpm install && pnpm dev
+
+# 5. Install the git hooks (once per clone)
+pip install pre-commit && pre-commit install
 ```
+
+`pre-commit install` wires `.pre-commit-config.yaml` into `.git/hooks/pre-commit`, so every commit runs gitleaks on the staged changes (using `.gitleaks.toml`) plus basic hygiene checks (large files, merge markers, YAML, private keys). A detected secret blocks the commit. CI runs the same gitleaks scan in the `secrets` job.
 
 Open **<http://localhost:5173>** in your browser.
 
