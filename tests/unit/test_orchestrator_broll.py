@@ -313,19 +313,21 @@ async def test_option_off_runs_nothing(
         assert call["broll"] is None
 
 
-async def test_the_default_render_call_is_unchanged(
+async def test_provider_none_renders_exactly_like_the_option_off(
     tmp_path, render_calls, memory_store, monkeypatch
 ):
-    """Default provider (none): the render gets ``broll=None``, which leaves
-    the ffmpeg argv byte-identical (``test_no_broll_argv_is_byte_identical``);
-    every other render argument is what it was before B-roll was wired."""
+    """Default provider (none) and ``broll`` off give the same render call:
+    ``broll=None``, which leaves the ffmpeg argv byte-identical
+    (``test_no_broll_argv_is_byte_identical_to_the_golden``)."""
     monkeypatch.setattr(orch.settings, "broll_provider", "none")
-
     await _chapter(tmp_path, _Bus(), await _seeded(memory_store))
+    monkeypatch.setattr(orch.settings, "broll_provider", "local")
+    off = _OPTS.model_copy(update={"broll": False})
+    await _chapter(tmp_path, _Bus(), memory_store, opts=off)
 
-    [call] = render_calls
-    assert set(call) == {"args", "word_timings", "caption_words_per_segment", "broll"}
-    assert call["broll"] is None
+    provider_none, option_off = render_calls
+    assert provider_none["broll"] is None
+    assert provider_none == option_off
 
 
 # ── failures never fail the chapter ───────────────────────────────────────────
