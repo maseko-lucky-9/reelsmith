@@ -291,3 +291,17 @@ def test_queued_job_with_same_url_is_a_duplicate(client):
 
     assert response.json() == {"job_id": "queued", "status": "pending"}
     assert client.app.state.job_queue.qsize() == 0
+
+
+# ── GET /clips?min_score ──────────────────────────────────────────────────────
+
+
+def test_list_clips_min_score_filter_is_inclusive(client):
+    for score in (49, 50, 51):
+        _add_clip(client, f"s{score}", virality_score=score)
+    _add_clip(client, "unscored", virality_score=None)
+
+    response = client.get("/clips", params={"min_score": 50})
+
+    assert response.status_code == 200
+    assert sorted(c["clip_id"] for c in response.json()) == ["s50", "s51"]
