@@ -32,7 +32,7 @@ from app.db.models import ClipRecord
 from app.db.session import get_session
 from app.settings import settings
 
-router = APIRouter(prefix="/api/clips", tags=["bulk-export"])
+router = APIRouter(prefix="/clips", tags=["bulk-export"])
 
 _STREAM_CHUNK_BYTES = 1024 * 1024
 

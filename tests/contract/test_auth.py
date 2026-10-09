@@ -17,7 +17,9 @@ from app.main import create_app
 from app.settings import settings
 
 KEY = "test-key"
-ROUTES = ["/health", "/clips", "/jobs"]
+# Each route at both of its addresses: the API is served at /x and /api/x
+# (T034), and the API key applies identically to both.
+ROUTES = ["/health", "/clips", "/jobs", "/api/health", "/api/clips", "/api/jobs"]
 
 
 def _client(monkeypatch: pytest.MonkeyPatch, *, require_auth: bool) -> TestClient:
@@ -79,9 +81,21 @@ def test_auth_off_leaves_routes_open(open_app, route):
     assert open_app.get(route).status_code == 200
 
 
-@pytest.mark.parametrize("route", ["/docs", "/redoc", "/openapi.json"])
+@pytest.mark.parametrize(
+    "route",
+    ["/docs", "/redoc", "/openapi.json", "/api/docs", "/api/redoc", "/api/openapi.json"],
+)
 def test_docs_routes_bypass_app_level_auth(secured, route):
     """Pins a known gap: FastAPI adds the docs routes outside the app-level
     ``dependencies``, so they stay open with auth on. Change this test on purpose
     if the gap is closed."""
     assert secured.get(route).status_code == 200
+
+
+@pytest.mark.parametrize(
+    "route", ["/clips/missing/ai-hook", "/api/clips/missing/ai-hook"]
+)
+def test_formerly_api_prefixed_route_needs_the_key_at_both_addresses(secured, route):
+    """Rejected before any route dependency runs, so no database is opened."""
+    assert secured.post(route).status_code == 401
+    assert secured.post(route, params={"token": "wrong-key"}).status_code == 401
