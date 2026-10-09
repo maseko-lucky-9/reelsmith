@@ -30,7 +30,7 @@ Format: `- [ ] T### [FR-xxx|E#] [Principle] description. Proving test → commit
 
 ## Phase 3: Scaffolded-unwired code (decide: wire or delete)
 
-- [ ] T010 [FR-032] **Decision**: start `PublishScheduler` in the lifespan, or drop `schedule_at` from the API and UI. Test: a job with a past `schedule_at` gets published → `feat(social): run the publish scheduler`
+- [x] T010 [FR-032] (done, owner decision 2026-10-09: dropped scheduling) `schedule_at` removed from `POST /social/publish` (now `extra="forbid"`, so a stale client gets 422 instead of an immediate post), from the publish responses and from the UI; `app/services/publish_scheduler.py` and its test deleted; the `publish_jobs.schedule_at` column stays unused (additive-only migrations). Test: `test_publish_create_rejects_schedule_at` → `feat(social)!: drop scheduled publishing`
 - [ ] T011 [FR-009] **Decision**: call `segment_proposer` at `app/workers/orchestrator.py:206` when a source has no chapters, or remove the option. Fix the overclaims in `docs/architecture.md:83` and `README.md:5` either way. Test: job on a chapterless fixture yields more than one scored clip → `feat(pipeline): run the segment proposer`
 - [ ] T012 [FR-010] **Decision**: wire reframe and B-roll, or default `reframe` and `broll` to off in `PipelineOptions`. Test: options gating test → `fix(pipeline): stop defaulting unwired stages on`
 - [ ] T013 [FR-023] **Decision**: wire animated captions, transitions, brand vocabulary, profanity filter and voice-over into the orchestrator, or mark them timeline-only. Spec 002 candidate.

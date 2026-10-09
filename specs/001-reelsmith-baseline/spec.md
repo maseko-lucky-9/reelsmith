@@ -94,14 +94,14 @@ A creator manages brand templates (logo, font, colours, caption style, vocabular
 
 ### User Story 6 - Publish to social platforms (Priority: P6)
 
-A creator connects accounts and publishes a clip now. Scheduled publishing is intended but not running.
+A creator connects accounts and publishes a clip now. Scheduled publishing was removed (FR-032).
 
 **Independent Test**: `POST /social/accounts`, `POST /social/publish`, `GET /social/jobs?status=`.
 
 **Acceptance Scenarios**:
 
-1. **Given** a connected account and a clip, **When** `POST /social/publish` without `schedule_at`, **Then** a `queued` publish job runs in the background and its status is readable.
-2. **Given** `schedule_at`, **When** `POST /social/publish`, **Then** a `pending` job is stored. *It is never picked up; the scheduler is not started, see FR-032.*
+1. **Given** a connected account and a clip, **When** `POST /social/publish`, **Then** a `queued` publish job runs in the background and its status is readable.
+2. **Given** a body with `schedule_at` (or any other unknown field), **When** `POST /social/publish`, **Then** 422 and no publish job is created (FR-032 removed).
 3. **Given** unknown clip or account ids, **Then** 404.
 4. **Given** TikTok, **When** `POST /social/tiktok/connect` stores a cookie session, **Then** `GET /social/tiktok/capabilities` reports what it can do.
 
@@ -180,7 +180,7 @@ A creator exports a clip for Premiere or DaVinci, or downloads many clips with a
 | ID | Requirement | Status | Evidence |
 |---|---|---|---|
 | FR-031 | The system MUST connect accounts (tokens Fernet-encrypted), publish immediately in the background, and list jobs by status. | Implemented | `tests/contract/test_social_publish_router.py`, `tests/unit/test_token_vault.py`, `test_social_adapters.py` |
-| FR-032 | The system MUST publish at `schedule_at`. | **Scaffolded-unwired** | `PublishScheduler` is referenced nowhere outside its own module; `app/main.py` never starts it. `tests/unit/test_publish_scheduler.py` tests it in isolation. |
+| FR-032 | ~~The system MUST publish at `schedule_at`.~~ | **Removed (owner decision 2026-10-09)** | T010: `schedule_at` dropped from the API and UI; `POST /social/publish` rejects it with 422 (`test_publish_create_rejects_schedule_at`). `publish_scheduler.py` and its test deleted. The `publish_jobs.schedule_at` column stays unused (constitution V, `docs/db-parity.md`). |
 | FR-033 | The system MUST support TikTok through a cookie session or an n8n sidecar. | Implemented | `tests/unit/test_tiktok_adapter.py`, `test_n8n_tiktok_adapter.py`, `test_registry_tiktok.py` |
 
 **Export**
