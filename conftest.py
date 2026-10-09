@@ -43,6 +43,10 @@ os.environ.setdefault("YTVIDEO_DEFAULT_DOWNLOAD_PATH", tempfile.mkdtemp(prefix="
 os.environ.setdefault("YTVIDEO_SOCIAL_PROVIDER", "stub")
 for _platform in ("YOUTUBE", "TIKTOK", "INSTAGRAM", "LINKEDIN", "X"):
     os.environ.setdefault(f"YTVIDEO_SOCIAL_PROVIDER_{_platform}", "")
+# Face-tracked reframe stays off (a developer's .env may turn it on) and its
+# model, if a test does download it, never lands in the project's data/models.
+os.environ.setdefault("YTVIDEO_REFRAME_PROVIDER", "letterbox")
+os.environ.setdefault("YTVIDEO_REFRAME_MODEL_DIR", tempfile.mkdtemp(prefix="reelsmith-test-models-"))
 
 
 @pytest.fixture(autouse=True)

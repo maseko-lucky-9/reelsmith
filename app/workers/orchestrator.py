@@ -29,6 +29,7 @@ from app.services import (
     manifest_service,
     ollama_service,
     platforms,
+    reframe_service,
     render_service,
     segment_discovery,
     segment_proposer,
@@ -563,7 +564,8 @@ async def _rerender_clip(trigger: Event, bus: AsyncEventBus, store: JobStore) ->
                 "[%s] Re-render of clip %s reuses the source words sidecar (%d words)",
                 job_id, clip_id, len(source_words),
             )
-        # reframe_provider is accepted but unused: reframe is unwired (task T012).
+        # The payload's reframe_provider is ignored: the provider is the
+        # server's settings.reframe_provider (see _reframe_step).
         await _process_chapter(
             chapter=chapter,
             job_id=job_id,
@@ -1070,6 +1072,59 @@ async def _finish_then_honour_cancel(coro: Coroutine[Any, Any, None]) -> None:
         raise asyncio.CancelledError
 
 
+async def _reframe_step(
+    *,
+    job_id: str,
+    index: int,
+    video_path: str,
+    start: float,
+    end: float,
+    target_aspect_ratio: float,
+    opts: PipelineOptions,
+    bus: AsyncEventBus,
+) -> list[tuple[float, float]] | None:
+    """Face-tracked crop track for the chapter's reel; ``None`` = letterbox.
+
+    Runs only when the job's ``reframe`` option is on AND
+    ``settings.reframe_provider == "face_track"`` (default ``letterbox``:
+    then the render is exactly as before). Detection decodes the chapter in a
+    worker thread via ``to_thread_cancellable``, so a cancel stops the decode
+    and waits for it. Never fails the chapter: an error, a split screen,
+    several similar faces or no face emits ``StageSkipped(reframe, reason)``
+    and the reel is letterboxed. Cancellation propagates.
+    """
+    if not opts.reframe or settings.reframe_provider != "face_track":
+        return None
+    log.info("[%s] Chapter %d  face tracking  window=%.1f-%.1fs", job_id, index, start, end)
+    step_t0 = time.perf_counter()
+    try:
+        plan = await ffmpeg_tools.to_thread_cancellable(
+            reframe_service.face_track, video_path, start, end, target_aspect_ratio
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001 — reframe must never fail the chapter
+        log.exception("[%s] Chapter %d  face tracking failed; letterbox", job_id, index)
+        reason = f"face tracking failed: {e}"
+    else:
+        if plan.track is not None:
+            log.info(
+                "[%s] Chapter %d  face track (%.2fs)  keyframes=%d  %s",
+                job_id, index, time.perf_counter() - step_t0, len(plan.track), plan.reason,
+            )
+            return plan.track
+        reason = plan.reason
+        log.info(
+            "[%s] Chapter %d  no face track (%.2fs): %s; letterbox",
+            job_id, index, time.perf_counter() - step_t0, reason,
+        )
+    await _emit(
+        bus, EventType.STAGE_SKIPPED, job_id,
+        stage_id="reframe", chapter_index=index, reason=reason,
+    )
+    return None
+
+
 async def _process_chapter(
     *,
     chapter: dict[str, Any],
@@ -1354,6 +1409,10 @@ async def _process_chapter(
         step_t0 = time.perf_counter()
         await store.upsert_chapter(job_id, lambda c: _set_status(c, "rendering"), index)
         output_path = render_to or str(Path(clips_folder) / f"{index:02d}_{safe_title}.mp4")
+        crop_track = await _reframe_step(
+            job_id=job_id, index=index, video_path=video_path, start=start, end=end,
+            target_aspect_ratio=target_aspect_ratio, opts=opts, bus=bus,
+        )
         # Reads the SOURCE and trims [start, end) itself — one ffmpeg pass.
         # Cancellation (e.g. this wait_for timing out) kills that ffmpeg.
         await asyncio.wait_for(
@@ -1368,6 +1427,7 @@ async def _process_chapter(
                 word_timings=words,
                 broll=broll_inserts,
                 caption_words_per_segment=settings.caption_words_per_segment,
+                crop_track=crop_track,
             ),
             timeout=settings.render_timeout_seconds,
         )
