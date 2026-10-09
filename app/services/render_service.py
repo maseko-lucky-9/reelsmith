@@ -29,6 +29,20 @@ tests/unit/test_render_sync.py):
   default "last frame <= t" rule jitters.
 * ``-t D`` is explicit: the looped background is infinite.
 * VFR sources are written at a constant ``ffmpeg_tools.fps`` (average) rate.
+
+Moving crop (``crop_track``, reframe): instead of the letterboxed inset, a
+canvas-aspect window of the source pans horizontally and fills the canvas::
+
+    [0:v] setpts=PTS-STARTPTS, crop=w=CW:h=CH:x='X(t)':y=CY,
+          scale=W:H                                      [in]   full bleed
+    [bg][in] overlay=0:0:ts_sync_mode=nearest             [b]
+
+Everything else (background grid, nearest sync, captions, even crop,
+yuv420p, ``-map 0:a:0?``) is the same graph. ``X(t)`` is ``crop_x_expr``: a
+FLAT sum of half-open per-segment terms (ffmpeg's expression parser limits
+nesting depth, so a chain of nested ``if()`` cannot hold 64 keyframes). crop
+evaluates ``x`` for every frame, with ``t`` = seconds since the first kept
+frame (the chapter start), and rounds it down to an even column for 4:2:0.
 """
 
 import logging
@@ -36,6 +50,8 @@ import math
 import os
 import tempfile
 import uuid
+from collections.abc import Sequence
+from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
 
@@ -108,6 +124,131 @@ def inset_y(geometry: clip_service.ReelGeometry) -> int:
     return even_floor((geometry.canvas_size[1] - geometry.source_size[1]) // 2)
 
 
+# ── Moving crop (reframe) ─────────────────────────────────────────────────────
+
+# A keyframe is (t, x_left): ``t`` seconds from the chapter start (output
+# t=0), ``x_left`` the crop window's left edge in SOURCE pixels. Values outside
+# [0, src_w - crop_w] are clamped before interpolation, so every interpolated
+# x is in range too.
+CropKeyframe = tuple[float, float]
+CropTrack = Sequence[CropKeyframe]
+
+MAX_CROP_KEYFRAMES = 64
+_TIME_DECIMALS = 6
+_X_DECIMALS = 3
+
+
+@dataclass(frozen=True)
+class PanCrop:
+    """Size and fixed top row of the moving crop window, in source pixels."""
+
+    width: int
+    height: int
+    y: int
+
+
+def pan_crop(geometry: clip_service.ReelGeometry) -> PanCrop:
+    """The largest even, canvas-aspect window of the source.
+
+    A landscape source keeps its full height and pans horizontally over
+    ``src_w - width`` columns; a source already narrower than the canvas
+    aspect keeps its full width (no pan room) and is cropped vertically
+    around its centre instead.
+    """
+    src_w, src_h = geometry.source_size
+    canvas_w, canvas_h = geometry.canvas_size
+    width = even_floor(min(src_w, round(src_h * canvas_w / canvas_h)))
+    height = even_floor(min(src_h, round(src_w * canvas_h / canvas_w)))
+    if width <= 0 or height <= 0:
+        raise ValueError(f"source {src_w}x{src_h} is too small for a pan crop")
+    return PanCrop(width=width, height=height, y=even_floor((src_h - height) // 2))
+
+
+def _num(value: float, decimals: int) -> str:
+    """Shortest fixed-point text for ``value`` (no exponent: ffmpeg's parser
+    would read ``1e-07`` fine, but fixed text keeps knots exact and readable)."""
+    text = f"{value:.{decimals}f}".rstrip("0").rstrip(".")
+    return "0" if text in ("", "-0") else text
+
+
+def _normalise_track(track: CropTrack, max_x: float) -> list[CropKeyframe]:
+    """Validate, round and clamp keyframes exactly as they are printed."""
+    if not 1 <= len(track) <= MAX_CROP_KEYFRAMES:
+        raise ValueError(
+            f"crop track needs 1..{MAX_CROP_KEYFRAMES} keyframes, got {len(track)}"
+        )
+    knots: list[CropKeyframe] = []
+    for t, x in track:
+        if not (math.isfinite(t) and math.isfinite(x)):
+            raise ValueError(f"crop keyframe ({t}, {x}) is not finite")
+        if t < 0:
+            raise ValueError(f"crop keyframe time {t} is negative")
+        t = round(t, _TIME_DECIMALS)
+        if knots and t < knots[-1][0]:
+            raise ValueError(
+                f"crop keyframe times must not decrease ({t} after {knots[-1][0]})"
+            )
+        knots.append((t, round(min(max(x, 0.0), max_x), _X_DECIMALS)))
+    return knots
+
+
+def crop_x_expr(track: CropTrack, src_w: int, crop_w: int) -> str:
+    """ffmpeg expression for the crop's left edge at time ``t``.
+
+    Piecewise-linear through the keyframes, holding the first value before
+    the first keyframe and the last value from the last one on. Built as a
+    flat sum so its depth does not grow with the keyframe count::
+
+        lt(t,t0)*x0 + sum_i gte(t,ti)*lt(t,ti+1)*(xi + dxi*(t-ti)/dti)
+                    + gte(t,tn)*xn
+
+    The intervals are half-open and share their printed endpoints, so
+    exactly one term is non-zero for every ``t``, knots included (``between``
+    is inclusive at both ends and would count a knot twice). Keyframes at the
+    same time make a hard cut: the zero-length segment between them emits no
+    term, the earlier value ends the incoming ramp and the later one starts
+    the next. The expression contains no ``'``, ``:``, ``;``, ``[`` or ``]``,
+    so it can be single-quoted inside a filtergraph.
+    """
+    if not 0 < crop_w <= src_w:
+        raise ValueError(f"crop width {crop_w} must be in (0, {src_w}]")
+    knots = _normalise_track(track, float(src_w - crop_w))
+    if len({x for _t, x in knots}) == 1:
+        return _num(knots[0][1], _X_DECIMALS)
+
+    def t_(v: float) -> str:
+        return _num(v, _TIME_DECIMALS)
+
+    def x_(v: float) -> str:
+        return _num(v, _X_DECIMALS)
+
+    (t0, x0), (tn, xn) = knots[0], knots[-1]
+    terms = [f"lt(t,{t_(t0)})*{x_(x0)}"]
+    for (ta, xa), (tb, xb) in zip(knots, knots[1:]):
+        if tb == ta:
+            continue  # zero-length segment: a hard cut, never active
+        dx = round(xb - xa, _X_DECIMALS)
+        sign = "+" if dx >= 0 else "-"
+        terms.append(
+            f"gte(t,{t_(ta)})*lt(t,{t_(tb)})"
+            f"*({x_(xa)}{sign}{x_(abs(dx))}*(t-{t_(ta)})/{t_(tb - ta)})"
+        )
+    terms.append(f"gte(t,{t_(tn)})*{x_(xn)}")
+    return "+".join(terms)
+
+
+def _pan_chain(geometry: clip_service.ReelGeometry, track: CropTrack) -> str:
+    """``[in]`` filters for the moving crop: pan the window, fill the canvas."""
+    src_w, _src_h = geometry.source_size
+    canvas_w, canvas_h = geometry.canvas_size
+    window = pan_crop(geometry)
+    x = crop_x_expr(track, src_w, window.width)
+    return (
+        f"crop=w={window.width}:h={window.height}:x='{x}':y={window.y},"
+        f"scale={canvas_w}:{canvas_h}"
+    )
+
+
 def background_still(
     src: str,
     start: float,
@@ -138,16 +279,25 @@ def build_reel_argv(
     background_png: str,
     captions: caption_track.CaptionTrack | None,
     captions_dir: str | None,
+    crop_track: CropTrack | None = None,
 ) -> list[str]:
-    """ffmpeg argv for one reel (see module docstring for the graph)."""
+    """ffmpeg argv for one reel (see module docstring for the graph).
+
+    ``crop_track`` replaces the letterboxed inset with the moving full-bleed
+    crop; ``None`` leaves the graph byte-for-byte as before.
+    """
     canvas_w, _canvas_h = geometry.canvas_size
     fps = grid_rate(fps)
     timebase = math.lcm(fps.numerator, 1000)
     step = fps.denominator * (timebase // fps.numerator)
+    if crop_track is None:
+        inset, inset_top = f"scale={canvas_w}:-2", inset_y(geometry)
+    else:
+        inset, inset_top = _pan_chain(geometry, crop_track), 0
     graph = [
         f"[1:v]loop=loop=-1:size=1:start=0,settb=expr=1/{timebase},setpts=N*{step}[bg]",
-        f"[0:v]setpts=PTS-STARTPTS,scale={canvas_w}:-2[in]",
-        f"[bg][in]overlay=x=0:y={inset_y(geometry)}:ts_sync_mode=nearest[b]",
+        f"[0:v]setpts=PTS-STARTPTS,{inset}[in]",
+        f"[bg][in]overlay=x=0:y={inset_top}:ts_sync_mode=nearest[b]",
     ]
     inputs = [
         "-ss", f"{start:.6f}", "-t", f"{duration:.6f}", "-i", src,
@@ -221,6 +371,7 @@ def render_clip(
     target_aspect_ratio: float = 9 / 16,
     word_timings=None,
     caption_words_per_segment: int = 3,
+    crop_track: CropTrack | None = None,
 ) -> str:
     """Render ``[start, end)`` of ``video_path`` to ``output_path``.
 
@@ -228,6 +379,11 @@ def render_clip(
     or a ``captions_path`` (.srt/.vtt), the source is reframed onto a
     ``target_aspect_ratio`` canvas over its blurred background with captions
     burned in. With neither, the chapter is trimmed and re-encoded as is.
+
+    ``crop_track`` (reel renders only) pans a canvas-aspect window of the
+    source over time instead of letterboxing it: keyframes are
+    ``(seconds from start, crop left edge in source px)``, see
+    ``crop_x_expr``. The output size, frame grid and audio are unchanged.
     """
     log.info(
         "Rendering clip %s [%.3f, %.3f] -> %s", video_path, start, end, output_path
@@ -239,6 +395,10 @@ def render_clip(
     fps = ffmpeg_tools.fps(video_path)
 
     if word_timings is None and not captions_path:
+        if crop_track is not None:
+            raise ValueError(
+                "crop_track needs a reel render (word_timings or captions_path)"
+            )
         log.info("No captions provided; rendering clip without subtitles")
         argv = build_trim_argv(
             video_path, output_path, start=start, duration=duration, fps=fps
@@ -280,6 +440,7 @@ def render_clip(
             background_png=background_png,
             captions=track,
             captions_dir=work,
+            crop_track=crop_track,
         )
         _run_atomically(argv, output_path)
     log.info("Render complete  output=%s", output_path)
