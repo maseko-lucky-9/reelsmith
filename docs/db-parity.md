@@ -55,6 +55,12 @@ break it.
 7. **`server_default`** for new not-null columns OR backfill in a follow-up
    migration before flipping nullability.
 
+### Unused columns kept by rule 2
+
+| Column | Unused since | Why it stays |
+|---|---|---|
+| `publish_jobs.schedule_at` (+ `ix_publish_jobs_schedule_at`) | Scheduled publishing dropped (FR-032, T010) | No `DROP COLUMN`. The API no longer reads or writes it and rejects `schedule_at` in `POST /social/publish` with 422. Rows written before the drop may carry it with `status=pending`; nothing advances them. |
+
 ## Models match migrations
 
 Deployed databases were built by the migrations, so the migrations are the

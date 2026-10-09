@@ -17,6 +17,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db.base import Base
 from app.db.models import ClipRecord, JobRecord
+from app.domain.ids import new_job_id
+from app.services.folder_service import create_video_subfolder
 from app.services.retention import sweep_expired_clips
 
 RETENTION_DAYS = 30
@@ -214,3 +216,49 @@ async def test_files_survive_when_the_retire_commit_fails(factory, seeded):
     assert (await _retired_flags(factory))[seeded["ids"]["old"]] is False
     assert seeded["files"]["old_mp4"].exists()
     assert seeded["files"]["old_jpg"].exists()
+
+
+async def _two_jobs_one_clip_each(factory, old_path: Path, new_path: Path) -> dict[str, str]:
+    """An expired clip of an older job and a live clip of a newer job."""
+    async with factory() as session:
+        old_job = JobRecord(youtube_url="upload:///u/a.mp4", created_at=OLD)
+        new_job = JobRecord(youtube_url="upload:///u/b.mp4", created_at=NEW)
+        session.add_all([old_job, new_job])
+        await session.flush()
+        old = ClipRecord(job_id=old_job.id, output_path=str(old_path), created_at=OLD)
+        new = ClipRecord(job_id=new_job.id, output_path=str(new_path), created_at=NEW)
+        session.add_all([old, new])
+        await session.commit()
+        return {"old": old.id, "new": new.id}
+
+
+async def test_sweeping_an_old_upload_job_keeps_the_newer_jobs_clip(factory, tmp_path):
+    """T030: two upload jobs render the same clip name; with per-job folders
+    the sweep of the older job cannot reach the newer job's file."""
+    url = "upload:///tmp/yt/uploads/x.mp4"
+    _, clips_old = create_video_subfolder(str(tmp_path), url, "upload", job_id=new_job_id())
+    _, clips_new = create_video_subfolder(str(tmp_path), url, "upload", job_id=new_job_id())
+    old_path = _file(Path(clips_old) / "00_Full Video.mp4", b"old")
+    new_path = _file(Path(clips_new) / "00_Full Video.mp4", b"new")
+    ids = await _two_jobs_one_clip_each(factory, old_path, new_path)
+
+    swept = await sweep_expired_clips(factory, retention_days=RETENTION_DAYS, now=NOW)
+
+    assert swept == [ids["old"]]
+    assert not old_path.exists()
+    assert new_path.read_bytes() == b"new"
+
+
+async def test_a_path_shared_with_a_live_clip_is_not_deleted(factory, tmp_path):
+    """T030: rows written before per-job folders can share one file. Retiring
+    the older row must not delete the file the newer, live row points at."""
+    shared = _file(tmp_path / "00_Full Video.mp4", b"newer job")
+    ids = await _two_jobs_one_clip_each(factory, shared, shared)
+
+    swept = await sweep_expired_clips(factory, retention_days=RETENTION_DAYS, now=NOW)
+
+    assert swept == [ids["old"]]
+    flags = await _retired_flags(factory)
+    assert flags[ids["old"]] is True
+    assert flags[ids["new"]] is False
+    assert shared.read_bytes() == b"newer job"

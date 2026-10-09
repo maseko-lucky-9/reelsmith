@@ -5,7 +5,8 @@ The row is retired and committed *before* any file is deleted, so a failed
 commit never leaves a live clip pointing at missing files. Only the files the
 pipeline writes per clip (``output_path``, ``thumbnail_path``) are deleted;
 jobs and their source video (``jobs.video_path``, needed for re-render) are
-never touched.
+never touched. A file that a live clip still references is kept: rows written
+before per-job output folders (T030) can share one path across jobs.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.models import ClipRecord
@@ -48,11 +49,30 @@ async def sweep_expired_clips(
             .returning(ClipRecord.id, ClipRecord.output_path, ClipRecord.thumbnail_path)
         )
         rows = result.all()
+        candidates = {raw for _, *paths in rows for raw in paths if raw}
+        still_live: set[str] = set()
+        if candidates:
+            live = await session.execute(
+                select(ClipRecord.output_path, ClipRecord.thumbnail_path)
+                .where(ClipRecord.retired.is_(False))
+                .where(
+                    or_(
+                        ClipRecord.output_path.in_(candidates),
+                        ClipRecord.thumbnail_path.in_(candidates),
+                    )
+                )
+            )
+            still_live = {raw for pair in live.all() for raw in pair if raw}
         await session.commit()
 
     for clip_id, *paths in rows:
         for raw in paths:
             if not raw:
+                continue
+            if raw in still_live:
+                log.warning(
+                    "retention: kept %s (clip %s): a live clip still uses it", raw, clip_id
+                )
                 continue
             try:
                 Path(raw).unlink(missing_ok=True)

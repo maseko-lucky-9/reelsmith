@@ -408,7 +408,6 @@ export interface PublishCreate {
   title?: string
   description?: string
   hashtags?: string[]
-  schedule_at?: string
 }
 
 export interface PublishJob {
@@ -426,7 +425,6 @@ export interface PublishJob {
     | 'posted_unverified'
     | 'failed'
     | 'cancelled'
-  schedule_at: string | null
   posted_at: string | null
   external_post_id: string | null
   external_post_url: string | null
