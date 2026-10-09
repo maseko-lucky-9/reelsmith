@@ -3,7 +3,7 @@
 ## Event Flow
 
 ```
-POST /jobs   (uploads, generate and clip-rerender routers enqueue the same way)
+POST /jobs   (uploads, generate, clip-rerender and reprompt routers enqueue the same way)
     │
     ▼
 job_queue (asyncio.Queue) → queue worker → AsyncEventBus.publish(VIDEO_REQUESTED)
@@ -13,6 +13,7 @@ run_orchestrator  (max_concurrent_jobs semaphore around each _run_job;
     │              jobs waiting for a slot stay "pending")
     ├─ FOLDER_CREATED
     ├─ VIDEO_DOWNLOADED
+    ├─ SEGMENTS_PROPOSED, SEGMENT_SCORED  (opt-in clip discovery, no-chapter sources only)
     ├─ CHAPTERS_DETECTED
     ├─ [per chapter/segment fan-out: asyncio.TaskGroup, max_parallel_chapters;
     │    first failing chapter cancels the rest (their ffmpeg is killed)
@@ -22,7 +23,8 @@ run_orchestrator  (max_concurrent_jobs semaphore around each _run_job;
     │   ├─ CHAPTER_TRANSCRIBED
     │   ├─ FILLERS_REMOVED
     │   ├─ CAPTIONS_GENERATED
-    │   ├─ CLIP_RENDERED
+    │   ├─ BROLL_APPLIED           (opt-in B-roll; before the render)
+    │   ├─ CLIP_RENDERED           (opt-in face-track reframe runs just before it)
     │   ├─ THUMBNAIL_GENERATED
     │   ├─ AI_HOOK_GENERATED
     │   └─ SOCIAL_CONTENT_GENERATED
@@ -30,10 +32,15 @@ run_orchestrator  (max_concurrent_jobs semaphore around each _run_job;
     ├─ MANIFEST_CREATED
     ├─ JOB_COMPLETED
     └─ JOB_FAILED
-    (STAGE_SKIPPED for each stage turned off in PipelineOptions)
+    (STAGE_SKIPPED for each stage turned off in PipelineOptions, and with a
+     reason when reframe or B-roll falls back or discovery is skipped or fails)
+    A reprompt of a completed job ends with JOB_REPROMPTED + JOB_COMPLETED,
+    or REPROMPT_FAILED; it never emits JOB_FAILED (see Reprompt).
 
 React SSE: GET /jobs/:id/events → EventSource streams events above
 ```
+
+**Not in the pipeline.** Animated captions, transitions, brand vocabulary, the profanity filter and voice-over exist as services with unit tests, but the orchestrator imports none of them (the `TODO(orchestrator-wiring-wave-2)` note in `_process_chapter`), and brand templates are stored but not applied to renders. Analytics, share links, webhooks and API tokens have tables and services but no routes of their own, and workspaces have tables only. All are roadmap specs, see [specs/README.md](../specs/README.md).
 
 ## Clip Discovery
 
@@ -75,7 +82,7 @@ Two optional inputs extend the same graph (FR-010): `broll` is passed by the orc
 
 - **Plan.** `broll_planner.plan_broll(words, duration)` is pure and deterministic: at most two 3 s windows on the clip's own clock, none starting before 3.0 s or ending after `duration - 2.0` s, at least 1 s apart. Each window's query is the longest token spoken inside it (lowercase, at least 4 letters, letters only, not one of the segment proposer's stopwords); windows are ranked by query length, then earliest start, one window per query. A clip under 8 s gets none.
 - **Fetch.** `broll_service.fetch_all` asks the provider for each query, two at a time on the event loop. `local` matches keyword-named `*.mp4` files in `YTVIDEO_BROLL_LIBRARY_DIR`; `pexels` (`broll_pexels_service`) searches Pexels videos with `YTVIDEO_PEXELS_API_KEY`, downloads at most 50 MB from `*.pexels.com` hosts only and caches by Pexels video id in `YTVIDEO_BROLL_CACHE_DIR`. A failed or empty query, or a file that does not decode, drops that one insert.
-- **Render and record.** Found assets become `BrollInsert`s for `render_clip(broll=...)`; `BRollApplied` reports them and the clip's `broll_assets` keeps `query, start, duration, provider, asset_id, author, source_url, path`. The export manifest's `broll_credits` column credits each asset (Pexels asks for the videographer and a link).
+- **Render and record.** Found assets become `BrollInsert`s for `render_clip(broll=...)`; `BRollApplied` reports them and the clip's `broll_assets` keeps `query, start, duration, provider, asset_id, author, source_url, path`. The job's export `manifest.csv` (`manifest_service`) has a `broll_credits` column that credits each asset (Pexels asks for the videographer and a link). The bulk-export zip's manifest has no such column, and the UI does not show credits yet (task T039).
 - **Never fatal.** Any error, or nothing found, emits `StageSkipped(broll, reason)` and the reel renders without B-roll; cancellation propagates. A re-render goes through the same step, so it refreshes (or clears) `broll_assets`.
 
 ## Live Progress (SSE)
@@ -92,7 +99,7 @@ Two optional inputs extend the same graph (FR-010): `broll` is passed by the orc
 | Feature | Setting | Values |
 |---|---|---|
 | Transcription | `YTVIDEO_TRANSCRIPTION_PROVIDER` | `whisper`, `stub` |
-| Segment scoring | `YTVIDEO_SEGMENT_PROVIDER` | `chapter`, `local_heuristic`, `stub` |
+| Segment scoring | `YTVIDEO_SEGMENT_PROVIDER` | `chapter` (default: no discovery, one "Full Video" clip per chapterless source), `local_heuristic`, `stub` (one fixed 0-30 s segment, for tests); any value but `chapter` turns discovery on |
 | Reframe | `YTVIDEO_REFRAME_PROVIDER` | `letterbox` (default), `face_track`; any other value is `letterbox` |
 | B-Roll | `YTVIDEO_BROLL_PROVIDER` | `none` (default), `local`, `pexels` |
 | Job store | `YTVIDEO_JOB_STORE` | `memory`, `sql` |
