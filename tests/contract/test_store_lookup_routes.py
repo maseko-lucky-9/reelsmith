@@ -169,6 +169,12 @@ def test_unknown_clip_media_is_404(client, route):
 
 
 def test_rerender_queues_job_without_scanning_clips(client, monkeypatch, media_files):
+    _add_job(client, "job-1", URL, "completed")
+    client.portal.call(
+        _store(client).update,
+        "job-1",
+        lambda s: setattr(s, "video_path", media_files["output_path"]),
+    )
     _add_clip(client, "c1", **media_files)
     spies = _spy_on_scans(client, monkeypatch)
 

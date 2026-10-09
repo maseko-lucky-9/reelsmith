@@ -40,6 +40,8 @@ log = logging.getLogger(__name__)
 
 
 _SAFE_CHAR_RE = re.compile(r"[^\w\-_. ]")
+# Leading chapter index of a rendered clip's file name ({index:02d}_{title}.mp4).
+_CLIP_INDEX_RE = re.compile(r"^(\d+)_")
 
 
 def _sanitize(name: str) -> str:
@@ -87,6 +89,10 @@ async def _emit(bus: AsyncEventBus, type_: EventType, job_id: str, **payload: An
 
 
 async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
+    if trigger.payload.get("rerender_clip_id"):
+        await _rerender_clip(trigger, bus, store)
+        return
+
     job_id = trigger.job_id
     payload = trigger.payload
     url: str = payload["url"]
@@ -99,22 +105,7 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
     # apply settings.default_transcription_language.
     language: str | None = payload.get("language")
 
-    # ── Pipeline options with server-side safety net (G2) ────────────────────
-    raw_opts = payload.get("pipeline_options")
-    if raw_opts and isinstance(raw_opts, dict):
-        opts = PipelineOptions(**raw_opts)
-    else:
-        opts = PipelineOptions()
-
-    # Enforce dependency rules server-side regardless of what UI sent
-    if not opts.transcription:
-        opts.captions = False
-        opts.filler_removal = False
-        opts.ai_hook = False
-    if not opts.render:
-        opts.reframe = False
-        opts.broll = False
-        opts.thumbnail = False
+    opts = _effective_options(payload.get("pipeline_options"))
 
     log.info("[%s] Job started  url=%s  format=%s", job_id, url, caption_format)
     job_t0 = time.perf_counter()
@@ -342,6 +333,109 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
             shutil.rmtree(cleanup_root, ignore_errors=True)
 
 
+def _effective_options(raw_opts: Any) -> PipelineOptions:
+    """Pipeline options from a payload, with the server-side safety net (G2)."""
+    if raw_opts and isinstance(raw_opts, dict):
+        opts = PipelineOptions(**raw_opts)
+    else:
+        opts = PipelineOptions()
+
+    # Enforce dependency rules server-side regardless of what UI sent
+    if not opts.transcription:
+        opts.captions = False
+        opts.filler_removal = False
+        opts.ai_hook = False
+    if not opts.render:
+        opts.reframe = False
+        opts.broll = False
+        opts.thumbnail = False
+    return opts
+
+
+def _chapter_for_clip(clip: dict[str, Any]) -> dict[str, Any]:
+    """Rebuild the chapter a clip was rendered from.
+
+    Chapter bounds are not persisted per chapter, but the clip keeps its own
+    start/end/title, and its file name keeps the chapter index, so the
+    re-render writes the same ``{index:02d}_{title}.mp4`` it replaces.
+    """
+    match = _CLIP_INDEX_RE.match(Path(clip["output_path"]).name)
+    return {
+        "index": int(match.group(1)) if match else 0,
+        "title": clip.get("title") or "",
+        "start": float(clip.get("start") or 0.0),
+        "end": float(clip.get("end") or 0.0),
+    }
+
+
+async def _rerender_clip(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
+    """Re-render one clip of a completed job in place, from its saved source.
+
+    The job's status, step, error and outputs are left alone and neither
+    JobCompleted nor JobFailed is emitted. A failure is logged and swallowed:
+    the clip keeps its fields and render_clip's atomic replace keeps its
+    previous file. Cancellation propagates.
+    """
+    job_id = trigger.job_id
+    payload = trigger.payload
+    clip_id: str = payload["rerender_clip_id"]
+    log.info("[%s] Re-render of clip %s started", job_id, clip_id)
+    t0 = time.perf_counter()
+    cleanup_root: Path | None = None
+    try:
+        job = await store.get(job_id)
+        clip = await store.get_clip(clip_id)
+        if clip is None or clip.get("job_id") != job_id:
+            log.error("[%s] Re-render skipped: clip %s not found", job_id, clip_id)
+            return
+        output_path = clip.get("output_path")
+        if not output_path:
+            log.error("[%s] Re-render skipped: clip %s was never rendered", job_id, clip_id)
+            return
+        if not job.video_path or not Path(job.video_path).is_file():
+            log.error(
+                "[%s] Re-render skipped: source video not retained (%s)",
+                job_id, job.video_path,
+            )
+            return
+
+        clips_folder = str(Path(output_path).parent)
+        cleanup_root = Path(clips_folder) / "_tmp" / f"{job_id}-rerender-{clip_id[:8]}"
+        cleanup_root.mkdir(parents=True, exist_ok=True)
+        # A re-render always renders, whatever the job's options said.
+        raw_opts = payload.get("pipeline_options") or job.pipeline_options.model_dump()
+        # reframe_provider is accepted but unused: reframe is unwired (task T012).
+        await _process_chapter(
+            chapter=_chapter_for_clip(clip),
+            job_id=job_id,
+            video_path=job.video_path,
+            clips_folder=clips_folder,
+            cleanup_root=cleanup_root,
+            caption_format=payload.get("caption_format", job.caption_format),
+            target_aspect_ratio=payload.get("target_aspect_ratio", job.target_aspect_ratio),
+            bus=bus,
+            store=store,
+            pipeline_options=_effective_options({**raw_opts, "render": True}),
+            language=payload.get("language", job.language),
+            clip_id=clip_id,
+        )
+        log.info(
+            "[%s] Re-render of clip %s done in %.2fs",
+            job_id, clip_id, time.perf_counter() - t0,
+        )
+    except asyncio.CancelledError:
+        log.warning("[%s] Re-render of clip %s cancelled", job_id, clip_id)
+        raise
+    except Exception:  # noqa: BLE001 — a failed re-render must not fail the job
+        log.exception(
+            "[%s] Re-render of clip %s failed after %.2fs; clip left unchanged",
+            job_id, clip_id, time.perf_counter() - t0,
+        )
+    finally:
+        if cleanup_root is not None:
+            shutil.rmtree(cleanup_root, ignore_errors=True)
+
+
 async def _record_failure(
     bus: AsyncEventBus, store: JobStore, job_id: str, error: str
 ) -> None:
@@ -394,7 +488,10 @@ async def _process_chapter(
     store: JobStore,
     pipeline_options: PipelineOptions | None = None,
     language: str | None = None,
+    clip_id: str | None = None,
 ) -> str | None:
+    """Process one chapter into a clip; ``clip_id`` updates an existing clip
+    in place (re-render) instead of creating a new one."""
     index = int(chapter["index"])
     title = chapter["title"]
     start = float(chapter["start"])
@@ -663,7 +760,7 @@ async def _process_chapter(
         )
 
     # ── Thumbnail (gated on render + thumbnail) ──────────────────────────────
-    clip_id = str(uuid.uuid4())
+    clip_id = clip_id or str(uuid.uuid4())
     thumbnail_path: str | None = None
     if opts.render and opts.thumbnail and output_path:
         try:
