@@ -8,9 +8,10 @@ holds the pure pieces it needs:
   clock, so captions never get negative or out-of-range times;
 * the ``<source stem>.words.json`` sidecar keeps the full-source transcript
   next to the source video, so a later single-clip re-render reuses it;
-* ``select_discovered`` keeps segments relative to the best one, because the
-  heuristic scores of ``LocalHeuristicProposer`` run low (about 5-40 on real
-  speech) and any fixed bar would either keep everything or drop everything;
+* ``select_discovered`` picks highlights rather than slicing the source: a
+  bar relative to the best score (heuristic scores run low, about 13-38 on a
+  real talk, so no fixed bar works), a clip budget that grows with the
+  source's length, and a cap on how much of the source the clips may cover;
 * ``segments_to_chapters`` gives the kept segments the same chapter shape the
   YouTube-chapter path builds, plus the score fields the clip row stores.
 """
@@ -27,16 +28,33 @@ from pathlib import Path
 from typing import Any
 
 from app.domain.models import PipelineOptions
-from app.services.segment_proposer import ProposedSegment, select_segments
+from app.services.segment_proposer import ProposedSegment
 from app.services.transcription_service import WordTiming
 from app.settings import settings
 
 log = logging.getLogger(__name__)
 
-# Clips one discovery keeps at most (no per-job option exists yet).
+# Selection rules (``select_discovered``). Module constants, not settings: they
+# are calibration, not deployment config.
+
 DEFAULT_MAX_CLIPS = 5
-# A segment is kept when it scores at least this share of the best segment.
-MIN_SCORE_RATIO = 0.4
+"""Most clips one discovery keeps, however long the source."""
+
+SECONDS_PER_CLIP = 120
+"""Clip budget: one clip per this many seconds of source, rounded half up and
+clamped to 1..DEFAULT_MAX_CLIPS (236 s -> 2, 10 min -> 5). A 4-minute talk
+with 5 clips of ~40 s was sliced end to end, intro included (gate G1)."""
+
+MAX_COVERAGE = 0.5
+"""The kept clips together may cover at most this share of the source (exactly
+half is allowed). The best segment is always kept, whatever its length."""
+
+MIN_SCORE_RATIO = 0.6
+"""A segment is kept only if it scores at least this share of the best one. At
+0.4 the bar dropped just 2 of 32 candidates on the G1 talk."""
+
+# Absorbs float noise when clip lengths are summed against the coverage cap.
+_COVERAGE_EPSILON = 1e-6
 # Same floor the chapter path uses when it clamps chapters to the safe end.
 MIN_CHAPTER_SECONDS = 0.5
 _SIDECAR_SUFFIX = ".words.json"
@@ -118,20 +136,55 @@ def read_words_sidecar(video_path: str) -> list[WordTiming] | None:
 def relative_min_score(
     segments: Sequence[ProposedSegment], ratio: float = MIN_SCORE_RATIO
 ) -> int:
-    """``floor(ratio * best score)``, never below 0 (0 for no segments)."""
+    """The lowest integer score that is at least ``ratio * best``.
+
+    Never below 0; 0 for no segments. Rounded to 9 places before ``ceil`` so a
+    product such as 0.6 * 30 that lands a hair above 18 still gives 18.
+    """
     if not segments:
         return 0
     best = max(s.score for s in segments)
-    return max(0, math.floor(ratio * best))
+    return max(0, math.ceil(round(ratio * best, 9)))
+
+
+def clip_budget(duration: float) -> int:
+    """How many clips a source of ``duration`` seconds may yield (see
+    ``SECONDS_PER_CLIP``). Rounds half up, unlike ``round()``."""
+    budget = math.floor(duration / SECONDS_PER_CLIP + 0.5)
+    return min(max(budget, 1), DEFAULT_MAX_CLIPS)
 
 
 def select_discovered(
-    segments: Sequence[ProposedSegment], max_clips: int = DEFAULT_MAX_CLIPS
+    segments: Sequence[ProposedSegment], duration: float
 ) -> list[ProposedSegment]:
-    """The best non-overlapping segments above the relative bar, by start."""
-    return select_segments(
-        list(segments), max_clips=max_clips, min_score=relative_min_score(segments)
+    """Highlights of a ``duration``-second source, returned in start order.
+
+    Candidates scoring below ``relative_min_score`` are dropped. The rest are
+    taken greedily by score (ties: earliest start) until ``clip_budget`` clips
+    are kept, skipping a candidate that overlaps one already kept (touching
+    ends do not overlap) or that would take the kept clips past
+    ``MAX_COVERAGE`` of the source; the first (best) candidate is always kept.
+    """
+    budget = clip_budget(duration)
+    max_total = MAX_COVERAGE * duration
+    bar = relative_min_score(segments)
+    ranked = sorted(
+        (s for s in segments if s.score >= bar),
+        key=lambda s: (-s.score, s.start, s.end),
     )
+    picked: list[ProposedSegment] = []
+    total = 0.0
+    for seg in ranked:
+        if len(picked) >= budget:
+            break
+        if any(seg.start < p.end and p.start < seg.end for p in picked):
+            continue
+        length = seg.end - seg.start
+        if picked and total + length > max_total + _COVERAGE_EPSILON:
+            continue
+        picked.append(seg)
+        total += length
+    return sorted(picked, key=lambda s: (s.start, s.end))
 
 
 def clip_length_range(opts: PipelineOptions) -> tuple[int, int]:

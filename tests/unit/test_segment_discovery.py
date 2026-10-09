@@ -97,19 +97,18 @@ def test_read_sidecar_missing_or_corrupt_is_none(tmp_path: Path):
     assert sd.read_words_sidecar(str(video)) is None
 
 
-# ── relative min score (calibration) ──────────────────────────────────────────
+# ── selection: relative bar, clip budget, coverage cap ────────────────────────
 
 
-def _seg(score: int, start: float = 0.0) -> ProposedSegment:
-    return ProposedSegment(start=start, end=start + 30.0, score=score)
+def _seg(score: int, start: float = 0.0, length: float = 30.0) -> ProposedSegment:
+    return ProposedSegment(start=start, end=start + length, score=score)
 
 
-def test_relative_min_score_is_forty_percent_of_the_best():
-    # PR #43's heuristic scores land around 5-40 on real input; a fixed bar
+def test_relative_min_score_is_sixty_percent_of_the_best_rounded_up():
+    # PR #43's heuristic scores land around 13-38 on a real talk; a fixed bar
     # such as 50 would drop every one of these.
-    segments = [_seg(38), _seg(30), _seg(14), _seg(9)]
-
-    assert sd.relative_min_score(segments) == 15  # floor(0.4 * 38)
+    assert sd.relative_min_score([_seg(38), _seg(30), _seg(14)]) == 23  # 22.8 -> 23
+    assert sd.relative_min_score([_seg(30), _seg(10)]) == 18  # exactly 18.0
 
 
 def test_relative_min_score_has_a_floor_of_zero():
@@ -117,26 +116,95 @@ def test_relative_min_score_has_a_floor_of_zero():
     assert sd.relative_min_score([_seg(0), _seg(0)]) == 0
 
 
-def test_select_discovered_keeps_low_but_relatively_strong_segments():
+@pytest.mark.parametrize(
+    ("duration", "budget"),
+    [
+        (0.0, 1),
+        (59.0, 1),  # 0.49 + 0.5 -> 0, clamped up to 1
+        (60.0, 1),
+        (179.0, 1),  # 1.49
+        (180.0, 2),  # 1.5 rounds half up
+        (181.0, 2),
+        (239.0, 2),
+        (240.0, 2),
+        (241.0, 2),
+        (299.0, 2),  # 2.49
+        (300.0, 3),  # 2.5: half up (Python's round() would give 2)
+        (539.0, 4),
+        (540.0, 5),  # 4.5
+        (600.0, 5),  # 5.5 -> 5, the cap
+        (3600.0, 5),
+    ],
+)
+def test_clip_budget_is_one_clip_per_two_minutes(duration, budget):
+    assert sd.clip_budget(duration) == budget
+
+
+def test_select_keeps_a_score_at_exactly_the_bar_and_drops_one_below():
+    # Long source (budget 5, cap 300 s): only the bar decides.
+    segments = [_seg(30, 0.0), _seg(18, 40.0), _seg(17, 80.0)]
+
+    picked = sd.select_discovered(segments, duration=600.0)
+
+    assert [s.score for s in picked] == [30, 18]
+
+
+def test_select_honours_the_clip_budget():
+    segments = [_seg(30 - i, 40.0 * i) for i in range(6)]
+
+    assert [s.score for s in sd.select_discovered(segments, duration=600.0)] == [
+        30, 29, 28, 27, 26,
+    ]
+    assert [s.score for s in sd.select_discovered(segments, duration=236.0)] == [30, 29]
+    assert [s.score for s in sd.select_discovered(segments, duration=60.0)] == [30]
+
+
+def test_coverage_of_exactly_half_the_source_is_allowed():
+    # 600 s source -> cap 300 s; 200 + 100 = 300 exactly.
+    segments = [_seg(30, 0.0, 200.0), _seg(29, 250.0, 100.0)]
+
+    picked = sd.select_discovered(segments, duration=600.0)
+
+    assert [s.score for s in picked] == [30, 29]
+
+
+def test_coverage_past_half_the_source_skips_the_candidate():
+    # 200 + 100.5 > 300: the second is skipped, a shorter later one still fits.
     segments = [
-        _seg(38, 0.0),
-        _seg(30, 40.0),
-        _seg(14, 80.0),  # 37% of the best: dropped
-        _seg(16, 120.0),  # 42% of the best: kept
+        _seg(30, 0.0, 200.0),
+        _seg(29, 250.0, 100.5),
+        _seg(28, 400.0, 90.0),
     ]
 
-    picked = sd.select_discovered(segments, max_clips=5)
+    picked = sd.select_discovered(segments, duration=600.0)
 
-    assert [s.score for s in picked] == [38, 30, 16]
+    assert [s.score for s in picked] == [30, 28]
 
 
-def test_select_discovered_honours_max_clips():
-    segments = [_seg(20 + i, 40.0 * i) for i in range(8)]
+def test_the_best_segment_is_kept_even_past_the_coverage_cap():
+    # One 50 s clip of a 60 s source is 83% coverage: still kept.
+    segments = [_seg(30, 5.0, 50.0), _seg(29, 0.0, 4.0)]
 
-    picked = sd.select_discovered(segments, max_clips=sd.DEFAULT_MAX_CLIPS)
+    picked = sd.select_discovered(segments, duration=60.0)
 
-    assert len(picked) == 5
-    assert [s.score for s in picked] == [23, 24, 25, 26, 27]
+    assert [s.score for s in picked] == [30]
+
+
+def test_select_skips_overlaps_but_allows_touching_segments():
+    segments = [_seg(30, 0.0), _seg(29, 10.0), _seg(28, 30.0)]
+
+    picked = sd.select_discovered(segments, duration=600.0)
+
+    assert [(s.start, s.end) for s in picked] == [(0.0, 30.0), (30.0, 60.0)]
+
+
+def test_select_returns_start_order_and_nothing_for_no_candidates():
+    segments = [_seg(20, 300.0), _seg(30, 0.0)]
+
+    assert [s.start for s in sd.select_discovered(segments, duration=600.0)] == [
+        0.0, 300.0,
+    ]
+    assert sd.select_discovered([], duration=600.0) == []
 
 
 # ── clip length range ─────────────────────────────────────────────────────────

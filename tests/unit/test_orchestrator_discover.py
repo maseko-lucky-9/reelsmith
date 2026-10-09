@@ -36,9 +36,11 @@ from app.workers import orchestrator as orch
 
 JOB_ID = "job-discover"
 URL = "https://www.youtube.com/watch?v=nochapters1"
-SOURCE_SECONDS = 120.0
-# One word a second over the whole source: w0 at 0.0-0.6 ... w119 at 119.0-119.6.
-SOURCE_WORDS = [WordTiming(f"w{i}", float(i), i + 0.6) for i in range(120)]
+# 6 minutes: a budget of 3 clips and a 180 s coverage cap, so the selection
+# rules let both Alpha and Beta through (the rules are unit-tested on their own).
+SOURCE_SECONDS = 360.0
+# One word a second: w0 at 0.0-0.6 ... w359 at 359.0-359.6.
+SOURCE_WORDS = [WordTiming(f"w{i}", float(i), i + 0.6) for i in range(360)]
 
 
 def _segments() -> list[ProposedSegment]:
@@ -61,7 +63,7 @@ def _segments() -> list[ProposedSegment]:
             score=20,
             score_breakdown={"hook": 0.1, "value": 0.4},
         ),
-        # Below 40% of the best (floor(0.4 * 30) = 12): dropped.
+        # Below 60% of the best (ceil(0.6 * 30) = 18): dropped.
         ProposedSegment(start=85.0, end=115.0, title="Weak", score=8),
     ]
 
@@ -374,6 +376,15 @@ async def test_discovered_clips_store_their_scores(harness, store):
         ("Alpha", 30, {"hook": 0.6, "value": 0.2}, "alpha summary"),
         ("Beta", 20, {"hook": 0.1, "value": 0.4}, "beta summary"),
     ]
+
+
+async def test_discover_budget_follows_the_source_length(harness, memory_store):
+    # A 2-minute source has a budget of one clip: only the best (Alpha).
+    harness.safe_end = 120.0
+
+    recorder = await harness.run(memory_store)
+
+    assert _chapters(recorder) == [("Alpha", 10.3, 39.3)]
 
 
 async def test_discover_uses_the_job_clip_length_range(harness, memory_store):
