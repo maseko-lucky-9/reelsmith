@@ -124,7 +124,7 @@ A creator exports a clip for Premiere or DaVinci, or downloads many clips with a
 - Odd source dimensions: output is cropped to even width and height so the file plays everywhere (ADR-004).
 - Whisper unavailable: `YTVIDEO_TRANSCRIPTION_PROVIDER=stub` keeps the pipeline runnable.
 - A stage fails inside one chapter: the chapter task is bounded by `max_parallel_chapters`; the job status reflects failure through `JobFailed`.
-- Auth: with `YTVIDEO_REQUIRE_AUTH=true`, every route requires the API key.
+- Auth: with `YTVIDEO_REQUIRE_AUTH=true`, every API route requires the API key; the docs routes and the static frontend mount do not (FR-060).
 
 ## Requirements *(mandatory)*
 
@@ -134,7 +134,7 @@ A creator exports a clip for Premiere or DaVinci, or downloads many clips with a
 
 | ID | Requirement | Status | Evidence |
 |---|---|---|---|
-| FR-001 | The system MUST accept a URL via `POST /jobs`, dedupe by URL, and reject unsupported platforms with 400. | Implemented (dedupe tested; the 400 for an unsupported URL has no test through `POST /jobs`) | `tests/contract/test_jobs_router.py`, `test_store_lookup_routes.py` |
+| FR-001 | The system MUST accept a URL via `POST /jobs`, dedupe by URL, and reject unsupported platforms with 400. | Implemented (the 400 returns `{"detail": "Unsupported platform for URL: <url>"}` and creates no job; T027) | `tests/contract/test_jobs_router.py`, `test_store_lookup_routes.py` |
 | FR-002 | The system MUST support YouTube, TikTok, Instagram, Facebook, upload and generate sources through platform adapters. | Implemented | `tests/unit/test_platform_adapters.py`, `test_platform_registry.py` |
 | FR-003 | The system MUST stream per-job events over SSE. | Implemented | `tests/contract/test_generate_pipeline.py`, `tests/e2e/test_happy_path.py` |
 | FR-004 | The system MUST run at most `max_concurrent_jobs` jobs and `max_parallel_chapters` chapters at once. | Implemented | `tests/unit/test_orchestrator_concurrency.py` (4 tests fail on Python 3.12; 3.14 only) |
@@ -155,7 +155,7 @@ A creator exports a clip for Premiere or DaVinci, or downloads many clips with a
 | FR-014 | The system MUST persist like and dislike toggles. | Implemented (fixed in this branch; was Partial) | Both stores now await async mutators (`app/bus/job_store.py` `_apply_clip_mutator`). Tests: `tests/unit/test_job_store_async_mutator.py` (memory and SQL), read-back tests in `tests/contract/test_store_lookup_routes.py`. Mutation-checked: removing the `await` turns 9 tests red. Before the fix a probe returned `liked=True` in the response and `None` in the store. |
 | FR-015 | The system MUST re-render a single clip of a completed job in place, from its saved source video, without changing the job. | Implemented (fixed in this branch; was Partial) | `POST /clips/{id}/rerender` validates (404 unknown/retired clip; 409 job missing, not completed, or source video not retained), then `orchestrator._rerender_clip` re-runs `_process_chapter` for that clip id. `jobs.video_path` (migration `o3p4q5r6s7t8`) persists the source path. Tests: `tests/contract/test_clip_rerender_router.py`, `tests/unit/test_orchestrator_rerender.py`. A real run with the bundled ffmpeg replaced the clip file (3.0 s, H.264 yuv420p), kept `liked`, created no new clip, left no temp dir and left the job `completed`. Limits: jobs created before the migration return 409; `reframe_provider` is accepted but ignored (FR-010); a re-render regenerates AI hook, summary and hashtags; PostgreSQL not exercised. |
 | FR-016 | The system MUST re-run segment proposal on reprompt. | **Partial** | `app/routers/reprompt.py:93` sets the job `pending` and rewrites options; nothing re-enqueues it, and the proposer is itself unwired (FR-009). The job then stays `pending`, which is in `_DEDUP_STATUSES` (`jobs.py:24`), so every later `POST /jobs` for that URL returns the stuck job. |
-| FR-017 | The system MUST list clips filtered by `job_id`, `min_score`, `search`, excluding retired clips. | Implemented (the `min_score` filter is untested, see Audit notes) | `tests/contract/test_store_lookup_routes.py`, `test_media_router.py` |
+| FR-017 | The system MUST list clips filtered by `job_id`, `min_score`, `search`, excluding retired clips. | Implemented (`min_score` is inclusive and counts an unscored clip as 0 on both stores; T024 fixed SQL, which dropped NULL scores) | `tests/contract/test_store_lookup_routes.py`, `test_media_router.py`, `tests/unit/test_job_store_lookups.py` |
 
 **Editing and enhancement**
 
@@ -192,7 +192,7 @@ A creator exports a clip for Premiere or DaVinci, or downloads many clips with a
 
 | ID | Requirement | Status | Evidence |
 |---|---|---|---|
-| FR-060 | The system MUST require an API key on every route when `YTVIDEO_REQUIRE_AUTH=true`. | Untested | Probe: every route returns 401 without the key, including `/health`. No test references `require_auth` or `require_api_key` (T026). |
+| FR-060 | The system MUST require an API key on every route when `YTVIDEO_REQUIRE_AUTH=true`. | Implemented (API routes only: `/docs`, `/redoc`, `/openapi.json` and the `serve_frontend` static mount are not API routes, so the app-level `dependencies` in `create_app` do not apply and they stay open) | `tests/contract/test_auth.py`: `/health`, `/clips`, `/jobs` return 401 with no key or a wrong key, 200 with `Authorization: Bearer <key>` or `?token=<key>`; open when auth is off; the docs bypass is pinned. The static mount bypass is from reading `app/main.py:242-245`, not tested. |
 | FR-061 | The system MUST persist state in SQLite or PostgreSQL via Alembic migrations. | Implemented | `docs/db-parity.md`; 16 revisions in `alembic/versions/` |
 | FR-062 | The system MUST serve the React UI when `YTVIDEO_SERVE_FRONTEND=true`. | Untested | `app/main.py`; no backend test covers `serve_frontend` (the Vitest suite tests components only) |
 
@@ -228,7 +228,7 @@ Strength of evidence was checked for four requirements on 2026-10-09 (mutation o
 |---|---|---|
 | FR-011 | `uploads.py`: skip the MIME check | `test_upload_wrong_mime_type_returns_415` **failed** (test is effective) |
 | FR-022 | `enhance_speech.py`: `provider: Literal[…]` → `str` | `test_enhance_audio_unknown_provider_422` **failed** (effective) |
-| FR-017 | `job_store.py:171`: `>= min_score` → `<= min_score` | **46 tests passed** (`test_store_lookup_routes.py`, `test_media_router.py`, `test_job_store_lookups.py`). The `min_score` filter has no effective test (task T024). |
+| FR-017 | `job_store.py:171`: `>= min_score` → `<= min_score` | **46 tests passed** (`test_store_lookup_routes.py`, `test_media_router.py`, `test_job_store_lookups.py`). The `min_score` filter had no effective test. **Resolved by T024**: the same mutation now fails `test_list_clips_min_score_is_inclusive_at_the_boundary[memory]` and `test_list_clips_min_score_filter_is_inclusive`; the SQL equivalent fails the `[sql]` cases. |
 | FR-014 (before the fix) | none needed | Throwaway probe: `PATCH /clips/c1/like` returned `liked = True` while the store held `liked = None`, with `RuntimeWarning: coroutine 'like_clip.<locals>._toggle' was never awaited` at `job_store.py:106`. The existing like/dislike test passes against this broken code. |
 
 All other `Implemented` tags are unaudited: they mean "reachable, with a named test file".
