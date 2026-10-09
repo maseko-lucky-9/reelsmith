@@ -146,7 +146,7 @@ A creator exports a clip for Premiere or DaVinci, or downloads many clips with a
 | FR-010 | The system MUST honour the `reframe` and `broll` pipeline options (default on). | **Scaffolded-unwired** | `orchestrator.py:653-656` emits `StageSkipped` only inside the `render=False` branch; when they are on, nothing runs. Services exist: `reframe_service`, `active_speaker_service`, `broll_service`, `broll_pexels_service`. |
 | FR-011 | The system MUST accept MP4 uploads (415 wrong type, 413 too large). | Implemented | `tests/contract/test_uploads_router.py` |
 | FR-012 | The system MUST generate a video from a brief when `generate_enabled`, else 400. | Implemented | `tests/contract/test_generate_router.py`, `test_generate_pipeline.py`, `tests/unit/test_ltx_producer.py` |
-| FR-013 | The system MUST retire clips older than `retention_days` (30) and delete their video and thumbnail files, on a sweep every `retention_sweep_minutes` (60). Jobs are not deleted. | Untested | `app/main.py:132-165`; the UPDATE…RETURNING works on SQLite (probe), no test (T025) |
+| FR-013 | The system MUST retire clips older than `retention_days` (30) and delete their video and thumbnail files, on a sweep every `retention_sweep_minutes` (60). Jobs are not deleted. | Implemented | `app/services/retention.py` (`sweep_expired_clips`, looped by the lifespan janitor in `app/main.py`); `tests/unit/test_retention_sweep.py` (T025). The row is retired and committed before files are deleted; only `output_path` and `thumbnail_path` are deleted, never the job's source video. |
 
 **Clip curation**
 
