@@ -36,17 +36,17 @@ Format: `- [ ] T### [FR-xxx|E#] [Principle] description. Proving test → commit
 ## Phase 4: Tooling and documentation
 
 - [x] T018 (done, models aligned to the migrations; no new revision) `alembic check` reports 13 drift operations between migrations and models (11 index add/remove, 2 unique-constraint removals on `clip_edits` and `social_accounts`); `alembic upgrade --sql` fails on a data migration. Test: `alembic check` exits 0 (CI, Postgres) and `tests/unit/test_alembic_parity.py` (SQLite + offline SQL) → `fix(db): align migrations with models`
-- [ ] T019 Skip or fix the 4 tests in `tests/unit/test_orchestrator_concurrency.py` that fail on Python 3.12 (CI and docs are 3.14 only). → `test: mark concurrency tests 3.14-only`
+- [x] T019 (done: `requires_py313` skipif on the 4 chapter-failure tests; 3.12's TaskGroup leaves `cancelling()==1` after a child fails) Skip or fix the 4 tests in `tests/unit/test_orchestrator_concurrency.py` that fail on Python 3.12 (CI and docs are 3.14 only). → `test: mark concurrency tests 3.14-only`
 - [ ] T020 Seed Linux golden caption hashes in `tests/unit/test_subtitle_image_golden.py` (CI skips them today; the PNG-equality tests are the guard). → `test: seed linux caption goldens`
 - [ ] T021 Set ruff `target-version` (reports F821 on `ExceptionGroup`). → `chore(lint): set ruff target-version`
 - [x] T022 (closed, blocked upstream 2026-10-09) typescript-eslint 8.71.1 has peer `typescript <6.1.0` and TypeScript latest is 7.0.2. Revisit when typescript-eslint publishes a release that supports 7.1+.
 - [x] T023 Add a "superseded by ADR-004" note to ADR-003 decision 2 (it names MoviePy). `docs/wave-3-gate.md` is a dated gate record: do not edit it (it says 12 revisions at `:37` and `:94`; `46c8200` actually contained 14 migration files; there are 16 now).
 
-- [ ] T024 [FR-017] [IV] Add a test for the `min_score` filter on `GET /clips`; mutating `>=` to `<=` at `app/bus/job_store.py:171` currently leaves 46 tests green. Test: fails under that mutation → `test(clips): cover min_score filter`
+- [x] T024 [FR-017] [IV] (done: boundary tests on both stores and `GET /clips?min_score=50`; also fixed SQL dropping NULL scores, which the memory store counts as 0) Add a test for the `min_score` filter on `GET /clips`; mutating `>=` to `<=` at `app/bus/job_store.py:171` currently leaves 46 tests green. Test: fails under that mutation → `test(clips): cover min_score filter`
 
 - [ ] T025 [FR-013] [IV] Add a test for the retention janitor (clips older than `retention_days` are retired and their files removed); extract the sweep body from `app/main.py:132-165` into a function if needed. Test: fails when the `created_at < cutoff` filter is inverted → `test(retention): cover the clip janitor`
-- [ ] T026 [FR-060] [IV] Add a test that every route, including `/health`, returns 401 without the key when `YTVIDEO_REQUIRE_AUTH=true`, and 200 with it. Test: fails when `dependencies` is dropped in `create_app` → `test(auth): cover require_api_key`
-- [ ] T027 [FR-001] [IV] Add a contract test that `POST /jobs` with an unsupported URL returns 400 with the URL echoed. → `test(jobs): cover unsupported platform`
+- [x] T026 [FR-060] [IV] (done: `tests/contract/test_auth.py`; `/docs`, `/redoc`, `/openapi.json` and the static mount bypass the app-level dependency, see FR-060) Add a test that every route, including `/health`, returns 401 without the key when `YTVIDEO_REQUIRE_AUTH=true`, and 200 with it. Test: fails when `dependencies` is dropped in `create_app` → `test(auth): cover require_api_key`
+- [x] T027 [FR-001] [IV] (done) Add a contract test that `POST /jobs` with an unsupported URL returns 400 with the URL echoed in `detail` (`{"detail": "Unsupported platform for URL: <url>"}`; there is no `url` key, that shape belongs to the `UnsupportedPlatformError` handler in `create_app`, which `POST /jobs` does not reach). → `test(jobs): cover unsupported platform`
 
 ## Dependencies
 

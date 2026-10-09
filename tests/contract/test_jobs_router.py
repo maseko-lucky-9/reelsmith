@@ -27,3 +27,16 @@ def test_get_unknown_job_returns_404():
     with TestClient(create_app()) as client:
         response = client.get("/jobs/does-not-exist")
     assert response.status_code == 404
+
+
+def test_post_job_with_unsupported_url_is_400_and_creates_nothing(tmp_path):
+    url = "https://example.com/v"
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/jobs", json={"url": url, "download_path": str(tmp_path)}
+        )
+        jobs = client.get("/jobs").json()
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": f"Unsupported platform for URL: {url}"}
+    assert jobs == []
