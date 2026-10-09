@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     db_url: str = "sqlite+aiosqlite:///./reelsmith.db"
     # "sql" | "memory"
     job_store: str = "sql"
+    # Skip ``alembic upgrade head`` at API start-up (sql store only).
+    skip_alembic: bool = False
 
     # ── Jobs & concurrency ────────────────────────────────────────────────
     max_concurrent_jobs: int = 1

@@ -44,7 +44,7 @@ def sql_store_with_leftovers(monkeypatch: pytest.MonkeyPatch) -> Iterator[SqlJob
 
     asyncio.run(seed())
     monkeypatch.setattr(settings, "job_store", "sql")
-    monkeypatch.setenv("SKIP_ALEMBIC", "1")
+    monkeypatch.setattr(settings, "skip_alembic", True)
     monkeypatch.setattr(main_module, "_make_store", lambda: store)
     yield store
     asyncio.run(engine.dispose())
