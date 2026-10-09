@@ -1,0 +1,68 @@
+# ADR-004: One-Pass ffmpeg Render Pipeline (MoviePy Removed)
+
+**Status:** Accepted
+**Date:** 2026-10-09
+**Author:** Thulani Maseko
+**Implemented in:** PR #17 (P1), with follow-ups in PR #16 (P0 fixtures and golden tests) and PR #18 (P2 dependency pins)
+
+## Context
+
+Rendering was the slowest and most memory-hungry part of the pipeline, and the output it produced was not portable:
+
+- **MoviePy 1.0.3.** Rendering was built on the last 1.x release. Upstream development has moved to the incompatible 2.x API, so the 1.x line receives no fixes. It also needed `app/compat.py` to patch deprecated stdlib names before every import.
+- **One full-canvas image per caption word.** Every word became a full-canvas RGBA `ImageClip` (about 66 MB each at 1920x3413, measured), and all of them were held in memory at once.
+- **Two x264 encodes per chapter.** `clip_service` first wrote the chapter to an intermediate mp4 (medium preset), then `render_service` decoded and encoded it again.
+- **Non-portable output.** A 1920x1080 source produced a 1920x3413 **yuv444p** (High 4:4:4) file. MoviePy skips `-pix_fmt yuv420p` when a dimension is odd, and many players and platforms reject the result.
+
+The product constraints still apply: captions must look identical, stay in sync with the audio word for word, keep the source-width output, and keep the reel's original audio.
+
+## Decision
+
+Render each chapter in **one ffmpeg process that reads the source directly**, and remove MoviePy.
+
+- **Binaries and probes.** `app/services/ffmpeg_tools.py` runs the ffmpeg shipped by `imageio-ffmpeg` and uses PyAV for duration, fps and frame grabs. It never uses a system ffmpeg: Homebrew builds differ in their filters (for example, no libass or drawtext). imageio-ffmpeg ships no ffprobe, which is why probing goes through PyAV. `run()` kills the child process on timeout, on cancel and on any `BaseException`.
+- **Captions.** The PIL renderer (`subtitle_image_service.create_subtitle_image`) is **unchanged**. `app/services/caption_track.py` draws each unique `(text, highlight)` caption once. It then crops every PNG to one shared rectangle: the union of all alpha bounding boxes, expanded outward to even x, y, w and h. The PNGs are fed to ffmpeg as **one** ffconcat image-sequence input with `option framerate 1000` per entry. Expanding the rectangle only adds transparent pixels, so the composite is pixel-identical to overlaying the full canvas, and memory is O(1) in the number of unique captions.
+- **Filtergraph** (`app/services/render_service.py`, documented in the module docstring): trim with `-ss/-t` on the source, add a blurred background still that is decoded once and looped, overlay the inset, overlay the captions, crop to even width and height, then `format=yuv420p`. Video is libx264 ultrafast CRF 28 and audio is AAC. The output is written to a hidden `.partial.mp4` file in the same directory and moved into place with `os.replace`.
+
+## Consequences
+
+### Measured (PR #17, single runs on an M-series Mac)
+
+The input was a 75.9 s 1920x1080 video with 3 chapters, transcribed with real Whisper `base`. The MoviePy baseline came from a `main` worktree using the same venv.
+
+| Metric | MoviePy | ffmpeg one-pass | Change |
+|---|---:|---:|---:|
+| Wall clock (s) | 158.60 | 17.74 | -88.8% |
+| Render stage (s) | 138.53 | 12.02 | -91.3% |
+| Peak RSS, self (MiB) | 4750 | 1258 | -73.5% |
+| Output | yuv444p 1920x3413 | yuv420p 1920x3412 | even dimensions |
+
+### Deliberate behaviour changes
+
+| Change | Detail |
+|---|---|
+| VFR → CFR at the average rate | `ffmpeg_tools.fps()` returns the stream's `average_rate`, and renders are written at that constant rate (`-r`). MoviePy used the container's nominal rate instead, for example 120 fps for a phone VFR clip. |
+| Video may lead audio by ≤ 1 frame | The legacy renderer lagged instead. ffmpeg snaps the first kept frame to the nearest point on the output grid, while MoviePy showed the frame whose interval contained the source time (floor). `tests/sync_checker.py` accepts frame errors in `(-1, +1)` and rejects a whole-frame slip. |
+| Blend rounding | ffmpeg blends in YUV and rounds, while MoviePy truncated, so composited pixels can differ by about ±1 LSB. The lossless sync tests allow ±2 against a float-blend oracle. 4:2:0 output already differs from 4:4:4. |
+| Inset at an even y | `render_service.inset_y` rounds the centred inset's top row down to even, which can be up to 1 px from the legacy position (for example, 776 instead of 777 for a 1280x720 source). |
+| Nearest-frame inset sync | The inset overlay uses `ts_sync_mode=nearest`. mkv/webm store 1 ms timestamps, so frame k can sit up to 0.5 ms either side of k/FPS, and the default "last frame <= t" rule jitters. |
+| Exact time grid | The background is stamped with `settb=1/lcm(fps_num, 1000)`, so both the frame grid and millisecond caption starts are exact. When that lcm would overflow ffmpeg's 32-bit time base (huge VFR average numerators), `render_service.grid_rate` falls back to `fps.limit_denominator(1001)`. |
+| ffconcat needs `-safe 0` | The concat demuxer rejects per-entry `option` directives (here `option framerate 1000`) in safe mode. The list uses filenames relative to its own directory, so user paths are never interpolated into it. |
+| Bundled ffmpeg only | The ffmpeg binary comes only from imageio-ffmpeg (7.1 on the dev Mac; CI's Linux wheel was reported as 7.0.2 in PR #17). |
+
+### Caption-identity guards
+
+- **PNG equality (platform-independent).** `tests/unit/test_caption_track.py` asserts that every cropped caption PNG equals the matching window of the full `create_subtitle_image` canvas, pixel for pixel.
+- **Golden hashes.** `tests/unit/test_subtitle_image_golden.py` stores the sha256 of the caption pixels, keyed by `(raqm available, platform.system(), platform.machine())`. Only `(True, "Darwin", "arm64")` is seeded. Other platforms skip and print the hash they computed.
+- **A/V sync.** `tests/sync_checker.py` decodes renders of the P0 fixtures (frame-index bit blocks and an audio click track) to check sync.
+
+### Dependency notes
+
+- **av 18 colour conversion (PR #18).** av 18 bundles FFmpeg 8.1.2. Its YUV→RGB conversion in `grab_frame` (thumbnails and the blurred background still) differs from av 17 by up to 3 LSB (mean 1.155). Decoding is identical, and captions and encoding are unaffected. One rotation test tolerance was widened from `< 1.0` to `< 2.0`.
+- **`av` is pinned at 18.1.0.** 19.x breaks faster-whisper 1.2.1 (`open() got an unexpected keyword argument 'metadata_errors'`). `tests/integration/test_whisper_real.py` fails with that TypeError under `av==19.0.1`.
+- `imageio-ffmpeg==0.6.0` is a direct dependency. `moviepy` and `app/compat.py` are gone, so the old "import compat before MoviePy" rule no longer applies.
+
+### Trade-offs accepted
+
+- Full-frame SSIM against MoviePy is not used as a gate, because the sizes and frame rates differ. Caption identity is proven by PNG equality and the per-frame caption-band match instead.
+- `grab_frame` ignores the container's `start_time` (cosmetic, noted in PR #17).

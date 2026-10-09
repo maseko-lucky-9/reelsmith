@@ -3,34 +3,57 @@
 ## Event Flow
 
 ```
-POST /jobs
+POST /jobs   (uploads, generate and clip-rerender routers enqueue the same way)
     │
     ▼
-job_queue (asyncio.Queue)
+job_queue (asyncio.Queue) → queue worker → AsyncEventBus.publish(VIDEO_REQUESTED)
     │
     ▼
-AsyncEventBus.publish(VIDEO_REQUESTED)
-    │
-    ▼
-Orchestrator  (max_concurrent_jobs semaphore per job; waiting jobs stay "pending")
+run_orchestrator  (max_concurrent_jobs semaphore around each _run_job;
+    │              jobs waiting for a slot stay "pending")
     ├─ FOLDER_CREATED
     ├─ VIDEO_DOWNLOADED
     ├─ CHAPTERS_DETECTED
-    ├─ [per chapter/segment fan-out: TaskGroup, max_parallel_chapters;
-    │    first failing chapter cancels the rest → JOB_FAILED is the last event]
-    │   ├─ CHAPTER_CLIP_EXTRACTED
+    ├─ [per chapter/segment fan-out: asyncio.TaskGroup, max_parallel_chapters;
+    │    first failing chapter cancels the rest (their ffmpeg is killed)
+    │    → JOB_FAILED is emitted once, last]
+    │   ├─ CHAPTER_CLIP_EXTRACTED  (chapter audio only; clip_path=None)
+    │   ├─ AUDIO_ENHANCED
     │   ├─ CHAPTER_TRANSCRIBED
+    │   ├─ FILLERS_REMOVED
     │   ├─ CAPTIONS_GENERATED
-    │   ├─ SUBTITLE_IMAGE_RENDERED
     │   ├─ CLIP_RENDERED
-    │   └─ THUMBNAIL_GENERATED
-    ├─ SEGMENTS_PROPOSED  (when segment_provider != "chapter")
-    ├─ SEGMENT_SCORED
+    │   ├─ THUMBNAIL_GENERATED
+    │   ├─ AI_HOOK_GENERATED
+    │   └─ SOCIAL_CONTENT_GENERATED
+    ├─ EXPORT_COMPLETED
+    ├─ MANIFEST_CREATED
     ├─ JOB_COMPLETED
     └─ JOB_FAILED
+    (STAGE_SKIPPED for each stage turned off in PipelineOptions)
 
 React SSE: GET /jobs/:id/events → EventSource streams events above
 ```
+
+## Concurrency and Recovery
+
+- **Job cap.** `run_orchestrator` (`app/workers/orchestrator.py`) wraps each `_run_job` in a `max_concurrent_jobs` semaphore (values below 1 are clamped to 1 with a warning). On shutdown it waits for every running job to unwind.
+- **Chapter fan-out.** Chapters run in an `asyncio.TaskGroup`, bounded by `max_parallel_chapters` (default 1). Errors from other chapters are logged.
+- **Cancellable blocking work.** ffmpeg and Whisper run in worker threads through `ffmpeg_tools.to_thread_cancellable`. A timeout or cancel kills the ffmpeg child, and Whisper checks a cancel event between segments.
+- **Restart recovery.** At startup with the SQL store, `fail_interrupted_jobs()` marks jobs left `pending`/`running` as `failed` ("interrupted by restart"), so the duplicate-URL check no longer blocks their URL. It runs before the queue worker starts.
+
+## Render Pipeline
+
+`render_service.render_clip` renders each chapter in **one ffmpeg pass straight from the source**: trim, blurred background still, scaled inset, caption overlay, even-dimension crop, then yuv420p libx264/AAC. The ffmpeg binary comes from `imageio-ffmpeg`, and probes and frame grabs use PyAV (`ffmpeg_tools`). Captions are drawn by the unchanged PIL renderer, once per unique caption, and composited as a single ffconcat overlay input (`caption_track`). See [ADR-004](decisions/004-ffmpeg-render-pipeline.md) for the timing rules and the deliberate behaviour changes.
+
+## Live Progress (SSE)
+
+- **Backend.** The backend sends **named** SSE events (`event: <EventType>`, `id: <event_id>`). The event bus keeps its last 200 events and replays this job's events from that history to each new subscriber.
+- **Web.** `web/src/hooks/useJobSSE.ts` registers a listener for every backend event type (a drift test parses `app/domain/events.py`) and dedupes events by `event_id`. It refreshes only `['job', id]` and `['clips', id]` (bursts merged within 500 ms), and `['jobs']` only on terminal events. The job page does not poll, and its stream is open only while the job is `pending`/`running`. A fallback poll runs only when SSE fails.
+
+## Bulk Export
+
+`GET /api/clips/bulk-export.zip` builds a stored (uncompressed) zip in a worker thread into an anonymous temp file. It streams the file in 1 MiB chunks with an exact `Content-Length`, and closes the handle when the stream ends, fails or the client disconnects.
 
 ## Provider Plug-points
 
@@ -50,9 +73,11 @@ All providers follow the same pattern: `get_<feature>_service()` factory reads t
 |---|---|
 | `download_service` | yt-dlp download, chapter extraction |
 | `clip_service` | Caption schedule, chapter audio extraction (ffmpeg), background still |
-| `transcription_service` | Whisper word-level timing |
+| `transcription_service` | faster-whisper word-level timing (locked lazy model load, optional start-up warm-up, cancellable decode) |
 | `caption_service` | SRT/WebVTT generation from word timings |
 | `subtitle_image_service` | Per-caption PNG rendering |
+| `caption_track` | Unique caption PNGs cropped to one even rect, plus the ffconcat list for the render |
+| `ffmpeg_tools` | Bundled-ffmpeg runner (kills the child on timeout/cancel), PyAV probes and frame grab |
 | `render_service` | Final vertical-format MP4 in one ffmpeg pass from the source |
 | `thumbnail_service` | JPEG thumbnail from clip midpoint |
 | `segment_proposer` | Virality scoring + segment selection |
