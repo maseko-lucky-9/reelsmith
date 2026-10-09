@@ -269,4 +269,4 @@ Merged PRs since the baseline (`40ab44d`), all on 2026-10-09, in merge order. St
 | #53 | B-roll overlays in the one-pass render | FR-010 | T012 |
 | #52 | Face-tracked reframe (ADR-006) | FR-010 Scaffolded-unwired → Partial (reframe only) | T012 |
 | #54 | B-roll planner and `local`/`pexels` providers | FR-010 Partial → Implemented (both opt-in) | T012 |
-| this PR | Docs close-out: ADR-006 renumbered, ADR-007, roadmap stubs 002-007, rows re-verified | FR-009, FR-016 tags now say opt-in; FR-020 says plan only | T011, T013, T017 |
+| #55 | Docs close-out: ADR-006 renumbered, ADR-007, roadmap stubs 002-007, rows re-verified | FR-009, FR-016 tags now say opt-in; FR-020 says plan only; FR-013 says SQL store only | T011, T013, T017 |

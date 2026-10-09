@@ -45,7 +45,7 @@ All merged on 2026-10-09, in merge order. PR #32 (gitleaks red proof) was closed
 - #53 B-roll overlays in the render (T012)
 - #52 face-tracked reframe (T012, ADR-006)
 - #54 B-roll planner and providers (T012)
-- docs close-out PR: ADR-006/007, roadmap stubs, spec re-verified, backlog T036-T045 (T011, T013, T017)
+- #55 docs close-out (this review): ADR-006/007, roadmap stubs, spec re-verified, backlog T036-T045 (T011, T013, T017)
 
 ### Parity programme T-01…T-07 — ✅ SHIPPED (`29e0b6d`, PR #4)
 
