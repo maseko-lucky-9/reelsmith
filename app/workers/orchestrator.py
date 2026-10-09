@@ -377,8 +377,9 @@ async def _rerender_clip(trigger: Event, bus: AsyncEventBus, store: JobStore) ->
 
     The job's status, step, error and outputs are left alone and neither
     JobCompleted nor JobFailed is emitted. A failure is logged and swallowed:
-    the clip keeps its fields and render_clip's atomic replace keeps its
-    previous file. Cancellation propagates.
+    the clip keeps its fields, render_clip's atomic replace keeps its
+    previous file, and the chapter gets back the status it had before the
+    attempt (``completed`` if it had none). Cancellation propagates.
     """
     job_id = trigger.job_id
     payload = trigger.payload
@@ -386,6 +387,8 @@ async def _rerender_clip(trigger: Event, bus: AsyncEventBus, store: JobStore) ->
     log.info("[%s] Re-render of clip %s started", job_id, clip_id)
     t0 = time.perf_counter()
     cleanup_root: Path | None = None
+    chapter: dict[str, Any] | None = None
+    prior_chapter_status = "completed"
     try:
         job = await store.get(job_id)
         clip = await store.get_clip(clip_id)
@@ -403,6 +406,10 @@ async def _rerender_clip(trigger: Event, bus: AsyncEventBus, store: JobStore) ->
             )
             return
 
+        chapter = _chapter_for_clip(clip)
+        prior_chapter = job.chapters.get(chapter["index"])
+        if prior_chapter is not None:
+            prior_chapter_status = prior_chapter.status
         clips_folder = str(Path(output_path).parent)
         cleanup_root = Path(clips_folder) / "_tmp" / f"{job_id}-rerender-{clip_id[:8]}"
         cleanup_root.mkdir(parents=True, exist_ok=True)
@@ -410,7 +417,7 @@ async def _rerender_clip(trigger: Event, bus: AsyncEventBus, store: JobStore) ->
         raw_opts = payload.get("pipeline_options") or job.pipeline_options.model_dump()
         # reframe_provider is accepted but unused: reframe is unwired (task T012).
         await _process_chapter(
-            chapter=_chapter_for_clip(clip),
+            chapter=chapter,
             job_id=job_id,
             video_path=job.video_path,
             clips_folder=clips_folder,
@@ -435,9 +442,31 @@ async def _rerender_clip(trigger: Event, bus: AsyncEventBus, store: JobStore) ->
             "[%s] Re-render of clip %s failed after %.2fs; clip left unchanged",
             job_id, clip_id, time.perf_counter() - t0,
         )
+        if chapter is not None:
+            await _restore_chapter_status(
+                store, job_id, int(chapter["index"]), prior_chapter_status
+            )
     finally:
         if cleanup_root is not None:
             shutil.rmtree(cleanup_root, ignore_errors=True)
+
+
+async def _restore_chapter_status(
+    store: JobStore, job_id: str, index: int, status: str
+) -> None:
+    """Put a chapter back to ``status`` after a failed re-render (T028a);
+    otherwise it stays at the stage that failed, e.g. ``rendering``."""
+
+    def _reset(c: ChapterArtifacts) -> None:
+        c.status = status  # type: ignore[assignment]
+
+    try:
+        await store.upsert_chapter(job_id, _reset, index)
+    except Exception:  # noqa: BLE001 — best effort; the re-render already failed
+        log.exception(
+            "[%s] Could not reset chapter %d status after a failed re-render",
+            job_id, index,
+        )
 
 
 async def _record_failure(

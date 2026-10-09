@@ -282,3 +282,36 @@ async def test_rerender_cancellation_propagates(
 
     assert (await store.get(JOB_ID)).status == "completed"
     assert not (layout["clips"] / "_tmp" / f"{JOB_ID}-rerender-{CLIP_ID[:8]}").exists()
+
+
+@pytest.mark.parametrize(
+    ("prior_status", "expected"),
+    [("completed", "completed"), ("failed", "failed"), (None, "completed")],
+)
+async def test_failed_rerender_resets_chapter_status(
+    layout, render_calls, monkeypatch, prior_status, expected
+):
+    """T028(a): a render that raises must not leave the chapter ``rendering``.
+
+    Only the memory store keeps chapter status (the SQL store persists no
+    chapter status), so this runs on the memory store.
+    """
+    store = InMemoryJobStore()
+    await _seed(store, layout)
+    if prior_status is not None:
+        await store.upsert_chapter(
+            JOB_ID, lambda c: setattr(c, "status", prior_status), 1
+        )
+    before_clip = dict(await store.get_clip(CLIP_ID))
+
+    def _boom(*args: Any, **kwargs: Any) -> str:
+        raise RuntimeError("ffmpeg exploded")
+
+    monkeypatch.setattr(orch.render_service, "render_clip", _boom)
+
+    await orch._run_job(_trigger(), AsyncEventBus(), store)
+
+    job = await store.get(JOB_ID)
+    assert job.chapters[1].status == expected
+    assert await store.get_clip(CLIP_ID) == before_clip
+    assert job.status == "completed"
