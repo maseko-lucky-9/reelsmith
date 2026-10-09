@@ -48,7 +48,7 @@ specs/001-reelsmith-baseline/
 
 ```text
 app/            routers/, services/, workers/orchestrator.py, bus/, domain/, db/, platforms and social adapters
-alembic/        16 revisions
+alembic/        17 revisions
 web/            React + Vite SPA (src/routes, Vitest, Playwright)
 tests/          unit/, contract/, e2e/, integration/
 docs/           architecture.md, decisions/, wave gates, db-parity.md, archive/

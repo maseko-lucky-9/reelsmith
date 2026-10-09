@@ -15,7 +15,7 @@
 > | `Scaffolded-unwired` | Code, table or UI exists but nothing in the running app uses it. |
 > | `Missing` | Referenced by the UI or docs, no backend. |
 >
-> Counts below were produced by commands, not recalled: 46 HTTP operations (`create_app().openapi()["paths"]`), 38 `EventType` members, 16 ORM tables, 16 Alembic revisions.
+> Counts below were produced by commands, not recalled: 46 HTTP operations (`create_app().openapi()["paths"]`), 38 `EventType` members, 16 ORM tables, 17 Alembic revisions (16 at `main` `40ab44d`; the re-render fix added `o3p4q5r6s7t8`).
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -62,8 +62,8 @@ A creator browses clips, filters them, likes or dislikes them, and asks for a re
 **Acceptance Scenarios**:
 
 1. **Given** clips exist, **When** listed with `job_id`, `min_score` or `search`, **Then** only matching, non-retired clips are returned.
-2. **Given** a clip, **When** `PATCH /clips/{id}/like`, **Then** the response says liked **and the change persists on the next read**. *Fails today, see FR-014.*
-3. **Given** a clip, **When** `POST /clips/{id}/rerender`, **Then** a re-render of that clip runs. *Instead the original completed job is flipped to `failed`, see FR-015.*
+2. **Given** a clip, **When** `PATCH /clips/{id}/like`, **Then** the response says liked **and the change persists on the next read** (FR-014, fixed).
+3. **Given** a clip, **When** `POST /clips/{id}/rerender`, **Then** that clip is re-rendered in place from the job's saved source video and the job stays `completed`. A job with no saved source (created before `jobs.video_path`), or one not yet completed, gets 409 (FR-015, fixed).
 4. **Given** a completed job, **When** `POST /api/jobs/{id}/reprompt` with a prompt and a length range, **Then** the segment proposer re-runs and new clips appear. *Does not today, see FR-016.*
 
 ### User Story 4 - Edit a clip on a timeline (Priority: P4)
@@ -152,8 +152,8 @@ A creator exports a clip for Premiere or DaVinci, or downloads many clips with a
 
 | ID | Requirement | Status | Evidence |
 |---|---|---|---|
-| FR-014 | The system MUST persist like and dislike toggles. | **Partial** | `app/routers/clips.py:33,50` define `_toggle` as `async def`; `app/bus/job_store.py:106` (memory store) and `:314` (SQL store, the default `job_store="sql"`) call `mutator(clip)` without `await`, so the coroutine never runs. A probe on `SqlJobStore` also returned `liked=False`. The response body is computed separately and looks correct. `tests/contract/test_store_lookup_routes.py:199` asserts only status 200 and `clip_id`, so it passes while the feature is broken. |
-| FR-015 | The system MUST re-render a single clip on request. | **Partial** | `app/routers/clips.py:70-80` enqueues a payload with `url: ""` under the original job id and `rerender_clip_id`; nothing under `app/` reads `rerender_clip_id`. Running the orchestrator with that payload fails the original *completed* job with `No adapter matches URL: ""` (`orchestrator.py:127`) and emits `JobFailed`. |
+| FR-014 | The system MUST persist like and dislike toggles. | Implemented (fixed in this branch; was Partial) | Both stores now await async mutators (`app/bus/job_store.py` `_apply_clip_mutator`). Tests: `tests/unit/test_job_store_async_mutator.py` (memory and SQL), read-back tests in `tests/contract/test_store_lookup_routes.py`. Mutation-checked: removing the `await` turns 9 tests red. Before the fix a probe returned `liked=True` in the response and `None` in the store. |
+| FR-015 | The system MUST re-render a single clip of a completed job in place, from its saved source video, without changing the job. | Implemented (fixed in this branch; was Partial) | `POST /clips/{id}/rerender` validates (404 unknown/retired clip; 409 job missing, not completed, or source video not retained), then `orchestrator._rerender_clip` re-runs `_process_chapter` for that clip id. `jobs.video_path` (migration `o3p4q5r6s7t8`) persists the source path. Tests: `tests/contract/test_clip_rerender_router.py`, `tests/unit/test_orchestrator_rerender.py`. A real run with the bundled ffmpeg replaced the clip file (3.0 s, H.264 yuv420p), kept `liked`, created no new clip, left no temp dir and left the job `completed`. Limits: jobs created before the migration return 409; `reframe_provider` is accepted but ignored (FR-010); a re-render regenerates AI hook, summary and hashtags; PostgreSQL not exercised. |
 | FR-016 | The system MUST re-run segment proposal on reprompt. | **Partial** | `app/routers/reprompt.py:93` sets the job `pending` and rewrites options; nothing re-enqueues it, and the proposer is itself unwired (FR-009). The job then stays `pending`, which is in `_DEDUP_STATUSES` (`jobs.py:24`), so every later `POST /jobs` for that URL returns the stuck job. |
 | FR-017 | The system MUST list clips filtered by `job_id`, `min_score`, `search`, excluding retired clips. | Implemented (the `min_score` filter is untested, see Audit notes) | `tests/contract/test_store_lookup_routes.py`, `test_media_router.py` |
 
@@ -229,6 +229,6 @@ Strength of evidence was checked for four requirements on 2026-10-09 (mutation o
 | FR-011 | `uploads.py`: skip the MIME check | `test_upload_wrong_mime_type_returns_415` **failed** (test is effective) |
 | FR-022 | `enhance_speech.py`: `provider: Literal[…]` → `str` | `test_enhance_audio_unknown_provider_422` **failed** (effective) |
 | FR-017 | `job_store.py:171`: `>= min_score` → `<= min_score` | **46 tests passed** (`test_store_lookup_routes.py`, `test_media_router.py`, `test_job_store_lookups.py`). The `min_score` filter has no effective test (task T024). |
-| FR-014 | none needed | Throwaway probe: `PATCH /clips/c1/like` returned `liked = True` while the store held `liked = None`, with `RuntimeWarning: coroutine 'like_clip.<locals>._toggle' was never awaited` at `job_store.py:106`. The existing like/dislike test passes against this broken code. |
+| FR-014 (before the fix) | none needed | Throwaway probe: `PATCH /clips/c1/like` returned `liked = True` while the store held `liked = None`, with `RuntimeWarning: coroutine 'like_clip.<locals>._toggle' was never awaited` at `job_store.py:106`. The existing like/dislike test passes against this broken code. |
 
 All other `Implemented` tags are unaudited: they mean "reachable, with a named test file".

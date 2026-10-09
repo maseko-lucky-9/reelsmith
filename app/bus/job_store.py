@@ -1,14 +1,25 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Collection
-from typing import Any, Callable, Protocol, runtime_checkable
+import inspect
+from collections.abc import Awaitable, Callable, Collection
+from typing import Any, Protocol, runtime_checkable
 
 from app.domain.models import ChapterArtifacts, JobState, PipelineOptions
 
 
 class JobNotFoundError(KeyError):
     pass
+
+
+# A clip mutator edits the clip dict in place; it may be sync or async.
+ClipMutator = Callable[[dict[str, Any]], Awaitable[None] | None]
+
+
+async def _apply_clip_mutator(mutator: ClipMutator, clip: dict[str, Any]) -> None:
+    result = mutator(clip)
+    if inspect.isawaitable(result):
+        await result
 
 
 # Statuses of a job that is queued or in flight; nothing survives a restart in
@@ -27,7 +38,7 @@ class JobStoreProtocol(Protocol):
     ) -> ChapterArtifacts: ...
     async def all_ids(self) -> list[str]: ...
     async def upsert_clip(
-        self, job_id: str, clip_id: str, mutator: Callable[[dict[str, Any]], None]
+        self, job_id: str, clip_id: str, mutator: ClipMutator
     ) -> dict[str, Any]: ...
     async def list_jobs(
         self, limit: int = 20, offset: int = 0, search: str = ""
@@ -99,11 +110,11 @@ class InMemoryJobStore:
             return list(self._jobs)
 
     async def upsert_clip(
-        self, job_id: str, clip_id: str, mutator: Callable[[dict[str, Any]], None]
+        self, job_id: str, clip_id: str, mutator: ClipMutator
     ) -> dict[str, Any]:
         async with self._lock:
             clip = self._clips.get(clip_id, {"clip_id": clip_id, "job_id": job_id})
-            mutator(clip)
+            await _apply_clip_mutator(mutator, clip)
             self._clips[clip_id] = clip
             return clip
 
@@ -204,6 +215,7 @@ class SqlJobStore:
                 auto_hook=state.auto_hook,
                 brand_template_id=state.brand_template_id,
                 pipeline_options=state.pipeline_options.model_dump(),
+                video_path=state.video_path,
             )
             session.add(record)
             await session.commit()
@@ -250,6 +262,7 @@ class SqlJobStore:
             record.auto_hook = state.auto_hook
             record.brand_template_id = state.brand_template_id
             record.pipeline_options = state.pipeline_options.model_dump()
+            record.video_path = state.video_path
             await session.commit()
         return state
 
@@ -287,7 +300,7 @@ class SqlJobStore:
             return [row[0] for row in result.all()]
 
     async def upsert_clip(
-        self, job_id: str, clip_id: str, mutator: Callable[[dict[str, Any]], None]
+        self, job_id: str, clip_id: str, mutator: ClipMutator
     ) -> dict[str, Any]:
         from app.db.models import ClipRecord
         from sqlalchemy import select
@@ -311,7 +324,7 @@ class SqlJobStore:
                     "liked": record.liked,
                     "disliked": record.disliked,
                 })
-            mutator(clip)
+            await _apply_clip_mutator(mutator, clip)
             def _apply_clip_to_record(r: Any, c: dict[str, Any]) -> None:
                 r.start = c.get("start", 0.0)
                 r.end = c.get("end", 0.0)
@@ -456,6 +469,7 @@ def _record_to_state(record: Any) -> JobState:
         auto_hook=getattr(record, "auto_hook", None) if getattr(record, "auto_hook", None) is not None else True,
         brand_template_id=getattr(record, "brand_template_id", None),
         pipeline_options=pipeline_opts,
+        video_path=getattr(record, "video_path", None),
     )
 
 

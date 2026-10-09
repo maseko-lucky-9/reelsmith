@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import asyncio
+import functools
+import warnings
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -167,6 +169,12 @@ def test_unknown_clip_media_is_404(client, route):
 
 
 def test_rerender_queues_job_without_scanning_clips(client, monkeypatch, media_files):
+    _add_job(client, "job-1", URL, "completed")
+    client.portal.call(
+        _store(client).update,
+        "job-1",
+        lambda s: setattr(s, "video_path", media_files["output_path"]),
+    )
     _add_clip(client, "c1", **media_files)
     spies = _spy_on_scans(client, monkeypatch)
 
@@ -201,10 +209,79 @@ def test_like_dislike_still_resolve_retired_clips(client, media_files, action):
     """Unchanged behaviour: like/dislike looked retired clips up before P4."""
     _add_clip(client, "old", retired=True, **media_files)
 
-    response = client.patch(f"/clips/old/{action}")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        response = client.patch(f"/clips/old/{action}")
 
     assert response.status_code == 200
     assert response.json()["clip_id"] == "old"
+    stored = client.portal.call(
+        functools.partial(_store(client).get_clip, "old", include_retired=True)
+    )
+    assert stored is not None
+    assert stored[f"{action}d"] is True
+
+
+# ── Like / dislike persist (FR-014) ───────────────────────────────────────────
+
+
+def _listed_clip(client: TestClient, clip_id: str) -> dict[str, Any]:
+    clips = client.get("/clips").json()
+    return next(c for c in clips if c["clip_id"] == clip_id)
+
+
+def test_like_persists_on_next_read(client, media_files, recwarn):
+    _add_clip(client, "c1", **media_files)
+
+    response = client.patch("/clips/c1/like")
+
+    assert response.status_code == 200
+    clip = _listed_clip(client, "c1")
+    assert clip["liked"] is True
+    assert clip["disliked"] is False
+    assert not [w for w in recwarn if issubclass(w.category, RuntimeWarning)]
+
+
+def test_dislike_persists_on_next_read(client, media_files):
+    _add_clip(client, "c1", **media_files)
+
+    client.patch("/clips/c1/dislike")
+
+    clip = _listed_clip(client, "c1")
+    assert clip["disliked"] is True
+    assert not clip.get("liked")
+
+
+def test_like_twice_toggles_back_off(client, media_files):
+    _add_clip(client, "c1", **media_files)
+
+    client.patch("/clips/c1/like")
+    second = client.patch("/clips/c1/like")
+
+    assert second.json()["liked"] is False
+    assert _listed_clip(client, "c1")["liked"] is False
+
+
+def test_like_after_dislike_clears_dislike(client, media_files):
+    _add_clip(client, "c1", **media_files)
+
+    client.patch("/clips/c1/dislike")
+    client.patch("/clips/c1/like")
+
+    clip = _listed_clip(client, "c1")
+    assert clip["liked"] is True
+    assert clip["disliked"] is False
+
+
+def test_dislike_after_like_clears_like(client, media_files):
+    _add_clip(client, "c1", **media_files)
+
+    client.patch("/clips/c1/like")
+    client.patch("/clips/c1/dislike")
+
+    clip = _listed_clip(client, "c1")
+    assert clip["disliked"] is True
+    assert clip["liked"] is False
 
 
 def test_queued_job_with_same_url_is_a_duplicate(client):
