@@ -61,7 +61,16 @@ The API is served at both `/x` and `/api/x`. Routers are mounted without a prefi
 
 `render_service.render_clip` renders each chapter in **one ffmpeg pass straight from the source**: trim, blurred background still, scaled inset, caption overlay, even-dimension crop, then yuv420p libx264/AAC. The ffmpeg binary comes from `imageio-ffmpeg`, and probes and frame grabs use PyAV (`ffmpeg_tools`). Captions are drawn by the unchanged PIL renderer, once per unique caption, and composited as a single ffconcat overlay input (`caption_track`). See [ADR-004](decisions/004-ffmpeg-render-pipeline.md) for the timing rules and the deliberate behaviour changes.
 
-Two optional inputs extend the same graph; no pipeline caller passes either yet (FR-010). `crop_track` pans a canvas-aspect crop of the source instead of the letterboxed inset. `broll` (up to four `BrollInsert`s) adds one looped input per insert, cover-fits it to the canvas and overlays it full-canvas over its half-open window, above the inset composite and below the captions. Frame grid, duration and audio stay those of the render without them (ADR-004, B-roll addendum).
+Two optional inputs extend the same graph (FR-010): `broll` is passed by the orchestrator's B-roll step (below); `crop_track` has no pipeline caller yet. `crop_track` pans a canvas-aspect crop of the source instead of the letterboxed inset. `broll` (up to four `BrollInsert`s) adds one looped input per insert, cover-fits it to the canvas and overlays it full-canvas over its half-open window, above the inset composite and below the captions. Frame grid, duration and audio stay those of the render without them (ADR-004, B-roll addendum).
+
+## B-roll
+
+`_broll_step` (`app/workers/orchestrator.py`) runs before each reel's render when the job's `render` and `broll` options are on. With `YTVIDEO_BROLL_PROVIDER=none` (the default) it emits `StageSkipped(broll, reason="no provider")` and the render is unchanged. Otherwise:
+
+- **Plan.** `broll_planner.plan_broll(words, duration)` is pure and deterministic: at most two 3 s windows on the clip's own clock, none starting before 3.0 s or ending after `duration - 2.0` s, at least 1 s apart. Each window's query is the longest token spoken inside it (lowercase, at least 4 letters, letters only, not one of the segment proposer's stopwords); windows are ranked by query length, then earliest start, one window per query. A clip under 8 s gets none.
+- **Fetch.** `broll_service.fetch_all` asks the provider for each query, two at a time on the event loop. `local` matches keyword-named `*.mp4` files in `YTVIDEO_BROLL_LIBRARY_DIR`; `pexels` (`broll_pexels_service`) searches Pexels videos with `YTVIDEO_PEXELS_API_KEY`, downloads at most 50 MB from `*.pexels.com` hosts only and caches by Pexels video id in `YTVIDEO_BROLL_CACHE_DIR`. A failed or empty query, or a file that does not decode, drops that one insert.
+- **Render and record.** Found assets become `BrollInsert`s for `render_clip(broll=...)`; `BRollApplied` reports them and the clip's `broll_assets` keeps `query, start, duration, provider, asset_id, author, source_url, path`. The export manifest's `broll_credits` column credits each asset (Pexels asks for the videographer and a link).
+- **Never fatal.** Any error, or nothing found, emits `StageSkipped(broll, reason)` and the reel renders without B-roll; cancellation propagates. A re-render goes through the same step, so it refreshes (or clears) `broll_assets`.
 
 ## Live Progress (SSE)
 
@@ -79,7 +88,7 @@ Two optional inputs extend the same graph; no pipeline caller passes either yet 
 | Transcription | `YTVIDEO_TRANSCRIPTION_PROVIDER` | `whisper`, `stub` |
 | Segment scoring | `YTVIDEO_SEGMENT_PROVIDER` | `chapter`, `local_heuristic`, `stub` |
 | Reframe | `YTVIDEO_REFRAME_PROVIDER` | `letterbox`, `face_track`, `stub` |
-| B-Roll | `YTVIDEO_BROLL_PROVIDER` | `none`, `local` |
+| B-Roll | `YTVIDEO_BROLL_PROVIDER` | `none` (default), `local`, `pexels` |
 | Job store | `YTVIDEO_JOB_STORE` | `memory`, `sql` |
 
 All providers follow the same pattern: `get_<feature>_service()` factory reads the setting and returns a Protocol implementation. Adding a new provider only requires implementing the Protocol and registering in the factory.
@@ -100,4 +109,6 @@ All providers follow the same pattern: `get_<feature>_service()` factory reads t
 | `segment_proposer` | Heuristic segment scoring + selection; picks the clips of a source without chapters when `YTVIDEO_SEGMENT_PROVIDER` is not `chapter` (default `chapter`: one Full Video clip) |
 | `segment_discovery` | Discovery helpers: words rebased to a clip window, `<stem>.words.json` sidecar, selection by relative score bar (60% of best), length-scaled clip budget (1 per 120 s, max 5), 50% coverage cap and a near-duplicate penalty (shared transcript words with a kept clip) |
 | `reframe_service` | Face-tracked crop track |
-| `broll_service` | Noun-phrase → local clip lookup |
+| `broll_planner` | B-roll windows and their one-word queries from a clip's words (pure) |
+| `broll_service` | B-roll providers (`local` keyword-named library, `pexels`) and the bounded fetch |
+| `broll_pexels_service` | Pexels video search + guarded, cached download (credit: author + page URL) |
