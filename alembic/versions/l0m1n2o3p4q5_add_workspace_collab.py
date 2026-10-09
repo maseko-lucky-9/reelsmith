@@ -30,8 +30,11 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False,
                   server_default=sa.func.now()),
     )
+    # Typed columns so offline mode (`alembic upgrade --sql`) can render them.
     op.bulk_insert(
-        sa.table("workspaces", sa.column("id"), sa.column("name")),
+        sa.table(
+            "workspaces", sa.column("id", sa.String), sa.column("name", sa.String)
+        ),
         [{"id": "local", "name": "Local"}],
     )
 
