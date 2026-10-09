@@ -2,7 +2,7 @@
 
 **Feature Branch**: `n/a (baseline inventory; not a feature branch)`
 **Created**: 2026-10-09
-**Status**: Draft, awaiting owner sign-off
+**Status**: Accepted 2026-10-09 (owner sign-off)
 **Input**: Retro-specification of the product as it exists at `main` `40ab44d`, derived from the code, tests, ADR-001…004 and the wave gate documents.
 
 > **How to read this.** This is an *inventory*, not a proposal. Spec Kit normally specifies one change; here the inventory is the deliverable (it gives later `specs/002-…` a baseline to extend). Every requirement carries a status tag:

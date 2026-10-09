@@ -1,6 +1,6 @@
 # Reelsmith Constitution
 
-> **Status: DRAFT, awaiting owner sign-off.** Every principle below is distilled from the repository (`CLAUDE.md`, ADR-001…004, `docs/db-parity.md`, `ci.yml`, tests) and cites its source. Where the code does not yet honour a principle, the gap is listed under *Known exceptions*, not hidden. Do not add a principle that has no source.
+> **Status: RATIFIED 2026-10-09 by the owner ("ship it" after review).** Every principle below is distilled from the repository (`CLAUDE.md`, ADR-001…004, `docs/db-parity.md`, `ci.yml`, tests) and cites its source. Where the code does not yet honour a principle, the gap is listed under *Known exceptions*, not hidden. Do not add a principle that has no source.
 
 ## Core Principles
 
@@ -63,4 +63,4 @@ Source: `docs/decisions/001–004`, `CLAUDE.md`.
 
 This constitution supersedes other practice notes for this repository. An amendment is a dated line in the version history with its reason; silent drift is a violation. `/speckit-analyze` treats a conflict with a MUST principle as CRITICAL, so unfixed gaps belong in *Known exceptions*, not in silence. Complexity beyond this document needs an ADR.
 
-**Version**: 1.0.0 | **Ratified**: pending owner sign-off | **Last Amended**: 2026-10-09
+**Version**: 1.0.0 | **Ratified**: 2026-10-09 | **Last Amended**: 2026-10-09
