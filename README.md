@@ -132,3 +132,15 @@ YTVIDEO_SERVE_FRONTEND=true uvicorn app.main:app
 ```
 
 The API is served at both `/x` and `/api/x` (`app/api_prefix.py`, [ADR-005](docs/decisions/005-api-route-prefix.md)). The UI calls `/api/...`: in dev the Vite proxy strips `/api`, and with `YTVIDEO_SERVE_FRONTEND=true` FastAPI strips it itself, so `curl localhost:8000/api/health` and `curl localhost:8000/health` both answer.
+
+## Decision Records
+
+| ADR | Decision |
+|---|---|
+| [001](docs/decisions/001-react-dashboard.md) | Replace Streamlit with a React dashboard |
+| [002](docs/decisions/002-opus-clip-ui-redesign.md) | Opus Clip UI redesign |
+| [003](docs/decisions/003-opusclip-feature-parity.md) | OpusClip feature parity, Waves 1-3 (the MoviePy part of decision 2 is superseded by ADR-004) |
+| [004](docs/decisions/004-ffmpeg-render-pipeline.md) | One-pass ffmpeg render pipeline, MoviePy removed |
+| [005](docs/decisions/005-api-route-prefix.md) | Serve the API at both `/x` and `/api/x` |
+| [006](docs/decisions/006-face-track-reframe.md) | Face-tracked reframe with YuNet on onnxruntime |
+| [007](docs/decisions/007-clip-discovery-and-reprompt.md) | Clip discovery in chapterless sources, and reprompt |

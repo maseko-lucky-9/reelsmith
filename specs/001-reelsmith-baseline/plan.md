@@ -6,7 +6,7 @@ This plan describes the system as built. It does not duplicate the design docume
 
 ## Summary
 
-FastAPI backend with an asyncio orchestrator that turns a video URL into captioned vertical clips, plus a React/Vite dashboard. Design is recorded in [docs/architecture.md](../../docs/architecture.md) and ADR-[001](../../docs/decisions/001-react-dashboard.md), [002](../../docs/decisions/002-opus-clip-ui-redesign.md), [003](../../docs/decisions/003-opusclip-feature-parity.md), [004](../../docs/decisions/004-ffmpeg-render-pipeline.md).
+FastAPI backend with an asyncio orchestrator that turns a video URL into captioned vertical clips, plus a React/Vite dashboard. Design is recorded in [docs/architecture.md](../../docs/architecture.md) and ADR-[001](../../docs/decisions/001-react-dashboard.md), [002](../../docs/decisions/002-opus-clip-ui-redesign.md), [003](../../docs/decisions/003-opusclip-feature-parity.md), [004](../../docs/decisions/004-ffmpeg-render-pipeline.md), [005](../../docs/decisions/005-api-route-prefix.md) (route prefix), [006](../../docs/decisions/006-face-track-reframe.md) (face-tracked reframe), [007](../../docs/decisions/007-clip-discovery-and-reprompt.md) (clip discovery and reprompt).
 
 ## Technical Context
 

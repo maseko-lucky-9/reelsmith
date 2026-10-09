@@ -35,9 +35,13 @@ run_orchestrator  (max_concurrent_jobs semaphore around each _run_job;
 React SSE: GET /jobs/:id/events → EventSource streams events above
 ```
 
+## Clip Discovery
+
+Opt-in (FR-009, [ADR-007](decisions/007-clip-discovery-and-reprompt.md)): with `YTVIDEO_SEGMENT_PROVIDER=local_heuristic` (default `chapter`), a source without chapters is transcribed once, its words are saved as the `<source stem>.words.json` sidecar, and the best-scoring windows become the chapters (`_discover_segments`, `segment_discovery.select_discovered`): at least 60% of the best score, one clip per 120 s of source (1 to 5), at most half the source covered, near-duplicates penalised. `SEGMENTS_PROPOSED` and `SEGMENT_SCORED` are emitted before `CHAPTERS_DETECTED`. A short source, no kept segment or any error falls back to the single "Full Video" chapter, which is also what the default `chapter` provider always produces.
+
 ## Reprompt
 
-`POST /jobs/{id}/reprompt` (completed job, source still on disk) queues `{reprompt: true, prompt, length range or start/end}` like a clip re-render; `_run_job` hands it to `_reprompt_job`, which:
+Decision record: [ADR-007](decisions/007-clip-discovery-and-reprompt.md). `POST /jobs/{id}/reprompt` (completed job, source still on disk) queues `{reprompt: true, prompt, length range or start/end}` like a clip re-render; `_run_job` hands it to `_reprompt_job`, which:
 
 - forgets the job's replay history (`AsyncEventBus.forget`), so a new SSE stream is not closed by the previous run's `JOB_COMPLETED`; the router does this too when it accepts;
 - reuses the source's `.words.json` sidecar (or transcribes the source once), then proposes with the prompt and length range (discovery's `select_discovered`), or takes the one requested time range;
