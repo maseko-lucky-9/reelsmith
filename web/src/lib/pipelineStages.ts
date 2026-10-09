@@ -348,6 +348,10 @@ export function describeSkippedStages(stages: DerivedStage[]): string {
 const NON_STAGE_EVENT_TYPES = [
   'VideoRequested',
   'JobFailed',
+  // Reprompt of a completed job (FR-016): JobReprompted precedes its JobCompleted;
+  // RepromptFailed ends a failed one (the job stays completed with its old clips).
+  'JobReprompted',
+  'RepromptFailed',
   'StageSkipped', // emitted when orchestrator skips a stage per pipeline_options
   'SubtitleImageRendered', // emitted but not rendered as its own row (rolled into render)
   'SegmentsProposed',
@@ -384,4 +388,8 @@ export const KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set([
 ])
 
 /** Events after which the backend closes the job's SSE stream (app/routers/jobs.py _TERMINAL_TYPES). */
-export const TERMINAL_EVENT_TYPES: ReadonlySet<string> = new Set(['JobCompleted', 'JobFailed'])
+export const TERMINAL_EVENT_TYPES: ReadonlySet<string> = new Set([
+  'JobCompleted',
+  'JobFailed',
+  'RepromptFailed',
+])

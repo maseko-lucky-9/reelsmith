@@ -35,6 +35,17 @@ run_orchestrator  (max_concurrent_jobs semaphore around each _run_job;
 React SSE: GET /jobs/:id/events → EventSource streams events above
 ```
 
+## Reprompt
+
+`POST /jobs/{id}/reprompt` (completed job, source still on disk) queues `{reprompt: true, prompt, length range or start/end}` like a clip re-render; `_run_job` hands it to `_reprompt_job`, which:
+
+- forgets the job's replay history (`AsyncEventBus.forget`), so a new SSE stream is not closed by the previous run's `JOB_COMPLETED`; the router does this too when it accepts;
+- reuses the source's `.words.json` sidecar (or transcribes the source once), then proposes with the prompt and length range (discovery's `select_discovered`), or takes the one requested time range;
+- renders the new clips hidden (`retired`), numbered after every existing clip file, exports them and rewrites the manifest;
+- only then puts them live, retires the old clips, records the prompt and length range, and emits `JOB_REPROMPTED` + `JOB_COMPLETED`.
+
+The job stays `completed` throughout, so a restart (`fail_interrupted_jobs`) never fails it and its URL still dedups to it. Any failure keeps the old clips, drops the new ones and emits `REPROMPT_FAILED` (never `JOB_FAILED`). One reprompt per job at a time (an in-process set in the orchestrator; a second request gets 409).
+
 ## Routing
 
 The API is served at both `/x` and `/api/x`. Routers are mounted without a prefix, and `ApiPrefixMiddleware` (`app/api_prefix.py`) strips one leading `/api` segment before routing (`/api` alone becomes `/`; `/apixyz` is not rewritten). The React client calls `/api/...`: in dev the Vite proxy strips the prefix, and with `YTVIDEO_SERVE_FRONTEND=true` the middleware does, while `StaticFiles` serves the built UI at `/`. The middleware is pure ASGI: it rewrites `path` and `raw_path`, keeps `root_path`, and passes `receive`/`send` through, so SSE and streamed downloads are unaffected and the app-level API-key dependency applies the same at both addresses. See [ADR-005](decisions/005-api-route-prefix.md).
@@ -55,7 +66,7 @@ The API is served at both `/x` and `/api/x`. Routers are mounted without a prefi
 ## Live Progress (SSE)
 
 - **Backend.** The backend sends **named** SSE events (`event: <EventType>`, `id: <event_id>`). The event bus keeps its last 200 events and replays this job's events from that history to each new subscriber.
-- **Web.** `web/src/hooks/useJobSSE.ts` registers a listener for every backend event type (a drift test parses `app/domain/events.py`) and dedupes events by `event_id`. It refreshes only `['job', id]` and `['clips', id]` (bursts merged within 500 ms), and `['jobs']` only on terminal events. The job page does not poll, and its stream is open only while the job is `pending`/`running`. A fallback poll runs only when SSE fails.
+- **Web.** `web/src/hooks/useJobSSE.ts` registers a listener for every backend event type (a drift test parses `app/domain/events.py`) and dedupes events by `event_id`. It refreshes only `['job', id]` and `['clips', id]` (bursts merged within 500 ms), and `['jobs']` only on terminal events (`JobCompleted`, `JobFailed`, `RepromptFailed`; the backend ends the stream on the same three). The job page does not poll, and its stream is open only while the job is `pending`/`running` or a reprompt it queued is running. A fallback poll runs only when SSE fails.
 
 ## Bulk Export
 

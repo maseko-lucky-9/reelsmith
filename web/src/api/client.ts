@@ -260,6 +260,7 @@ export const api = {
     `${BASE}/api/clips/${clipId}/export.xml?format=${format}`,
 
   // ── Wave 1 — Reprompt ────────────────────────────────────────────────────
+  /** 202 queued; the job stays completed. 409 when it cannot run (detail says why). */
   repromptJob: (jobId: string, body: RepromptRequest) =>
     apiFetch<{
       job_id: string
@@ -382,11 +383,16 @@ export interface RerenderRequest {
   regenerate_copy?: boolean
 }
 
+/** Body of POST /jobs/{id}/reprompt (app/routers/reprompt.py RepromptRequest). */
 export interface RepromptRequest {
+  /** Omitted: the job keeps its prompt. */
   prompt?: string
   length_range?: '0-1m' | '1-3m' | '3-5m' | '5-10m' | '10-15m'
   length_min_seconds?: number
   length_max_seconds?: number
+  /** One clip of exactly this source range instead of the proposer's picks; both or neither. */
+  start_seconds?: number
+  end_seconds?: number
 }
 
 export interface SocialAccount {
