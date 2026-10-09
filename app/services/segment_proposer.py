@@ -98,6 +98,9 @@ class ProposedSegment:
     summary: str = ""
     score: int = 0
     score_breakdown: dict[str, float] = field(default_factory=dict)
+    # Full transcript of the window (``summary`` is cut at 200 characters);
+    # clip discovery compares it across clips to skip near-duplicates.
+    text: str = ""
 
     @property
     def virality_score(self) -> int:
@@ -230,6 +233,7 @@ class LocalHeuristicProposer:
             summary=text[:200],
             score=_combine_score(breakdown, {**EXTRA_WEIGHTS, **self.weights}),
             score_breakdown=breakdown,
+            text=text,
         )
 
     def _build_candidates(
@@ -554,14 +558,18 @@ def select_segments(
     return sorted(picked, key=lambda s: (s.start, s.end))
 
 
-def get_segment_proposer() -> SegmentProposerProtocol:
+def get_segment_proposer(
+    *, min_secs: int | None = None, max_secs: int | None = None
+) -> SegmentProposerProtocol:
+    """The configured proposer; ``min_secs``/``max_secs`` override the
+    ``target_clip_seconds_*`` settings (a job's clip length range)."""
     from app.settings import settings
 
     if settings.segment_provider == "local_heuristic":
         return LocalHeuristicProposer(
             weights=settings.score_weights_dict(),
-            min_secs=settings.target_clip_seconds_min,
-            max_secs=settings.target_clip_seconds_max,
+            min_secs=min_secs or settings.target_clip_seconds_min,
+            max_secs=max_secs or settings.target_clip_seconds_max,
         )
     # "stub", and "chapter" mode (proposer not used in that path)
     return StubProposer()

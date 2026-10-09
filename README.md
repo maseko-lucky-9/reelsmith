@@ -2,7 +2,7 @@
 
 **Problem:** Manually trimming long-form videos from YouTube, Facebook, TikTok, or Instagram into captioned short-form clips is tedious and time-consuming for a solo creator.
 
-Reelsmith automates the pipeline: download a video from any supported platform, transcribe it with word-level timing, score clips by virality heuristics, burn karaoke subtitles, and produce 9:16 vertical reels — all through a FastAPI backend and a React dashboard with a live per-stage progress timeline.
+Reelsmith automates the pipeline: download a video from any supported platform, transcribe it with word-level timing, cut chapters into clips (or, with `YTVIDEO_SEGMENT_PROVIDER=local_heuristic`, pick clips from a source without chapters by heuristic scores), burn karaoke subtitles, and produce 9:16 vertical reels — all through a FastAPI backend and a React dashboard with a live per-stage progress timeline.
 
 ## Supported Platforms
 
@@ -78,7 +78,7 @@ The `/jobs/$jobId` page renders a per-stage timeline while the pipeline runs. St
 | Video download | yt-dlp (YouTube / Facebook / TikTok / Instagram via PlatformAdapter registry) |
 | Video editing | ffmpeg (bundled via imageio-ffmpeg) + PyAV |
 | Transcription | faster-whisper (word-level) |
-| Virality scoring | librosa + VADER + spaCy + webrtcvad |
+| Segment scoring | NumPy + standard library (wav RMS, word timings); VADER and spaCy optional |
 | Reframe | MediaPipe face detection (optional, not in `requirements.txt`; `face_track` falls back to a centre crop without it) |
 | Captions | pysrt / webvtt-py |
 | Subtitle images | Pillow + NumPy |

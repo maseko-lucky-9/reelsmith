@@ -6,7 +6,7 @@ import re
 import shutil
 import time
 import uuid
-from collections.abc import Coroutine
+from collections.abc import Coroutine, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +28,8 @@ from app.services import (
     ollama_service,
     platforms,
     render_service,
+    segment_discovery,
+    segment_proposer,
     thumbnail_service,
     transcription_service,
 )
@@ -196,24 +198,35 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
             for c in raw_chapters
         ]
         safe_end = await asyncio.to_thread(clip_service.probe_safe_end, video_path)
+        # Full-source word timings, set when discovery transcribed the whole
+        # source; each chapter then reuses them instead of re-transcribing.
+        source_words: list[transcription_service.WordTiming] | None = None
 
         if not chapters:
-            if opts.segment_proposer:
-                # Heuristic segment proposer would run here (future)
-                chapters = [
-                    {"index": 0, "title": "Full Video", "start": 0.0, "end": safe_end}
-                ]
-            else:
+            if not opts.segment_proposer:
                 # segment_proposer off → single full-video pseudo-chapter
-                chapters = [
-                    {"index": 0, "title": "Full Video", "start": 0.0, "end": safe_end}
-                ]
+                chapters = [_full_video_chapter(safe_end)]
                 await _emit(
                     bus,
                     EventType.STAGE_SKIPPED,
                     job_id,
                     stage_id="segment_proposer",
                 )
+            elif _discovery_enabled(opts, payload.get("segment_mode", "auto")):
+                chapters, source_words = await _discover_segments(
+                    job_id=job_id,
+                    video_path=video_path,
+                    safe_end=safe_end,
+                    cleanup_root=cleanup_root,
+                    opts=opts,
+                    language=language,
+                    prompt=payload.get("prompt"),
+                    bus=bus,
+                )
+            else:
+                # Provider "chapter", transcription off or segment_mode
+                # "chapter": the whole source is one pseudo-chapter.
+                chapters = [_full_video_chapter(safe_end)]
         else:
             clamped: list[dict[str, Any]] = []
             for c in chapters:
@@ -261,6 +274,7 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
                     store=store,
                     pipeline_options=opts,
                     language=language,
+                    source_words=source_words,
                 )
 
         # Structured fan-out: the first failing chapter cancels its siblings
@@ -335,6 +349,126 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
     finally:
         if cleanup_root is not None and cleanup_root.exists():
             shutil.rmtree(cleanup_root, ignore_errors=True)
+
+
+def _full_video_chapter(safe_end: float) -> dict[str, Any]:
+    return {"index": 0, "title": "Full Video", "start": 0.0, "end": safe_end}
+
+
+def _discovery_enabled(opts: PipelineOptions, segment_mode: str) -> bool:
+    """Whether a source without chapters gets clips discovered (FR-009).
+
+    Needs the job's ``segment_proposer`` and ``transcription`` options,
+    ``segment_mode == "auto"``, and a ``segment_provider`` other than
+    ``"chapter"``; otherwise the source stays one "Full Video" chapter.
+    """
+    return (
+        opts.segment_proposer
+        and opts.transcription
+        and segment_mode == "auto"
+        and settings.segment_provider != "chapter"
+    )
+
+
+async def _discover_segments(
+    *,
+    job_id: str,
+    video_path: str,
+    safe_end: float,
+    cleanup_root: Path,
+    opts: PipelineOptions,
+    language: str | None,
+    prompt: str | None,
+    bus: AsyncEventBus,
+) -> tuple[list[dict[str, Any]], list[transcription_service.WordTiming] | None]:
+    """Chapters for the best-scoring windows of a source without chapters.
+
+    Transcribes the whole source once (its 16 kHz wav also feeds the
+    proposer's loudness features and is deleted afterwards), saves the words
+    as the ``<source stem>.words.json`` sidecar, scores candidate windows with
+    ``get_segment_proposer()`` and keeps the best (``select_discovered``).
+    Emits ``SegmentsProposed`` and one ``SegmentScored`` per kept segment.
+
+    Returns the chapters and the full-source words (``None`` when the source
+    was not transcribed). A source shorter than the minimum clip length, no
+    kept segment, or any failure yields the single "Full Video" chapter, so
+    discovery never fails the job; cancellation propagates.
+    """
+    full_video = [_full_video_chapter(safe_end)]
+    min_secs, max_secs = segment_discovery.clip_length_range(opts)
+    if safe_end < min_secs:
+        log.info(
+            "[%s] Source (%.1fs) shorter than the minimum clip (%ds); one Full Video clip",
+            job_id, safe_end, min_secs,
+        )
+        await _emit(
+            bus, EventType.STAGE_SKIPPED, job_id,
+            stage_id="segment_proposer", reason="source shorter than the minimum clip",
+        )
+        return full_video, None
+
+    log.info(
+        "[%s] Step: discover clips  provider=%s  length=%d-%ds",
+        job_id, settings.segment_provider, min_secs, max_secs,
+    )
+    step_t0 = time.perf_counter()
+    words: list[transcription_service.WordTiming] | None = None
+    wav_path = cleanup_root / "discover_source.wav"
+    try:
+        audio_path = await ffmpeg_tools.to_thread_cancellable(
+            clip_service.extract_audio, video_path, 0.0, safe_end, str(wav_path)
+        )
+        if audio_path is None:
+            raise RuntimeError("source has no audio stream")
+        words = await transcription_service.transcribe_words_async(
+            audio_path, language=language, audio_duration_s=safe_end
+        )
+        try:
+            await asyncio.to_thread(
+                segment_discovery.write_words_sidecar, video_path, words
+            )
+        except OSError as e:
+            # Only re-renders lose out: they transcribe their window again.
+            log.warning("[%s] Could not save the words sidecar: %s", job_id, e)
+        proposer = segment_proposer.get_segment_proposer(
+            min_secs=min_secs, max_secs=max_secs
+        )
+        candidates = await asyncio.to_thread(
+            proposer.propose, words, audio_path, [], safe_end, prompt=prompt
+        )
+        kept = segment_discovery.select_discovered(candidates, safe_end)
+        chapters = segment_discovery.segments_to_chapters(kept, safe_end)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001 — discovery must never fail the job
+        log.exception("[%s] Clip discovery failed; one Full Video clip", job_id)
+        await _emit(
+            bus, EventType.STAGE_SKIPPED, job_id,
+            stage_id="segment_proposer", reason=f"discovery failed: {e}",
+        )
+        return full_video, words
+    finally:
+        wav_path.unlink(missing_ok=True)
+
+    log.info(
+        "[%s] Discovery done (%.2fs)  words=%d  candidates=%d  kept=%s",
+        job_id, time.perf_counter() - step_t0, len(words), len(candidates),
+        [(c["start"], c["end"], c["virality_score"]) for c in chapters],
+    )
+    await _emit(
+        bus, EventType.SEGMENTS_PROPOSED, job_id,
+        count=len(chapters), candidates=len(candidates),
+    )
+    for c in chapters:
+        await _emit(
+            bus, EventType.SEGMENT_SCORED, job_id,
+            index=c["index"], start=c["start"], end=c["end"],
+            score=c["virality_score"], breakdown=c["score_breakdown"],
+        )
+    if not chapters:
+        log.warning("[%s] No segment kept; one Full Video clip", job_id)
+        return full_video, words
+    return chapters, words
 
 
 def _effective_options(raw_opts: Any) -> PipelineOptions:
@@ -415,6 +549,15 @@ async def _rerender_clip(trigger: Event, bus: AsyncEventBus, store: JobStore) ->
         cleanup_root.mkdir(parents=True, exist_ok=True)
         # A re-render always renders, whatever the job's options said.
         raw_opts = payload.get("pipeline_options") or job.pipeline_options.model_dump()
+        # Words saved by clip discovery: reused instead of re-transcribing.
+        source_words = await asyncio.to_thread(
+            segment_discovery.read_words_sidecar, job.video_path
+        )
+        if source_words is not None:
+            log.info(
+                "[%s] Re-render of clip %s reuses the source words sidecar (%d words)",
+                job_id, clip_id, len(source_words),
+            )
         # reframe_provider is accepted but unused: reframe is unwired (task T012).
         await _process_chapter(
             chapter=chapter,
@@ -430,6 +573,8 @@ async def _rerender_clip(trigger: Event, bus: AsyncEventBus, store: JobStore) ->
             language=payload.get("language", job.language),
             clip_id=clip_id,
             regenerate_copy=bool(payload.get("regenerate_copy", True)),
+            source_words=source_words,
+            render_to=output_path,
         )
         log.info(
             "[%s] Re-render of clip %s done in %.2fs",
@@ -524,12 +669,20 @@ async def _process_chapter(
     language: str | None = None,
     clip_id: str | None = None,
     regenerate_copy: bool = True,
+    source_words: Sequence[Any] | None = None,
+    render_to: str | None = None,
 ) -> str | None:
     """Process one chapter into a clip; ``clip_id`` updates an existing clip
     in place (re-render) instead of creating a new one.
 
     ``regenerate_copy=False`` (re-render only) skips the social-copy block:
     the clip keeps its title, summary, hashtags and AI hook text.
+
+    ``source_words`` are full-source word timings (clip discovery's
+    transcript); when given and transcription is on, the chapter's words are
+    these rebased onto its window instead of a fresh transcription of it.
+    ``render_to`` is the reel's path (re-render: the clip's existing file);
+    by default ``{index:02d}_{title}.mp4`` in ``clips_folder``.
     """
     index = int(chapter["index"])
     title = chapter["title"]
@@ -571,7 +724,8 @@ async def _process_chapter(
     # so the only per-chapter artefact is the transcription wav: 16 kHz mono,
     # cut with the render's exact -ss/-t window so word timings line up.
     audio_path: str | None = None
-    if opts.transcription:
+    reuse_words = opts.transcription and source_words is not None
+    if opts.transcription and not reuse_words:
         wav_path = str(tmp_dir / f"chapter_{index}.wav")
         log.info("[%s] Chapter %d  extracting audio", job_id, index)
         step_t0 = time.perf_counter()
@@ -642,6 +796,13 @@ async def _process_chapter(
                 provider=settings.audio_enhance_provider,
                 audio_path=enhanced_audio_path,
             )
+    elif reuse_words and opts.audio_enhance:
+        # Nothing to enhance: the chapter is not transcribed again.
+        log.info("[%s] Chapter %d  audio_enhance not needed: words reused", job_id, index)
+        await _emit(
+            bus, EventType.STAGE_SKIPPED, job_id,
+            stage_id="audio_enhance", chapter_index=index, reason="words reused",
+        )
     elif not opts.audio_enhance:
         log.info("[%s] Chapter %d  skipping audio_enhance", job_id, index)
         await _emit(
@@ -657,7 +818,12 @@ async def _process_chapter(
                  job_id, index, settings.transcription_provider, language)
         step_t0 = time.perf_counter()
         await store.upsert_chapter(job_id, lambda c: _set_status(c, "transcribing"), index)
-        if audio_path is None:
+        if reuse_words:
+            # Full-source timings moved onto this window's clock and clipped
+            # to it, so captions never start before 0 or end past the reel.
+            words = segment_discovery.rebase_words(source_words, start, end)
+            log.info("[%s] Chapter %d  reusing source words", job_id, index)
+        elif audio_path is None:
             log.warning("[%s] Chapter %d  source has no audio; nothing to transcribe",
                         job_id, index)
         else:
@@ -765,7 +931,7 @@ async def _process_chapter(
         log.info("[%s] Chapter %d  rendering final clip  aspect=%.4f", job_id, index, target_aspect_ratio)
         step_t0 = time.perf_counter()
         await store.upsert_chapter(job_id, lambda c: _set_status(c, "rendering"), index)
-        output_path = str(Path(clips_folder) / f"{index:02d}_{safe_title}.mp4")
+        output_path = render_to or str(Path(clips_folder) / f"{index:02d}_{safe_title}.mp4")
         # Reads the SOURCE and trims [start, end) itself — one ffmpeg pass.
         # Cancellation (e.g. this wait_for timing out) kills that ffmpeg.
         await asyncio.wait_for(
@@ -820,7 +986,9 @@ async def _process_chapter(
     if opts.render and opts.thumbnail and output_path:
         try:
             step_t0 = time.perf_counter()
-            thumbnail_out = str(Path(clips_folder) / f"{index:02d}_{safe_title}_thumb.jpg")
+            # Named after the reel: {index:02d}_{title}_thumb.jpg by default.
+            reel = Path(output_path)
+            thumbnail_out = str(reel.with_name(f"{reel.stem}_thumb.jpg"))
             thumbnail_path = await asyncio.to_thread(
                 thumbnail_service.generate_thumbnail, output_path, thumbnail_out
             )
@@ -844,6 +1012,10 @@ async def _process_chapter(
         })
         if regenerate_copy:
             c["title"] = title
+        # Clip discovery's score fields (absent on chapter-based clips).
+        for key in ("virality_score", "score_breakdown", "summary"):
+            if key in chapter:
+                c[key] = chapter[key]
 
     await store.upsert_clip(job_id, clip_id, _init_clip)
 
@@ -909,7 +1081,12 @@ async def _process_chapter(
         description, hashtags = "", []
 
     def _update_social(c: dict[str, Any]) -> None:
-        c["summary"] = description
+        # Without a generated description a discovered clip keeps the
+        # proposer's summary; chapter-based clips are unchanged.
+        c["summary"] = (
+            description if description or "summary" not in chapter
+            else chapter["summary"]
+        )
         c["hashtags"] = hashtags
 
     await store.upsert_clip(job_id, clip_id, _update_social)
