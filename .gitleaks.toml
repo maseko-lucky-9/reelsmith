@@ -15,6 +15,9 @@ paths = [
   '''tests/.*?fixtures?/.*''',
   '''docs/decisions/.*''',
   '''docs/research/.*''',
+  # Vendored third-party code (see VENDOR.md). tiktok-signature's
+  # webmssdk.js embeds a public msToken constant that trips generic-api-key.
+  '''^app/vendor/''',
 ]
 regexes = [
   # Placeholder tokens used in docs / examples
