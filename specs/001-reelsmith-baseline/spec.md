@@ -136,7 +136,7 @@ A creator exports a clip for Premiere or DaVinci, or downloads many clips with a
 |---|---|---|---|
 | FR-001 | The system MUST accept a URL via `POST /jobs`, dedupe by URL, and reject unsupported platforms with 400. | Implemented (the 400 returns `{"detail": "Unsupported platform for URL: <url>"}` and creates no job; T027) | `tests/contract/test_jobs_router.py`, `test_store_lookup_routes.py` |
 | FR-002 | The system MUST support YouTube, TikTok, Instagram, Facebook, upload and generate sources through platform adapters. | Implemented | `tests/unit/test_platform_adapters.py`, `test_platform_registry.py` |
-| FR-003 | The system MUST stream per-job events over SSE. | Implemented | `tests/contract/test_generate_pipeline.py`, `tests/e2e/test_happy_path.py` |
+| FR-003 | The system MUST stream per-job events over SSE. | Implemented | `tests/contract/test_generate_pipeline.py`, `tests/e2e/test_happy_path.py`; keep-alive pings every `YTVIDEO_SSE_KEEPALIVE_SECONDS`: `tests/unit/test_sse_keepalive.py` |
 | FR-004 | The system MUST run at most `max_concurrent_jobs` jobs and `max_parallel_chapters` chapters at once. | Implemented | `tests/unit/test_orchestrator_concurrency.py` (4 tests fail on Python 3.12; 3.14 only) |
 | FR-005 | The system MUST mark interrupted jobs failed at startup. | Implemented | `tests/unit/test_startup_recovery.py` |
 | FR-006 | The system MUST transcribe with word-level timings (faster-whisper) or a stub. | Implemented | `tests/unit/test_transcription_service.py`, `test_transcription_whisper_path.py` |

@@ -219,4 +219,4 @@ async def stream_job_events(job_id: str, request: Request):
             if event.type in _TERMINAL_TYPES:
                 return
 
-    return EventSourceResponse(event_source())
+    return EventSourceResponse(event_source(), ping=settings.sse_keepalive_seconds)

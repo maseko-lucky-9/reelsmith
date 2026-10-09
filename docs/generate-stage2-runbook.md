@@ -39,12 +39,17 @@ Install the fork into the same environment you will run ReelSmith from so
 
 ### 2. Download the LTX-Video 2B distilled weights
 
-Download the **2B distilled** weights to a local directory, then point the
-app at them:
+Download the **2B distilled** weights to a local directory and reference them
+from the fork's pipeline config yaml. The `ltx` provider runs the fork's
+`inference.py` as a subprocess, so point the app at the fork's interpreter,
+script, and that yaml (all three must exist, else the provider and Gate A
+report NOT_CONFIGURED):
 
 ```bash
 # .env (host-local — never commit)
-YTVIDEO_LTX_MODEL_PATH=/absolute/path/to/ltx-2b-distilled
+YTVIDEO_LTX_PYTHON=/absolute/path/to/LTX-Video/.venv/bin/python
+YTVIDEO_LTX_INFERENCE_SCRIPT=/absolute/path/to/LTX-Video/inference.py
+YTVIDEO_LTX_PIPELINE_CONFIG=/absolute/path/to/ltx-2b-distilled.yaml
 ```
 
 The 2B distilled variant is the one Gate A is budgeted against; larger
