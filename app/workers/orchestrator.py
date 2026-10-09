@@ -587,13 +587,21 @@ async def _process_chapter(
                 "[%s] Chapter %d  audio enhanced (%.2fs)  path=%s",
                 job_id, index, time.perf_counter() - step_t0, enhanced_audio_path,
             )
-            # TODO: emit EventType.AUDIO_ENHANCED once events.py adds it.
         except Exception as exc:  # noqa: BLE001
             # Non-fatal: fall back to the original audio. Enhancement is
             # quality-of-life and must never block the rest of the pipeline.
             log.warning(
                 "[%s] Chapter %d  audio enhancement failed (%s); using original audio",
                 job_id, index, exc,
+            )
+        else:
+            # Emitted here, not by the service: it runs in a worker thread,
+            # where emit_from_sync has no event loop and does nothing.
+            await _emit(
+                bus, EventType.AUDIO_ENHANCED, job_id,
+                chapter_index=index,
+                provider=settings.audio_enhance_provider,
+                audio_path=enhanced_audio_path,
             )
     elif not opts.audio_enhance:
         log.info("[%s] Chapter %d  skipping audio_enhance", job_id, index)
@@ -635,6 +643,7 @@ async def _process_chapter(
     if opts.filler_removal and opts.transcription and words:
         log.info("[%s] Chapter %d  removing fillers  before=%d", job_id, index, len(words))
         step_t0 = time.perf_counter()
+        words_before = len(words)
         spans = [
             filler_removal_service.WordSpan(text=w.word, start=w.start, end=w.end)
             for w in words
@@ -657,7 +666,14 @@ async def _process_chapter(
             "[%s] Chapter %d  filler removal done (%.2fs)  after=%d",
             job_id, index, time.perf_counter() - step_t0, len(words),
         )
-        # TODO: emit EventType.FILLERS_REMOVED once events.py adds it.
+        # words_removed is 0 when nothing matched, or when every word was a
+        # filler (the transcript is then kept as is).
+        await _emit(
+            bus, EventType.FILLERS_REMOVED, job_id,
+            chapter_index=index,
+            words_removed=words_before - len(words),
+            words_kept=len(words),
+        )
     elif not opts.filler_removal:
         await _emit(
             bus, EventType.STAGE_SKIPPED, job_id,
@@ -820,7 +836,10 @@ async def _process_chapter(
                 "[%s] Chapter %d  ai_hook done (%.2fs)  hook=%r",
                 job_id, index, time.perf_counter() - step_t0, hook,
             )
-            # TODO: emit EventType.AI_HOOK_GENERATED once events.py adds it.
+            await _emit(
+                bus, EventType.AI_HOOK_GENERATED, job_id,
+                chapter_index=index, clip_id=clip_id, hook=hook,
+            )
         else:
             log.info("[%s] Chapter %d  ai_hook returned empty; skipping", job_id, index)
     elif not opts.ai_hook:
