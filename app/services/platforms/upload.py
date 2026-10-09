@@ -15,10 +15,13 @@ from urllib.parse import urlparse
 
 from app.services import ffmpeg_tools
 from app.services.platforms.base import Chapter, DownloadResult
+from app.settings import settings
 
 # Must match the directory used by app/routers/uploads.py.
 # Resolved once at import time so symlink games can't move the goalposts.
-_UPLOAD_ROOT = Path("/tmp/yt/uploads").resolve()
+_UPLOAD_ROOT = (Path(settings.default_download_path) / "uploads").resolve()
+# Where uploads were stored before T031; jobs created then still point here.
+_LEGACY_UPLOAD_ROOT = Path("/tmp/yt/uploads").resolve()
 _ALLOWED_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 
 
@@ -41,14 +44,15 @@ class UploadAdapter:
 
     def download(self, url: str, destination_folder: str) -> DownloadResult:
         parsed = urlparse(url)
-        raw_path = parsed.path  # e.g. /tmp/yt/uploads/uuid.mp4
+        raw_path = parsed.path  # e.g. <download_path>/uploads/uuid.mp4
 
-        # Resolve to absolute path and confirm it stays inside _UPLOAD_ROOT.
+        # Resolve to absolute path and confirm it stays inside an uploads root.
         # Path.resolve() follows symlinks, neutralising ../.. traversal.
         candidate = Path(raw_path).resolve()
-        try:
-            candidate.relative_to(_UPLOAD_ROOT)
-        except ValueError:
+        if not any(
+            candidate.is_relative_to(root)
+            for root in (_UPLOAD_ROOT, _LEGACY_UPLOAD_ROOT)
+        ):
             raise PermissionError(
                 f"upload path escapes uploads directory: {raw_path!r}"
             )

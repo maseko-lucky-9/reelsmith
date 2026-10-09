@@ -170,7 +170,9 @@ class _TwoChapterAdapter:
         ]
 
 
-def _fake_subfolder(download_path: str, url: str, platform_id: str = "video"):
+def _fake_subfolder(
+    download_path: str, url: str, platform_id: str = "video", job_id: str | None = None
+):
     clips = Path(download_path) / "vid" / "clips"
     clips.mkdir(parents=True, exist_ok=True)
     return str(clips.parent), str(clips)

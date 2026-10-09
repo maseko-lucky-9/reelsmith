@@ -50,6 +50,8 @@ web/playwright-report/
 data/social-stubs/
 data/broll-cache/
 data/backups/
+# Source videos, uploads and rendered clips (YTVIDEO_DEFAULT_DOWNLOAD_PATH)
+data/downloads/
 
 # OAuth token caches (Fernet-encrypted at rest, but never tracked)
 data/oauth-tokens/

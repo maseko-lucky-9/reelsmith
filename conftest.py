@@ -27,6 +27,9 @@ os.environ.setdefault("YTVIDEO_WHISPER_WARMUP", "false")
 # Never let the test suite export into a developer's real .env export folder
 # (e.g. a Syncthing share); env vars win over .env in pydantic-settings.
 os.environ.setdefault("YTVIDEO_EXPORT_BASE_FOLDER", tempfile.mkdtemp(prefix="reelsmith-test-export-"))
+# Downloads and uploads go to a throwaway dir too, never the project's
+# data/downloads or a developer's .env download path.
+os.environ.setdefault("YTVIDEO_DEFAULT_DOWNLOAD_PATH", tempfile.mkdtemp(prefix="reelsmith-test-dl-"))
 # Never let a developer's .env switch a platform to a live social adapter
 # (e.g. YTVIDEO_SOCIAL_PROVIDER_TIKTOK=cookie) for the test run; tests that
 # need a provider set it on settings.
