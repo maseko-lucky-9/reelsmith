@@ -144,3 +144,18 @@ def test_unknown_clip_is_404_and_nothing_queued(client, source_video):
 
     assert response.status_code == 404
     assert _queue(client).qsize() == 0
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [({}, True), ({"regenerate_copy": True}, True), ({"regenerate_copy": False}, False)],
+)
+def test_rerender_payload_carries_regenerate_copy(client, source_video, body, expected):
+    """T028 (d): the flag reaches the queued payload; it defaults to True."""
+    _seed(client, video_path=str(source_video))
+
+    response = client.post("/clips/c1/rerender", json=body)
+
+    assert response.status_code == 202
+    _, payload = _queue(client).get_nowait()
+    assert payload["regenerate_copy"] is expected

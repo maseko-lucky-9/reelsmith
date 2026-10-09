@@ -315,3 +315,78 @@ async def test_failed_rerender_resets_chapter_status(
     assert job.chapters[1].status == expected
     assert await store.get_clip(CLIP_ID) == before_clip
     assert job.status == "completed"
+
+
+@pytest.fixture
+def copy_calls(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    """Stub the social-copy generators (LLM) and count their calls."""
+    calls = {"social": 0, "hook": 0}
+
+    def _social(title, transcript, *args, **kwargs):
+        calls["social"] += 1
+        return "new summary", ["#new"]
+
+    def _hook(transcript, **kwargs):
+        calls["hook"] += 1
+        return "new hook"
+
+    monkeypatch.setattr(orch.settings, "ollama_enabled", True)
+    monkeypatch.setattr(orch.ollama_service, "generate_social_content", _social)
+    monkeypatch.setattr(orch.ai_hook_service, "generate_hook", _hook)
+    return calls
+
+
+async def _seed_copy(store: Any, layout: dict[str, Path]) -> None:
+    await _seed(store, layout)
+    await store.upsert_clip(
+        JOB_ID,
+        CLIP_ID,
+        lambda c: c.update(
+            {
+                "summary": "old summary",
+                "hashtags": ["#old"],
+                "ai_hook_text": "old hook",
+            }
+        ),
+    )
+
+
+def _copy_view(clip: dict[str, Any]) -> tuple[Any, ...]:
+    return (clip["title"], clip["summary"], clip["hashtags"], clip["ai_hook_text"])
+
+
+_HOOK_ON = PipelineOptions(audio_enhance=False, ai_hook=True).model_dump()
+
+
+async def test_rerender_without_copy_keeps_title_summary_hashtags_and_hook(
+    store, layout, render_calls, copy_calls
+):
+    """T028 (d): ``regenerate_copy=False`` re-renders the video only."""
+    await _seed_copy(store, layout)
+
+    await orch._run_job(
+        _trigger(pipeline_options=_HOOK_ON, regenerate_copy=False),
+        AsyncEventBus(),
+        store,
+    )
+
+    assert len(render_calls) == 1
+    clip = await store.get_clip(CLIP_ID)
+    assert _copy_view(clip) == ("Outro", "old summary", ["#old"], "old hook")
+    assert clip["transcript"] == "new words"
+    assert copy_calls == {"social": 0, "hook": 0}
+
+
+@pytest.mark.parametrize("flag", [{}, {"regenerate_copy": True}])
+async def test_rerender_regenerates_copy_by_default(
+    store, layout, render_calls, copy_calls, flag
+):
+    await _seed_copy(store, layout)
+
+    await orch._run_job(
+        _trigger(pipeline_options=_HOOK_ON, **flag), AsyncEventBus(), store
+    )
+
+    clip = await store.get_clip(CLIP_ID)
+    assert _copy_view(clip) == ("Outro", "new summary", ["#new"], "new hook")
+    assert copy_calls == {"social": 1, "hook": 1}

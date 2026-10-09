@@ -429,6 +429,7 @@ async def _rerender_clip(trigger: Event, bus: AsyncEventBus, store: JobStore) ->
             pipeline_options=_effective_options({**raw_opts, "render": True}),
             language=payload.get("language", job.language),
             clip_id=clip_id,
+            regenerate_copy=bool(payload.get("regenerate_copy", True)),
         )
         log.info(
             "[%s] Re-render of clip %s done in %.2fs",
@@ -522,9 +523,14 @@ async def _process_chapter(
     pipeline_options: PipelineOptions | None = None,
     language: str | None = None,
     clip_id: str | None = None,
+    regenerate_copy: bool = True,
 ) -> str | None:
     """Process one chapter into a clip; ``clip_id`` updates an existing clip
-    in place (re-render) instead of creating a new one."""
+    in place (re-render) instead of creating a new one.
+
+    ``regenerate_copy=False`` (re-render only) skips the social-copy block:
+    the clip keeps its title, summary, hashtags and AI hook text.
+    """
     index = int(chapter["index"])
     title = chapter["title"]
     start = float(chapter["start"])
@@ -834,9 +840,10 @@ async def _process_chapter(
             "end": end,
             "output_path": output_path,
             "thumbnail_path": thumbnail_path,
-            "title": title,
             "transcript": text,
         })
+        if regenerate_copy:
+            c["title"] = title
 
     await store.upsert_clip(job_id, clip_id, _init_clip)
 
@@ -844,6 +851,13 @@ async def _process_chapter(
     # Generate a single punchy opening line per clip and stash it on the
     # clip record (DB column ``ai_hook_text``). Needs the transcript to be
     # meaningful, so we skip silently when transcription was off or empty.
+    if not regenerate_copy:
+        log.info(
+            "[%s] Chapter %d  keeping title, summary, hashtags and AI hook "
+            "(regenerate_copy=False)",
+            job_id, index,
+        )
+        return output_path
     if opts.ai_hook and text.strip():
         log.info("[%s] Chapter %d  generating AI hook  model=%s", job_id, index, settings.ollama_model)
         step_t0 = time.perf_counter()

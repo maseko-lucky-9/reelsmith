@@ -200,7 +200,7 @@ export const api = {
   dislikeClip: (clipId: string) =>
     apiFetch<ClipRecord>(`/api/clips/${clipId}/dislike`, { method: 'PATCH' }),
 
-  rerenderClip: (clipId: string, body: { reframe_provider?: string }) =>
+  rerenderClip: (clipId: string, body: RerenderRequest) =>
     apiFetch<{ status: string; clip_id: string }>(`/api/clips/${clipId}/rerender`, {
       method: 'POST',
       body: JSON.stringify(body),
@@ -372,6 +372,13 @@ export interface RenderPlan {
     font_size: number
     color: string
   }>
+}
+
+/** Body of POST /clips/{id}/rerender (app/routers/clips.py RerenderRequest). */
+export interface RerenderRequest {
+  reframe_provider?: string
+  /** false re-renders the video only; title, summary, hashtags and AI hook are kept. Server default true. */
+  regenerate_copy?: boolean
 }
 
 export interface RepromptRequest {
