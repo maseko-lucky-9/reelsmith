@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.api_prefix import ApiPrefixMiddleware
 from app.bus.event_bus import AsyncEventBus
 from app.bus.job_store import InMemoryJobStore, SqlJobStore
 from app.domain.events import Event, EventType
@@ -44,6 +45,9 @@ from app.workers.orchestrator import run_orchestrator
 import app.logging_config  # noqa: F401
 
 log = logging.getLogger(__name__)
+
+# The built React app, served at "/" when YTVIDEO_SERVE_FRONTEND=true.
+FRONTEND_DIST = Path(__file__).parents[1] / "web" / "dist"
 
 
 async def _warm_up_whisper() -> None:
@@ -192,8 +196,11 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    # Every route answers at /x and /api/x: the Vite dev proxy strips /api,
+    # the UI served by serve_frontend does not (T034). Routers stay unprefixed.
+    app.add_middleware(ApiPrefixMiddleware)
 
-    # Health probe — Vite proxy strips /api prefix so this must live at /health.
+    # Health probe: /health, and /api/health through ApiPrefixMiddleware.
     @app.get("/health", tags=["meta"])
     async def health() -> JSONResponse:
         return JSONResponse({"status": "ok", "job_store": settings.job_store})
@@ -226,7 +233,7 @@ def create_app() -> FastAPI:
 
     # Serve the built React app in production (YTVIDEO_SERVE_FRONTEND=true).
     if settings.serve_frontend:
-        frontend_dir = Path(__file__).parents[1] / "web" / "dist"
+        frontend_dir = FRONTEND_DIST
         if frontend_dir.is_dir():
             app.mount("/", StaticFiles(directory=str(frontend_dir), html=True), name="frontend")
 

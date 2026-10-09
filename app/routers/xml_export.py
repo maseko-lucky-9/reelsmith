@@ -10,7 +10,7 @@ from app.db.models import ClipRecord
 from app.db.session import get_session
 from app.services.xml_export_service import render
 
-router = APIRouter(prefix="/api/clips", tags=["xml-export"])
+router = APIRouter(prefix="/clips", tags=["xml-export"])
 
 _FORMATS = {"premiere", "davinci"}
 
