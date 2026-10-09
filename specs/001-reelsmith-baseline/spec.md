@@ -10,6 +10,7 @@
 > | Tag | Meaning |
 > |---|---|
 > | `Implemented` | Reachable behaviour with a named test file. The test's strength is **not** audited unless the *Audit notes* say so. |
+> | `Untested` | Reachable (verified by probe or reading), but no test covers it. |
 > | `Partial` | Reachable, but a verified defect makes part of it wrong. |
 > | `Scaffolded-unwired` | Code, table or UI exists but nothing in the running app uses it. |
 > | `Missing` | Referenced by the UI or docs, no backend. |
@@ -28,7 +29,7 @@ A creator pastes a YouTube, TikTok, Instagram or Facebook URL, picks pipeline op
 
 **Acceptance Scenarios**:
 
-1. **Given** a supported URL, **When** `POST /jobs`, **Then** the response is 202 with `job_id` and status `pending`, and the orchestrator picks it up.
+1. **Given** a supported URL, **When** `POST /jobs`, **Then** the response is 202 with `job_id` and status `accepted` (a duplicate returns the existing job's status), and the orchestrator picks it up.
 2. **Given** a job for the same URL is already pending, running or completed, **When** `POST /jobs` repeats the URL, **Then** the existing job id is returned and the new options are ignored.
 3. **Given** an unsupported platform, **When** `POST /jobs`, **Then** the response is 400 with the URL echoed.
 4. **Given** a source with chapters, **When** the job runs, **Then** one clip is rendered per chapter, with captions burned in, as yuv420p with even dimensions.
@@ -62,7 +63,7 @@ A creator browses clips, filters them, likes or dislikes them, and asks for a re
 
 1. **Given** clips exist, **When** listed with `job_id`, `min_score` or `search`, **Then** only matching, non-retired clips are returned.
 2. **Given** a clip, **When** `PATCH /clips/{id}/like`, **Then** the response says liked **and the change persists on the next read**. *Fails today, see FR-014.*
-3. **Given** a clip, **When** `POST /clips/{id}/rerender`, **Then** a re-render of that clip runs. *Does nothing useful today, see FR-015.*
+3. **Given** a clip, **When** `POST /clips/{id}/rerender`, **Then** a re-render of that clip runs. *Instead the original completed job is flipped to `failed`, see FR-015.*
 4. **Given** a completed job, **When** `POST /api/jobs/{id}/reprompt` with a prompt and a length range, **Then** the segment proposer re-runs and new clips appear. *Does not today, see FR-016.*
 
 ### User Story 4 - Edit a clip on a timeline (Priority: P4)
@@ -113,7 +114,7 @@ A creator exports a clip for Premiere or DaVinci, or downloads many clips with a
 **Acceptance Scenarios**:
 
 1. **Given** a rendered clip, **When** requesting `export.xml`, **Then** NLE XML is returned; for an unrendered clip, 409.
-2. **Given** selected clips, **When** requesting the bulk zip, **Then** a zip with a manifest is streamed, capped at `bulk_export_max_clips` (200).
+2. **Given** selected clips, **When** requesting the bulk zip, **Then** a zip with a manifest is streamed; more than `bulk_export_max_clips` (200) ids is rejected with 422.
 3. **Given** a retired clip, **When** bulk-exporting, **Then** it is absent from the manifest. *It is listed today, see FR-051.*
 
 ### Edge Cases
@@ -133,27 +134,27 @@ A creator exports a clip for Premiere or DaVinci, or downloads many clips with a
 
 | ID | Requirement | Status | Evidence |
 |---|---|---|---|
-| FR-001 | The system MUST accept a URL via `POST /jobs`, dedupe by URL, and reject unsupported platforms with 400. | Implemented | `tests/contract/test_jobs_router.py`, `test_store_lookup_routes.py` |
+| FR-001 | The system MUST accept a URL via `POST /jobs`, dedupe by URL, and reject unsupported platforms with 400. | Implemented (dedupe tested; the 400 for an unsupported URL has no test through `POST /jobs`) | `tests/contract/test_jobs_router.py`, `test_store_lookup_routes.py` |
 | FR-002 | The system MUST support YouTube, TikTok, Instagram, Facebook, upload and generate sources through platform adapters. | Implemented | `tests/unit/test_platform_adapters.py`, `test_platform_registry.py` |
-| FR-003 | The system MUST stream per-job events over SSE. | Implemented | `tests/contract/test_jobs_router.py` |
+| FR-003 | The system MUST stream per-job events over SSE. | Implemented | `tests/contract/test_generate_pipeline.py`, `tests/e2e/test_happy_path.py` |
 | FR-004 | The system MUST run at most `max_concurrent_jobs` jobs and `max_parallel_chapters` chapters at once. | Implemented | `tests/unit/test_orchestrator_concurrency.py` (4 tests fail on Python 3.12; 3.14 only) |
 | FR-005 | The system MUST mark interrupted jobs failed at startup. | Implemented | `tests/unit/test_startup_recovery.py` |
 | FR-006 | The system MUST transcribe with word-level timings (faster-whisper) or a stub. | Implemented | `tests/unit/test_transcription_service.py`, `test_transcription_whisper_path.py` |
 | FR-007 | The system MUST render each chapter in one ffmpeg pass, to yuv420p with even dimensions, captions pixel-identical to the PIL renderer. | Implemented | `tests/unit/test_render_service.py`, `test_caption_track.py`, `tests/sync_checker.py` |
 | FR-008 | The system MUST generate a thumbnail per rendered clip and, optionally, AI hook text, filler removal and audio enhancement. | Implemented | `tests/unit/test_thumbnail_service.py`, `test_ai_hook_service.py`, `test_filler_transition_profanity.py`, `test_audio_enhance_service.py` |
 | FR-009 | The system MUST propose and score segments for sources without chapters. | **Scaffolded-unwired** | `segment_proposer` is gated at `app/workers/orchestrator.py:206`, but both branches build the same single "Full Video" chapter ("would run here (future)"). Service tested in isolation: `tests/unit/test_segment_proposer.py`. Clips are therefore **not** virality-ranked. |
-| FR-010 | The system MUST honour the `reframe` and `broll` pipeline options (default on). | **Scaffolded-unwired** | `orchestrator.py:653-656` only emits `StageSkipped` when they are off; when on, nothing runs. Services exist: `reframe_service`, `active_speaker_service`, `broll_service`, `broll_pexels_service`. |
+| FR-010 | The system MUST honour the `reframe` and `broll` pipeline options (default on). | **Scaffolded-unwired** | `orchestrator.py:653-656` emits `StageSkipped` only inside the `render=False` branch; when they are on, nothing runs. Services exist: `reframe_service`, `active_speaker_service`, `broll_service`, `broll_pexels_service`. |
 | FR-011 | The system MUST accept MP4 uploads (415 wrong type, 413 too large). | Implemented | `tests/contract/test_uploads_router.py` |
 | FR-012 | The system MUST generate a video from a brief when `generate_enabled`, else 400. | Implemented | `tests/contract/test_generate_router.py`, `test_generate_pipeline.py`, `tests/unit/test_ltx_producer.py` |
-| FR-013 | The system MUST retire clips older than `retention_days` (30) and delete their video and thumbnail files, on a sweep every `retention_sweep_minutes` (60). Jobs are not deleted. | Implemented | `app/main.py:132-165` (no dedicated test found) |
+| FR-013 | The system MUST retire clips older than `retention_days` (30) and delete their video and thumbnail files, on a sweep every `retention_sweep_minutes` (60). Jobs are not deleted. | Untested | `app/main.py:132-165`; the UPDATE…RETURNING works on SQLite (probe), no test (T025) |
 
 **Clip curation**
 
 | ID | Requirement | Status | Evidence |
 |---|---|---|---|
-| FR-014 | The system MUST persist like and dislike toggles. | **Partial** | `app/routers/clips.py:34,52` define `_toggle` as `async def`; `app/bus/job_store.py:106` calls `mutator(clip)` without `await`, so the coroutine never runs. The response body is computed separately and looks correct. `tests/contract/test_store_lookup_routes.py:199` asserts only status 200 and `clip_id`, so it passes while the feature is broken. |
-| FR-015 | The system MUST re-render a single clip on request. | **Partial** | `app/routers/clips.py:73-79` enqueues a job with `url: ""` under the original job id and `rerender_clip_id`; nothing under `app/` reads `rerender_clip_id`. |
-| FR-016 | The system MUST re-run segment proposal on reprompt. | **Partial** | `app/routers/reprompt.py:93` sets the job `pending` and rewrites options; nothing re-enqueues it, and the proposer is itself unwired (FR-009). |
+| FR-014 | The system MUST persist like and dislike toggles. | **Partial** | `app/routers/clips.py:33,50` define `_toggle` as `async def`; `app/bus/job_store.py:106` (memory store) and `:314` (SQL store, the default `job_store="sql"`) call `mutator(clip)` without `await`, so the coroutine never runs. A probe on `SqlJobStore` also returned `liked=False`. The response body is computed separately and looks correct. `tests/contract/test_store_lookup_routes.py:199` asserts only status 200 and `clip_id`, so it passes while the feature is broken. |
+| FR-015 | The system MUST re-render a single clip on request. | **Partial** | `app/routers/clips.py:70-80` enqueues a payload with `url: ""` under the original job id and `rerender_clip_id`; nothing under `app/` reads `rerender_clip_id`. Running the orchestrator with that payload fails the original *completed* job with `No adapter matches URL: ""` (`orchestrator.py:127`) and emits `JobFailed`. |
+| FR-016 | The system MUST re-run segment proposal on reprompt. | **Partial** | `app/routers/reprompt.py:93` sets the job `pending` and rewrites options; nothing re-enqueues it, and the proposer is itself unwired (FR-009). The job then stays `pending`, which is in `_DEDUP_STATUSES` (`jobs.py:24`), so every later `POST /jobs` for that URL returns the stuck job. |
 | FR-017 | The system MUST list clips filtered by `job_id`, `min_score`, `search`, excluding retired clips. | Implemented (the `min_score` filter is untested, see Audit notes) | `tests/contract/test_store_lookup_routes.py`, `test_media_router.py` |
 
 **Editing and enhancement**
@@ -163,7 +164,7 @@ A creator exports a clip for Premiere or DaVinci, or downloads many clips with a
 | FR-020 | The system MUST store, version, delete and plan-render a per-clip timeline. | Implemented | `tests/contract/test_clip_edits_router.py`, `tests/unit/test_clip_edit_model.py`, `test_timeline_render_service.py` |
 | FR-021 | The system MUST generate AI hook text for a clip through a local Ollama model (empty string on failure). | Implemented | `tests/contract/test_ai_hook_router.py` |
 | FR-022 | The system MUST enhance clip audio with `loudnorm`, `rnnoise` or `passthrough` (202; 422 on unknown provider). | Implemented | `tests/contract/test_enhance_speech_router.py` |
-| FR-023 | The system MUST apply animated captions, transitions, brand vocabulary, profanity filter and voice-over inside the pipeline. | **Scaffolded-unwired** | Services exist (`animated_caption_service`, `transition_service`, `brand_vocabulary_service`, `profanity_filter_service`, `voiceover_service`) with unit tests; none is imported by the orchestrator. Timeline editor reaches some through `timeline_render_service`. |
+| FR-023 | The system MUST apply animated captions, transitions, brand vocabulary, profanity filter and voice-over inside the pipeline. | **Scaffolded-unwired** | Services exist (`animated_caption_service`, `transition_service`, `brand_vocabulary_service`, `profanity_filter_service`, `voiceover_service`) with unit tests; none is imported by the orchestrator, and `timeline_render_service` (which builds a plan only) imports none of them. |
 
 **Brand**
 
@@ -191,9 +192,9 @@ A creator exports a clip for Premiere or DaVinci, or downloads many clips with a
 
 | ID | Requirement | Status | Evidence |
 |---|---|---|---|
-| FR-060 | The system MUST require an API key on every route when `YTVIDEO_REQUIRE_AUTH=true`. | Implemented | `tests/unit/test_w3_auth_capabilities.py` |
+| FR-060 | The system MUST require an API key on every route when `YTVIDEO_REQUIRE_AUTH=true`. | Untested | Probe: every route returns 401 without the key, including `/health`. No test references `require_auth` or `require_api_key` (T026). |
 | FR-061 | The system MUST persist state in SQLite or PostgreSQL via Alembic migrations. | Implemented | `docs/db-parity.md`; 16 revisions in `alembic/versions/` |
-| FR-062 | The system MUST serve the React UI when `YTVIDEO_SERVE_FRONTEND=true`. | Implemented | `app/main.py`; `web/` Vitest suite |
+| FR-062 | The system MUST serve the React UI when `YTVIDEO_SERVE_FRONTEND=true`. | Untested | `app/main.py`; no backend test covers `serve_frontend` (the Vitest suite tests components only) |
 
 ### Scaffolded or missing surfaces
 

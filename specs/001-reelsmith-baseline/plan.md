@@ -28,7 +28,7 @@ FastAPI backend with an asyncio orchestrator that turns a video URL into caption
 | II. Orchestrator sequences; events report | Exception E6 (CLAUDE.md wording) | `tests/unit/test_event_bus.py`, `test_orchestrator.py` |
 | III. One ffmpeg | Exceptions E3, E4 | `tests/unit/test_no_moviepy_in_app.py`, `test_ffmpeg_tools.py` |
 | IV. Offline, deterministic default tests | Holds | `pyproject.toml` `addopts`, `ci.yml` |
-| V. Additive migrations, both engines | Holds (13 index-name differences, T018) | `docs/db-parity.md` |
+| V. Additive migrations, both engines | Holds (13 drift operations from `alembic check`, T018) | `docs/db-parity.md` |
 | VI. Secrets | Exception E5 | `token_vault.py`; gitleaks not enforced |
 | VII. React dashboard is the UI | Holds | `tests/unit/test_no_streamlit_in_app.py` |
 | VIII. Decisions recorded | Holds | `docs/decisions/` |

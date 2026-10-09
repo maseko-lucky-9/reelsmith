@@ -9,16 +9,16 @@ Format: `- [ ] T### [FR-xxx|E#] [Principle] description. Proving test → commit
 ## Phase 1: Constitution exceptions
 
 - [ ] T001 [E1] [I] Rename `SKIP_ALEMBIC` to `YTVIDEO_SKIP_ALEMBIC` in `app/main.py:73` and `tests/unit/test_startup_recovery.py:47`. Test: app starts with the old name unset and migrations skipped under the new one → `fix(config): prefix SKIP_ALEMBIC with YTVIDEO_`
-- [ ] T002 [E2] [I] Declare `share_link_secret`, `social_provider`, `piper_model` in `Settings` and read them from `settings` in `logging_config.py:18`, `voiceover_service.py:137`, `token_vault.py:29`, `share_link_service.py:51`, `social/registry.py:22,25`. Test: existing unit tests plus a settings test per field → `refactor(config): read env through Settings`
+- [ ] T002 [E2] [I] Declare `log_level`, `piper_model`, `share_link_secret`, `social_provider` in `Settings` and read them from `settings` in `logging_config.py:18`, `voiceover_service.py:137`, `token_vault.py:29`, `share_link_service.py:51`, `social/registry.py:22,25`. Test: existing unit tests plus a settings test per field → `refactor(config): read env through Settings`
 - [ ] T003 [E3,E4] [III] Pass the bundled ffmpeg to yt-dlp (`ffmpeg_location`) in `app/services/platforms/_yt_dlp_base.py`, and use the yt-dlp Python API instead of the `yt-dlp` CLI in `app/routers/jobs.py:59,87`. Test: unit test asserting `ffmpeg_location` equals the imageio-ffmpeg path → `fix(download): use bundled ffmpeg for yt-dlp merges`
 - [ ] T004 [E5] [VI] Run gitleaks in CI (`ci.yml`) and document `pre-commit install` in README. Test: CI job fails on a seeded fake key in a throwaway branch → `ci: scan for secrets with gitleaks`
 - [ ] T005 [E6] [II] Correct the "all inter-service communication goes through the event bus" line in `CLAUDE.md` to match constitution principle II. Test: n/a (docs) → `docs: align CLAUDE.md with constitution principle II`
 
 ## Phase 2: Defects in shipped behaviour
 
-- [ ] T006 [FR-014] [II] Make `JobStore.upsert_clip` await async mutators (`app/bus/job_store.py:106` and the SQL store's `upsert_clip` at `:289`), and replace the weak assertions at `tests/contract/test_store_lookup_routes.py:199` with a read-back of `liked`/`disliked`. Test must fail with the `await` removed → `fix(clips): persist like and dislike`
-- [ ] T007 [FR-015] [II] **Decision**: implement `rerender_clip_id` handling in the orchestrator, or remove `POST /clips/{id}/rerender` and its UI button. Test: contract test that a re-render produces a new `output_path` → `fix(clips): re-render a single clip`
-- [ ] T008 [FR-016] [II] **Decision** (depends on T011): re-enqueue the job after `POST /api/jobs/{id}/reprompt` and emit an event. Test: contract test asserts the job is queued → `fix(reprompt): enqueue the job`
+- [ ] T006 [FR-014] [II] Make `JobStore.upsert_clip` await async mutators in both stores (`app/bus/job_store.py:106` memory; SQL store `upsert_clip` at `:289`, call at `:314`, the default store), and replace the weak assertions at `tests/contract/test_store_lookup_routes.py:199` with a read-back of `liked`/`disliked`. Test must fail with the `await` removed → `fix(clips): persist like and dislike`
+- [ ] T007 [FR-015] [II] **High severity**: today a re-render flips the original completed job to `failed`. **Decision**: implement `rerender_clip_id` handling in the orchestrator, or remove `POST /clips/{id}/rerender` and its UI button. Test: contract test that a re-render produces a new `output_path` → `fix(clips): re-render a single clip`
+- [ ] T008 [FR-016] [II] **Decision** (depends on T011; today the job is left `pending` and blocks new submissions of its URL): re-enqueue the job after `POST /api/jobs/{id}/reprompt` and emit an event. Test: contract test asserts the job is queued → `fix(reprompt): enqueue the job`
 - [ ] T009 [FR-051] [II] Exclude retired clips from the bulk-export manifest in `app/routers/bulk_export.py`. Test: retired clip absent from manifest (fails before the fix) → `fix(export): skip retired clips in bulk manifest`
 
 ## Phase 3: Scaffolded-unwired code (decide: wire or delete)
@@ -34,14 +34,18 @@ Format: `- [ ] T### [FR-xxx|E#] [Principle] description. Proving test → commit
 
 ## Phase 4: Tooling and documentation
 
-- [ ] T018 `alembic check` reports 13 index-name differences between migrations and models; `alembic upgrade --sql` fails on a data migration. Test: `alembic check` exits 0 → `fix(db): align index names with models`
+- [ ] T018 `alembic check` reports 13 drift operations between migrations and models (11 index add/remove, 2 unique-constraint removals on `clip_edits` and `social_accounts`); `alembic upgrade --sql` fails on a data migration. Test: `alembic check` exits 0 → `fix(db): align migrations with models`
 - [ ] T019 Skip or fix the 4 tests in `tests/unit/test_orchestrator_concurrency.py` that fail on Python 3.12 (CI and docs are 3.14 only). → `test: mark concurrency tests 3.14-only`
 - [ ] T020 Seed Linux golden caption hashes in `tests/unit/test_subtitle_image_golden.py` (CI skips them today; the PNG-equality tests are the guard). → `test: seed linux caption goldens`
 - [ ] T021 Set ruff `target-version` (reports F821 on `ExceptionGroup`). → `chore(lint): set ruff target-version`
 - [ ] T022 Revisit the TypeScript hold at 6.0.x when typescript-eslint supports 7.1+. → `chore(web): upgrade TypeScript`
-- [ ] T023 Add a "superseded by ADR-004" note to ADR-003 decision 2 (it names MoviePy). `docs/wave-3-gate.md` is a dated gate record: do not edit it (it counted 14 migrations at its commit; there are 16 now).
+- [ ] T023 Add a "superseded by ADR-004" note to ADR-003 decision 2 (it names MoviePy). `docs/wave-3-gate.md` is a dated gate record: do not edit it (it says 12 revisions at `:37` and `:94`; `46c8200` actually contained 14 migration files; there are 16 now).
 
 - [ ] T024 [FR-017] [IV] Add a test for the `min_score` filter on `GET /clips`; mutating `>=` to `<=` at `app/bus/job_store.py:171` currently leaves 46 tests green. Test: fails under that mutation → `test(clips): cover min_score filter`
+
+- [ ] T025 [FR-013] [IV] Add a test for the retention janitor (clips older than `retention_days` are retired and their files removed); extract the sweep body from `app/main.py:132-165` into a function if needed. Test: fails when the `created_at < cutoff` filter is inverted → `test(retention): cover the clip janitor`
+- [ ] T026 [FR-060] [IV] Add a test that every route, including `/health`, returns 401 without the key when `YTVIDEO_REQUIRE_AUTH=true`, and 200 with it. Test: fails when `dependencies` is dropped in `create_app` → `test(auth): cover require_api_key`
+- [ ] T027 [FR-001] [IV] Add a contract test that `POST /jobs` with an unsupported URL returns 400 with the URL echoed. → `test(jobs): cover unsupported platform`
 
 ## Dependencies
 
