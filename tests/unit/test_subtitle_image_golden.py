@@ -50,6 +50,15 @@ GOLDEN_SHA256: dict[tuple[bool, str, str], dict[str, str]] = {
         "1920x3413_no_highlight": "e834a9efd84ae06b5a0dbe5f15583c5f2340475c67d28910eb9598d61b8ae23a",
         "320x568_highlight_0": "56ddf006f6b82935734d85b7eec4028a4f7a296a71cae2e9881ebe8de76b7840",
     },
+    # Seeded from the GitHub Actions ubuntu-latest runner (CI run 37939433692):
+    # Pillow 12.3.0 manylinux wheel, FreeType 2.14.3, raqm 0.10.5. Identical to
+    # the Darwin arm64 hashes; kept as its own key so a divergence on either
+    # platform fails only there.
+    (True, "Linux", "x86_64"): {
+        "1920x3413_highlight_1": "6771e4926d579fdd76131029776717cec68ac9d7a0607a88e5ffa27c8df9ed71",
+        "1920x3413_no_highlight": "e834a9efd84ae06b5a0dbe5f15583c5f2340475c67d28910eb9598d61b8ae23a",
+        "320x568_highlight_0": "56ddf006f6b82935734d85b7eec4028a4f7a296a71cae2e9881ebe8de76b7840",
+    },
     # For reference, forcing the BASIC
     # layout on the seeding Mac (ImageFont.core.HAVE_RAQM = False) gave
     #   1920x3413_highlight_1  0e4324b8bfc63f824062b388db9bb39b9531bad2af27d46f3936b99f6f9c9c97
