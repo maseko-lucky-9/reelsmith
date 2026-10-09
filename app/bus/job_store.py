@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from typing import Any, Protocol, runtime_checkable
 
 from app.domain.models import ChapterArtifacts, JobState, PipelineOptions
@@ -56,6 +56,7 @@ class JobStoreProtocol(Protocol):
         min_score: int | None = None,
         search: str = "",
     ) -> list[dict[str, Any]]: ...
+    async def retire_clips(self, job_id: str, clip_ids: Sequence[str]) -> int: ...
 
 
 class InMemoryJobStore:
@@ -127,6 +128,23 @@ class InMemoryJobStore:
             if clip is None or (clip.get("retired") and not include_retired):
                 return None
             return clip
+
+    async def retire_clips(self, job_id: str, clip_ids: Sequence[str]) -> int:
+        """Flag the live clips of ``job_id`` among ``clip_ids`` retired.
+
+        Ids of other jobs, unknown ids and already-retired clips are left
+        alone. Returns how many clips this call retired. Files are not
+        deleted; that is the caller's job.
+        """
+        async with self._lock:
+            retired = 0
+            for clip_id in set(clip_ids):
+                clip = self._clips.get(clip_id)
+                if clip is None or clip.get("job_id") != job_id or clip.get("retired"):
+                    continue
+                clip["retired"] = True
+                retired += 1
+            return retired
 
     async def list_jobs(
         self, limit: int = 20, offset: int = 0, search: str = ""
@@ -310,20 +328,13 @@ class SqlJobStore:
                 select(ClipRecord).where(ClipRecord.id == clip_id)
             )
             record = result.scalar_one_or_none()
-            clip: dict[str, Any] = {"clip_id": clip_id, "job_id": job_id}
-            if record:
-                clip.update({
-                    "start": record.start, "end": record.end,
-                    "output_path": record.output_path,
-                    "thumbnail_path": record.thumbnail_path,
-                    "title": record.title, "summary": record.summary,
-                    "hashtags": record.hashtags,
-                    "virality_score": record.virality_score,
-                    "score_breakdown": record.score_breakdown,
-                    "transcript": record.transcript,
-                    "liked": record.liked,
-                    "disliked": record.disliked,
-                })
+            # Reload through the same mapping the readers use, so a mutator
+            # that sets one key does not wipe the columns it did not touch.
+            clip: dict[str, Any] = (
+                _clip_record_to_dict(record)
+                if record
+                else {"clip_id": clip_id, "job_id": job_id}
+            )
             await _apply_clip_mutator(mutator, clip)
             def _apply_clip_to_record(r: Any, c: dict[str, Any]) -> None:
                 r.start = c.get("start", 0.0)
@@ -338,6 +349,12 @@ class SqlJobStore:
                 r.transcript = c.get("transcript")
                 r.liked = bool(c.get("liked", False))
                 r.disliked = bool(c.get("disliked", False))
+                r.retired = bool(c.get("retired", False))
+                r.ai_hook_text = c.get("ai_hook_text")
+                r.ai_hook_audio_path = c.get("ai_hook_audio_path")
+                r.broll_assets = c.get("broll_assets")
+                r.caption_style = c.get("caption_style") or "static"
+                r.captions_burnt_path = c.get("captions_burnt_path")
 
             if record is None:
                 record = ClipRecord(id=clip_id, job_id=job_id)
@@ -361,6 +378,31 @@ class SqlJobStore:
             result = await session.execute(q)
             record = result.scalar_one_or_none()
             return _clip_record_to_dict(record) if record else None
+
+    async def retire_clips(self, job_id: str, clip_ids: Sequence[str]) -> int:
+        """Flag the live clips of ``job_id`` among ``clip_ids`` retired (one
+        UPDATE). Ids of other jobs, unknown ids and already-retired clips are
+        left alone. Returns how many clips this call retired. Files are not
+        deleted; that is the caller's job.
+        """
+        from app.db.models import ClipRecord
+        from sqlalchemy import update
+
+        ids = list(set(clip_ids))
+        if not ids:
+            return 0
+        async with self._factory() as session:
+            result = await session.execute(
+                update(ClipRecord)
+                .where(ClipRecord.job_id == job_id)
+                .where(ClipRecord.id.in_(ids))
+                .where(ClipRecord.retired.is_(False))
+                .values(retired=True)
+                .returning(ClipRecord.id)
+            )
+            retired = len(result.all())
+            await session.commit()
+        return retired
 
     async def list_jobs(
         self, limit: int = 20, offset: int = 0, search: str = ""
@@ -492,4 +534,9 @@ def _clip_record_to_dict(record: Any) -> dict[str, Any]:
         "liked": record.liked,
         "disliked": record.disliked,
         "retired": record.retired,
+        "ai_hook_text": record.ai_hook_text,
+        "ai_hook_audio_path": record.ai_hook_audio_path,
+        "broll_assets": record.broll_assets,
+        "caption_style": record.caption_style,
+        "captions_burnt_path": record.captions_burnt_path,
     }
