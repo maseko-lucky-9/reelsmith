@@ -306,6 +306,23 @@ describe('KNOWN_EVENT_TYPES', () => {
   it('includes StageSkipped', () => {
     expect(KNOWN_EVENT_TYPES.has('StageSkipped')).toBe(true)
   })
+
+  // Drift guard: EventSource cannot wildcard named events, so useJobSSE only hears
+  // types it registered a listener for. Every backend EventType must be in this set.
+  it('matches the backend EventType enum in app/domain/events.py exactly', async () => {
+    // Read the Python source from disk (vitest runs in Node). A computed specifier keeps
+    // Node builtins out of the browser tsconfig, and app/ sits outside Vite's fs.allow root.
+    const fs = (await import(/* @vite-ignore */ ['node', 'fs'].join(':'))) as {
+      readFileSync: (p: string, enc: 'utf8') => string
+    }
+    const here = (import.meta as ImportMeta & { dirname: string }).dirname
+    const eventsPath = `${here}/../../../app/domain/events.py`
+    const eventsPy = fs.readFileSync(eventsPath, 'utf8')
+    const enumBody = eventsPy.split('class EventType')[1].split(/\n\S/)[0]
+    const backend = new Set([...enumBody.matchAll(/^\s+[A-Z_]+\s*=\s*"([^"]+)"/gm)].map((m) => m[1]))
+    expect(backend.size).toBeGreaterThan(20)
+    expect([...KNOWN_EVENT_TYPES].sort()).toEqual([...backend].sort())
+  })
 })
 
 describe('deriveStageStates — skipped pinning from pipeline_options', () => {
