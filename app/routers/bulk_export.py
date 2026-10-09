@@ -126,9 +126,13 @@ async def bulk_export(
             detail=f"too many clips (max {max_clips})",
         )
 
+    # Retired clips keep their row but their files are gone: treat them as
+    # unknown, like every other clip lookup does.
     rows = (
         await session.execute(
-            select(ClipRecord).where(ClipRecord.id.in_(ids))
+            select(ClipRecord).where(
+                ClipRecord.id.in_(ids), ClipRecord.retired.is_(False)
+            )
         )
     ).scalars().all()
     if not rows:

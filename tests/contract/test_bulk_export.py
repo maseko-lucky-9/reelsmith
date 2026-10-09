@@ -1,4 +1,5 @@
 """Contract tests for /api/clips/bulk-export.zip (W3.7)."""
+
 from __future__ import annotations
 
 import asyncio
@@ -27,22 +28,45 @@ async def export_client(tmp_path):
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
-    mp4_a = tmp_path / "a.mp4"; mp4_a.write_bytes(b"video-a")
-    jpg_a = tmp_path / "a.jpg"; jpg_a.write_bytes(b"thumb-a")
-    mp4_b = tmp_path / "b.mp4"; mp4_b.write_bytes(b"video-b")
+    mp4_a = tmp_path / "a.mp4"
+    mp4_a.write_bytes(b"video-a")
+    jpg_a = tmp_path / "a.jpg"
+    jpg_a.write_bytes(b"thumb-a")
+    mp4_b = tmp_path / "b.mp4"
+    mp4_b.write_bytes(b"video-b")
+    # Exists on disk so a leaked retired clip would show up in the zip too.
+    mp4_c = tmp_path / "c.mp4"
+    mp4_c.write_bytes(b"video-c")
 
     async with factory() as session:
         job = JobRecord(youtube_url="https://x.test")
         session.add(job)
         await session.flush()
-        a = ClipRecord(job_id=job.id, start=0, end=5,
-                       output_path=str(mp4_a), thumbnail_path=str(jpg_a),
-                       title="A", hashtags=["fun"])
-        b = ClipRecord(job_id=job.id, start=5, end=10, output_path=str(mp4_b),
-                       title="B")
-        session.add_all([a, b])
+        a = ClipRecord(
+            job_id=job.id,
+            start=0,
+            end=5,
+            output_path=str(mp4_a),
+            thumbnail_path=str(jpg_a),
+            title="A",
+            hashtags=["fun"],
+        )
+        b = ClipRecord(
+            job_id=job.id, start=5, end=10, output_path=str(mp4_b), title="B"
+        )
+        # A retired clip: the retention sweep keeps the row but deletes its files.
+        c = ClipRecord(
+            job_id=job.id,
+            start=10,
+            end=15,
+            title="C",
+            retired=True,
+            output_path=str(mp4_c),
+        )
+        session.add_all([a, b, c])
         await session.commit()
         ids = [a.id, b.id]
+        retired_id = c.id
 
     async def _override():
         async with factory() as session:
@@ -53,6 +77,7 @@ async def export_client(tmp_path):
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
+        client.retired_id = retired_id  # type: ignore[attr-defined]  # test-only handle
         yield client, ids
 
     await engine.dispose()
@@ -74,6 +99,27 @@ async def test_bulk_export_returns_zip(export_client):
     manifest = z.read("manifest.csv").decode("utf-8")
     assert "clip_id" in manifest
     assert "fun" in manifest  # hashtag
+
+
+async def test_bulk_export_skips_retired_clips(export_client):
+    client, ids = export_client
+    retired_id = client.retired_id
+    q = "&".join(f"ids={i}" for i in [*ids, retired_id])
+    r = await client.get(f"/api/clips/bulk-export.zip?{q}")
+    assert r.status_code == 200
+
+    z = zipfile.ZipFile(io.BytesIO(r.content))
+    manifest = z.read("manifest.csv").decode()
+    assert retired_id not in manifest
+    assert f"clips/{retired_id}.mp4" not in z.namelist()
+    # The live clips are still exported.
+    assert all(i in manifest for i in ids)
+
+
+async def test_bulk_export_only_retired_is_404(export_client):
+    client, _ = export_client
+    r = await client.get(f"/api/clips/bulk-export.zip?ids={client.retired_id}")
+    assert r.status_code == 404
 
 
 async def test_bulk_export_no_ids_422(export_client):
