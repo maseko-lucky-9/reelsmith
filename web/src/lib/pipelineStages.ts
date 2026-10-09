@@ -112,6 +112,8 @@ function isStepPast(current: string | null | undefined, target: string): boolean
 }
 
 export interface PipelineEvent {
+  /** Backend event_id; used to drop duplicates when a reconnect replays history. */
+  id?: string
   type: string
   payload?: { chapter_index?: number } & Record<string, unknown>
 }
@@ -338,11 +340,48 @@ export function describeSkippedStages(stages: DerivedStage[]): string {
   return `Stages skipped per job options: ${skipped.map((s) => s.descriptor.label).join(', ')}.`
 }
 
-/** Set of all known event types — used by useJobSSE to warn on drift. */
-export const KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set([
+/**
+ * Backend EventTypes that have no timeline row of their own. They still need an SSE
+ * listener (EventSource only delivers named events to listeners registered for that
+ * exact name), so each one refreshes the job/clips queries when it arrives.
+ */
+const NON_STAGE_EVENT_TYPES = [
   'VideoRequested',
-  ...STAGES.flatMap((s) => [...s.doneOnEvents]),
   'JobFailed',
   'StageSkipped', // emitted when orchestrator skips a stage per pipeline_options
   'SubtitleImageRendered', // emitted but not rendered as its own row (rolled into render)
+  'SegmentsProposed',
+  'SegmentScored',
+  'UploadReceived',
+  'AudioEnhanced',
+  'AiHookGenerated',
+  'BRollApplied',
+  'XmlExported',
+  'PublishQueued',
+  'PublishCompleted',
+  'PublishFailed',
+  'TimelineEdited',
+  'TimelineRendered',
+  'FillersRemoved',
+  'VoiceoverGenerated',
+  'AnimatedCaptionRendered',
+  'TransitionsApplied',
+  'BrandVocabApplied',
+  'ScheduledPostQueued',
+  'WebhookDispatched',
+  'BulkExportCompleted',
+  'ShareLinkCreated',
+  'AnalyticsRefreshed',
+] as const
+
+/**
+ * Every backend EventType (app/domain/events.py). useJobSSE registers one named-event
+ * listener per entry; pipelineStages.test.ts fails if this drifts from the Python enum.
+ */
+export const KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set([
+  ...STAGES.flatMap((s) => [...s.doneOnEvents]),
+  ...NON_STAGE_EVENT_TYPES,
 ])
+
+/** Events after which the backend closes the job's SSE stream (app/routers/jobs.py _TERMINAL_TYPES). */
+export const TERMINAL_EVENT_TYPES: ReadonlySet<string> = new Set(['JobCompleted', 'JobFailed'])

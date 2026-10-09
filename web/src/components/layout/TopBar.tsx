@@ -9,7 +9,9 @@ export function TopBar() {
   const jobsQuery = useQuery({
     queryKey: ['jobs'],
     queryFn: () => api.listJobs(),
-    refetchInterval: 5000,
+    // Badge counts only; live job progress comes from the job page's SSE stream.
+    // refetchIntervalInBackground stays false, so hidden tabs don't poll.
+    refetchInterval: 30_000,
   })
 
   const jobs = jobsQuery.data ?? []

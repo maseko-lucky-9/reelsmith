@@ -9,6 +9,7 @@ import { toast } from 'sonner'
 import { rootRoute } from './root'
 import { api } from '@/api/client'
 import type { PublishJob } from '@/api/client'
+import { PUBLISH_TERMINAL_STATUSES, publishHistoryRefetchInterval } from '@/lib/publishPolling'
 
 export const clipPublishRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -30,8 +31,7 @@ function usePublishToasts(publishId: string | null) {
     refetchInterval: (query) => {
       const data = query.state.data as PublishJob | undefined
       if (!data) return 2000
-      if (['published', 'posted_unverified', 'failed', 'cancelled'].includes(data.status))
-        return false
+      if (PUBLISH_TERMINAL_STATUSES.has(data.status)) return false
       return 2000
     },
     select(data) {
@@ -65,7 +65,8 @@ function ClipPublishPage() {
   const jobsQuery = useQuery({
     queryKey: ['publish-jobs', clipId],
     queryFn: () => api.listPublishForClip(clipId),
-    refetchInterval: 3000,
+    // Poll only while a publish is queued/posting/due; createMutation invalidates on submit.
+    refetchInterval: (query) => publishHistoryRefetchInterval(query.state.data),
   })
   const clipQuery = useQuery({
     queryKey: ['clip', clipId],

@@ -23,7 +23,6 @@ type FilterState = { liked: boolean; disliked: boolean; short: boolean }
 
 function JobDetailPage() {
   const { jobId } = jobDetailRoute.useParams()
-  useJobSSE(jobId)
 
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
     try { return (localStorage.getItem('clips-view-mode') as ViewMode) ?? 'list' } catch { return 'list' }
@@ -36,20 +35,21 @@ function JobDetailPage() {
     try { localStorage.setItem('clips-view-mode', viewMode) } catch {}
   }, [viewMode])
 
+  // No refetchInterval: useJobSSE invalidates ['job', jobId] and ['clips', jobId] as
+  // pipeline events arrive (and falls back to polling both if SSE keeps failing).
   const jobQuery = useQuery({
     queryKey: ['job', jobId],
     queryFn: () => api.getJob(jobId),
-    refetchInterval: (query) => query.state.data?.status === 'running' ? 3000 : false,
   })
 
   const clipsQuery = useQuery({
     queryKey: ['clips', jobId],
     queryFn: () => api.listClips({ job_id: jobId }),
-    refetchInterval: () => {
-      const status = jobQuery.data?.status
-      return status === 'running' ? 5000 : false
-    },
   })
+
+  // Stream only while the job can still change; a completed/failed job renders from the fetch.
+  const jobStatus = jobQuery.data?.status
+  useJobSSE(jobId, { enabled: jobStatus === 'pending' || jobStatus === 'running' })
 
   const job = jobQuery.data
   const allClips = clipsQuery.data ?? []
