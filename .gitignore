@@ -37,8 +37,9 @@ web/playwright-report/
 # Relocated dev/QA screenshots (local portfolio artifacts, not committed)
 /artifacts/
 
-# Local Claude Code agent settings (machine-specific)
-.claude/
+# Local Claude Code agent settings (machine-specific); spec-kit skills are tracked
+.claude/*
+!.claude/skills/
 
 .omc/
 .env

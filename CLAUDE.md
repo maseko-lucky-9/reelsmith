@@ -44,3 +44,9 @@ pytest -m integration
 ```
 
 Always run `pytest` after code changes before committing.
+
+## Spec-Driven Development
+
+- Constitution: `.specify/memory/constitution.md`. Baseline spec: `specs/001-reelsmith-baseline/spec.md` (status-tagged inventory).
+- New work: `/speckit-specify` → `/speckit-plan` → `/speckit-tasks` → `/speckit-implement`, one `specs/NNN-<slug>/` per feature.
+- Open tasks live in each `specs/*/tasks.md`; `tasks/todo.md` indexes them and holds the finished parity history.

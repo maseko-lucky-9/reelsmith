@@ -4,6 +4,28 @@
 **Loop config:** [tasks/loop-config.yaml](loop-config.yaml)
 **Started:** 2026-05-10
 
+## Spec Kit index (open work lives here)
+
+Open work is tracked per feature in `specs/*/tasks.md`; this file keeps the finished parity programme below.
+
+| Spec | Tasks | State |
+|---|---|---|
+| [001 Reelsmith baseline](../specs/001-reelsmith-baseline/spec.md) | [tasks.md](../specs/001-reelsmith-baseline/tasks.md) | 27 open (constitution exceptions, defects, unwired code, tooling) |
+
+Constitution: [.specify/memory/constitution.md](../.specify/memory/constitution.md)
+
+### Parity programme T-01…T-07 — ✅ SHIPPED (`29e0b6d`, PR #4)
+
+- [x] **T-01** thumbnail-text-composite (`compose_thumbnail`, `app/services/thumbnail_service.py`)
+- [x] **T-02** brand-vocabulary-tests (`tests/unit/test_brand_vocabulary_service.py`)
+- [x] **T-03** voiceover-piper-provider (`app/services/voiceover_service.py`)
+- [x] **T-04** xml-export-davinci-multitrack-stub (`app/services/xml_export_service.py`)
+- [x] **T-05** social-scheduler-list-endpoint (`GET /social/jobs`)
+- [x] **T-06** animated-caption-styled-burn (`burn_animated_captions`)
+- [x] **T-07** audio-enhance-router (`POST /api/clips/{id}/enhance-audio`)
+
+The original acceptance criteria are preserved in `docs/archive/TASKS.md`.
+
 ---
 
 ## Pre-flight (Wave 0) — ✅ MERGED to local main 2026-05-10
