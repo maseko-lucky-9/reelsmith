@@ -19,7 +19,9 @@ from app.workers import orchestrator as orch
 pytestmark = pytest.mark.e2e
 
 
-def _fake_subfolder(download_path: str, url: str, platform_id: str = "video"):
+def _fake_subfolder(
+    download_path: str, url: str, platform_id: str = "video", job_id: str | None = None
+):
     base = Path(download_path) / "vid"
     clips = base / "clips"
     clips.mkdir(parents=True, exist_ok=True)
