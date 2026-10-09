@@ -5,8 +5,8 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    Boolean, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text,
-    UniqueConstraint,
+    Boolean, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String,
+    Text, UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -145,14 +145,18 @@ class ClipEdit(Base):
     """
 
     __tablename__ = "clip_edits"
+    # Matches migration c1d2e3f4g5h6: a named UNIQUE constraint plus a
+    # separate non-unique index (not a single unique index).
+    __table_args__ = (
+        UniqueConstraint("clip_id", name="uq_clip_edits_clip_id"),
+        Index("ix_clip_edits_clip_id", "clip_id"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     clip_id: Mapped[str] = mapped_column(
         String(36),
         ForeignKey("clips.id", ondelete="CASCADE", name="fk_clip_edits_clip_id"),
         nullable=False,
-        unique=True,
-        index=True,
     )
     timeline: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
@@ -175,6 +179,12 @@ class SocialAccount(Base):
     """
 
     __tablename__ = "social_accounts"
+    __table_args__ = (
+        UniqueConstraint(
+            "platform", "account_handle", "owner_id",
+            name="uq_social_accounts_platform_handle_owner",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     platform: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
@@ -274,6 +284,9 @@ class BrandTemplateFont(Base):
     """Per-role typography for a brand template (W2.8)."""
 
     __tablename__ = "brand_template_fonts"
+    __table_args__ = (
+        Index("ix_brand_template_fonts_template", "brand_template_id"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     brand_template_id: Mapped[str] = mapped_column(
@@ -284,7 +297,6 @@ class BrandTemplateFont(Base):
             name="fk_brand_template_fonts_template",
         ),
         nullable=False,
-        index=True,
     )
     role: Mapped[str] = mapped_column(String(32), nullable=False)  # heading|body|caption
     family: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -311,13 +323,14 @@ class WorkspaceMember(Base):
     __tablename__ = "workspace_members"
     __table_args__ = (
         UniqueConstraint("workspace_id", "user_id", name="uq_wm_workspace_user"),
+        Index("ix_wm_workspace", "workspace_id"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     workspace_id: Mapped[str] = mapped_column(
         String(36),
         ForeignKey("workspaces.id", ondelete="CASCADE", name="fk_wm_workspace"),
-        nullable=False, index=True,
+        nullable=False,
     )
     user_id: Mapped[str] = mapped_column(String(64), nullable=False)
     role: Mapped[str] = mapped_column(String(16), nullable=False)  # owner|editor|viewer
@@ -328,6 +341,10 @@ class WorkspaceMember(Base):
 
 class ScheduledPost(Base):
     __tablename__ = "scheduled_posts"
+    # Worker poll path: WHERE status = ... AND scheduled_for <= now.
+    __table_args__ = (
+        Index("ix_sp_status_scheduled_for", "status", "scheduled_for"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     publish_job_id: Mapped[str] = mapped_column(
@@ -357,12 +374,13 @@ class ScheduledPost(Base):
 
 class ClipAnalyticsSnapshot(Base):
     __tablename__ = "clip_analytics_snapshots"
+    __table_args__ = (Index("ix_cas_clip", "clip_id"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     clip_id: Mapped[str] = mapped_column(
         String(36),
         ForeignKey("clips.id", ondelete="CASCADE", name="fk_cas_clip"),
-        nullable=False, index=True,
+        nullable=False,
     )
     platform: Mapped[str] = mapped_column(String(32), nullable=False)
     external_post_id: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -379,12 +397,13 @@ class ClipAnalyticsSnapshot(Base):
 
 class ShareLink(Base):
     __tablename__ = "share_links"
+    __table_args__ = (Index("ix_sl_clip", "clip_id"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     clip_id: Mapped[str] = mapped_column(
         String(36),
         ForeignKey("clips.id", ondelete="CASCADE", name="fk_sl_clip"),
-        nullable=False, index=True,
+        nullable=False,
     )
     token: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
     expires_at: Mapped[datetime | None] = mapped_column(

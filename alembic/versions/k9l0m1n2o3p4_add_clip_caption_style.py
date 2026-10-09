@@ -59,14 +59,16 @@ def upgrade() -> None:
         ),
     )
 
+    # Typed columns so offline mode (`alembic upgrade --sql`) can render the
+    # literal values; untyped sa.column() has NullType and fails to compile.
     seed = sa.table(
         "caption_styles",
-        sa.column("id"),
-        sa.column("name"),
-        sa.column("animation_kind"),
-        sa.column("primary_color"),
-        sa.column("highlight_color"),
-        sa.column("stroke_color"),
+        sa.column("id", sa.String),
+        sa.column("name", sa.String),
+        sa.column("animation_kind", sa.String),
+        sa.column("primary_color", sa.String),
+        sa.column("highlight_color", sa.String),
+        sa.column("stroke_color", sa.String),
     )
     rows = [
         {"id": f"caption-style-{name}", "name": name, "animation_kind": name,
