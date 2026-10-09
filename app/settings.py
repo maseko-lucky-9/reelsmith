@@ -133,19 +133,12 @@ class Settings(BaseSettings):
     social_provider_linkedin: str = ""
     social_provider_x: str = ""
 
-    # ── Publish scheduler (W1.4) ──────────────────────────────────────────
-    scheduler_enabled: bool = False
-    scheduler_poll_seconds: int = 30
-    scheduler_max_concurrent: int = 3
-
     # ── TikTok cookie adapter ─────────────────────────────────────────────
     # Set YTVIDEO_SOCIAL_PROVIDER_TIKTOK=cookie to activate.
     # YTVIDEO_OAUTH_ENCRYPT_KEY must be a stable Fernet key or cookies
     # die on process restart (generate: python -c "from cryptography.fernet
     # import Fernet; print(Fernet.generate_key().decode())").
     tiktok_cookies_dir: str = "data/tiktok-cookies"
-    tiktok_profile_url_base: str = "https://www.tiktok.com/@"
-    tiktok_node_bin: str = "node"
     tiktok_session_ttl_days: int = 21
     # ── TikTok n8n sidecar (interchangeable path) ─────────────────────────
     # Set YTVIDEO_SOCIAL_PROVIDER_TIKTOK=n8n to activate.
@@ -173,12 +166,6 @@ class Settings(BaseSettings):
     generate_enabled: bool = False
     generate_brief_dir: str = "data/generate-briefs"
     ltx_provider: str = "stub"  # "stub" | "ltx"
-    # Legacy in-process knobs — retained for back-compat with smoke tooling
-    # and tests; the real ``ltx`` path is now a subprocess (see below) and
-    # does not use these.
-    ltx_model_path: str = ""
-    ltx_use_mps: bool = True
-    ltx_num_frames: int = 121
     # ── LTX subprocess path (real provider) ───────────────────────────────
     # The LTX fork runs in its OWN venv (deps conflict with reelsmith's), so
     # the ``ltx`` provider shells out to the fork's inference.py CLI rather
@@ -205,11 +192,8 @@ class Settings(BaseSettings):
     bulk_export_max_clips: int = 200
 
     # ── Long-stage hardening (W2.10) ──────────────────────────────────────
-    # Per-stage soft timeout in seconds. Workers respect this to abort
-    # runaway voice-over / demucs / animated-caption renders.
-    stage_timeout_seconds: int = 1800
-    # SSE keep-alive heartbeat interval. Sent as ': ping\n\n' so it's a
-    # comment frame the client ignores. 0 disables.
+    # Seconds between keep-alive pings on the job SSE stream (sse-starlette
+    # sends a ': ping' comment frame the client ignores). 0 disables.
     sse_keepalive_seconds: int = 15
     # Connection pool recycle (Postgres only).
     db_pool_recycle_seconds: int = 1800

@@ -7,8 +7,8 @@ event bus.
 
 Design notes:
 
-* Polling-only; no broker. Interval is settings-driven
-  (``YTVIDEO_SCHEDULER_POLL_SECONDS`` default 30s).
+* Polling-only; no broker. Interval is the ``poll_seconds`` constructor
+  argument (default 30s).
 * Idempotent flip: ``UPDATE … WHERE status='pending' AND schedule_at<=now``
   with ``UPDATE … RETURNING`` (Postgres) or follow-up SELECT (SQLite).
 * Lifecycle managed by ``app.main`` startup/shutdown events.
