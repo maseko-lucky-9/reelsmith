@@ -1,8 +1,10 @@
 """Social publishing router (W1.6).
 
-Enqueues a publish_job (immediate or scheduled) and runs it via
-``social_publish_service``. Real adapters POST to the platform; the
-default stub provider writes a JSON descriptor.
+Enqueues a publish_job and runs it immediately via
+``social_publish_service``. Scheduled publishing was dropped (FR-032);
+``PublishCreate`` forbids unknown fields so a stale ``schedule_at`` is a
+422 rather than an unintended immediate post. Real adapters POST to the
+platform; the default stub provider writes a JSON descriptor.
 """
 from __future__ import annotations
 
@@ -20,7 +22,7 @@ from fastapi import (
     Query,
     Request,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -56,12 +58,15 @@ router = APIRouter(prefix="/social", tags=["social-publish"])
 
 
 class PublishCreate(BaseModel):
+    # Unknown fields are rejected, not ignored: a client still sending the
+    # removed ``schedule_at`` would otherwise publish immediately.
+    model_config = ConfigDict(extra="forbid")
+
     clip_id: str
     social_account_id: str
     title: str | None = None
     description: str | None = None
     hashtags: list[str] = Field(default_factory=list)
-    schedule_at: datetime | None = None  # immediate when None
 
 
 class SocialAccountCreate(BaseModel):
@@ -106,7 +111,6 @@ def _job_to_dict(pj: PublishJob) -> dict[str, Any]:
         "description": pj.description,
         "hashtags": pj.hashtags or [],
         "status": pj.status,
-        "schedule_at": pj.schedule_at.isoformat() if pj.schedule_at else None,
         "posted_at": pj.posted_at.isoformat() if pj.posted_at else None,
         "external_post_id": pj.external_post_id,
         "external_post_url": pj.external_post_url,
@@ -272,16 +276,14 @@ async def create_publish(
         title=body.title,
         description=body.description,
         hashtags=body.hashtags or None,
-        schedule_at=body.schedule_at,
-        status="pending" if body.schedule_at else "queued",
+        status="queued",
     )
     session.add(pj)
     await session.commit()
     await session.refresh(pj)
 
-    if pj.status == "queued":
-        # Fire-and-forget; orchestrator opens its own session.
-        bg.add_task(runner, pj.id)
+    # Fire-and-forget; orchestrator opens its own session.
+    bg.add_task(runner, pj.id)
 
     return _job_to_dict(pj)
 
@@ -307,13 +309,12 @@ async def list_publish_for_clip(
 
 
 def _job_summary(pj: PublishJob, platform: str | None) -> dict[str, Any]:
-    """Return the T-05 list representation (id, clip_id, status, schedule_at,
-    posted_at, platform, external_url, error)."""
+    """Return the T-05 list representation (id, clip_id, status, posted_at,
+    platform, external_url, error)."""
     return {
         "id": pj.id,
         "clip_id": pj.clip_id,
         "status": pj.status,
-        "schedule_at": pj.schedule_at.isoformat() if pj.schedule_at else None,
         "posted_at": pj.posted_at.isoformat() if pj.posted_at else None,
         "platform": platform,
         "external_url": pj.external_post_url,
@@ -329,7 +330,8 @@ async def list_jobs(
 ):
     """List publish jobs with optional multi-valued status filter and clip_id filter.
 
-    - ``?status=pending&status=queued`` returns jobs in either status.
+    - ``?status=queued&status=posting`` returns jobs in either status.
+      ``pending`` only matches rows created before scheduling was dropped.
     - Absence of ``status`` returns all statuses.
     - ``?clip_id=<id>`` restricts to a specific clip.
     - Empty result set returns ``[]`` with 200.

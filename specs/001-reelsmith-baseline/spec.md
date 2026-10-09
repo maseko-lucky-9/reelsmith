@@ -94,14 +94,14 @@ A creator manages brand templates (logo, font, colours, caption style, vocabular
 
 ### User Story 6 - Publish to social platforms (Priority: P6)
 
-A creator connects accounts and publishes a clip now. Scheduled publishing is intended but not running.
+A creator connects accounts and publishes a clip now. Scheduled publishing was removed (FR-032).
 
 **Independent Test**: `POST /social/accounts`, `POST /social/publish`, `GET /social/jobs?status=`.
 
 **Acceptance Scenarios**:
 
-1. **Given** a connected account and a clip, **When** `POST /social/publish` without `schedule_at`, **Then** a `queued` publish job runs in the background and its status is readable.
-2. **Given** `schedule_at`, **When** `POST /social/publish`, **Then** a `pending` job is stored. *It is never picked up; the scheduler is not started, see FR-032.*
+1. **Given** a connected account and a clip, **When** `POST /social/publish`, **Then** a `queued` publish job runs in the background and its status is readable.
+2. **Given** a body with `schedule_at` (or any other unknown field), **When** `POST /social/publish`, **Then** 422 and no publish job is created (FR-032 removed).
 3. **Given** unknown clip or account ids, **Then** 404.
 4. **Given** TikTok, **When** `POST /social/tiktok/connect` stores a cookie session, **Then** `GET /social/tiktok/capabilities` reports what it can do.
 
@@ -125,6 +125,9 @@ A creator exports a clip for Premiere or DaVinci, or downloads many clips with a
 - Whisper unavailable: `YTVIDEO_TRANSCRIPTION_PROVIDER=stub` keeps the pipeline runnable.
 - A stage fails inside one chapter: the chapter task is bounded by `max_parallel_chapters`; the job status reflects failure through `JobFailed`.
 - Auth: with `YTVIDEO_REQUIRE_AUTH=true`, every API route requires the API key; the docs routes and the static frontend mount do not (FR-060).
+- Output folders: each job writes to `<download_path>/<slug>-<job_id[:8]>/clips` (slug: the video title, or `upload_video` / `generate_video` / `<platform>_video`), so two jobs never share a clip path (T030). Folders made before T030 are named `<slug>/clips`; re-render still finds them because it works from the clip's own `output_path`. `POST /folders` has no job and keeps the bare slug.
+- Storage: `YTVIDEO_DEFAULT_DOWNLOAD_PATH` defaults to `<project>/data/downloads` (gitignored), uploads live in its `uploads/` subfolder (T031). The UI still sends `/tmp/yt` for URL jobs (T035).
+- Route prefixes: six routers are served under `/api/...` and the rest are not; the dev proxy strips `/api` and `serve_frontend` does not, so some UI calls 404 in each mode (T034). The `/api/...` paths below are the backend paths as they stand.
 
 ## Requirements *(mandatory)*
 
@@ -144,9 +147,9 @@ A creator exports a clip for Premiere or DaVinci, or downloads many clips with a
 | FR-008 | The system MUST generate a thumbnail per rendered clip and, optionally, AI hook text, filler removal and audio enhancement. | Implemented | `tests/unit/test_thumbnail_service.py`, `test_ai_hook_service.py`, `test_filler_transition_profanity.py`, `test_audio_enhance_service.py`; the pipeline emits `AudioEnhanced`, `FillersRemoved` and `AiHookGenerated` per chapter: `test_orchestrator_stage_events.py` |
 | FR-009 | The system MUST propose and score segments for sources without chapters. | **Scaffolded-unwired** (core proposer done, T011 part 1 of 4) | `segment_proposer` is gated at `app/workers/orchestrator.py:197`, but both branches build the same single "Full Video" chapter ("would run here (future)"). The service works but is not called: `LocalHeuristicProposer` needs only numpy and the standard library (wav RMS energy, speech-ratio dead-air filter, windows snapped to sentence ends, prompt overlap; vader and spaCy optional), `get_segment_proposer` returns it for `local_heuristic` without librosa, and `select_segments` picks non-overlapping clips by score. Tested in isolation: `tests/unit/test_segment_proposer.py`, `test_segment_proposer_heuristic.py`, `test_segment_selection.py`. Clips are therefore still **not** virality-ranked. |
 | FR-010 | The system MUST honour the `reframe` and `broll` pipeline options (default on). | **Scaffolded-unwired** | `orchestrator.py:653-656` emits `StageSkipped` only inside the `render=False` branch; when they are on, nothing runs. Services exist: `reframe_service`, `active_speaker_service`, `broll_service`, `broll_pexels_service`. |
-| FR-011 | The system MUST accept MP4 uploads (415 wrong type, 413 too large). | Implemented | `tests/contract/test_uploads_router.py` |
+| FR-011 | The system MUST accept MP4 uploads (415 wrong type, 413 too large). | Implemented | `tests/contract/test_uploads_router.py`; stored under `<default_download_path>/uploads`, the pre-T031 `/tmp/yt/uploads` root is still readable: `tests/unit/test_default_download_path.py` |
 | FR-012 | The system MUST generate a video from a brief when `generate_enabled`, else 400. | Implemented | `tests/contract/test_generate_router.py`, `test_generate_pipeline.py`, `tests/unit/test_ltx_producer.py` |
-| FR-013 | The system MUST retire clips older than `retention_days` (30) and delete their video and thumbnail files, on a sweep every `retention_sweep_minutes` (60). Jobs are not deleted. | Implemented | `app/services/retention.py` (`sweep_expired_clips`, looped by the lifespan janitor in `app/main.py`); `tests/unit/test_retention_sweep.py` (T025). The row is retired and committed before files are deleted; only `output_path` and `thumbnail_path` are deleted, never the job's source video. |
+| FR-013 | The system MUST retire clips older than `retention_days` (30) and delete their video and thumbnail files, on a sweep every `retention_sweep_minutes` (60). Jobs are not deleted. | Implemented | `app/services/retention.py` (`sweep_expired_clips`, looped by the lifespan janitor in `app/main.py`); `tests/unit/test_retention_sweep.py` (T025). The row is retired and committed before files are deleted; only `output_path` and `thumbnail_path` are deleted, never the job's source video. A file that a live clip still references is kept (rows from before per-job folders can share a path, T030). |
 
 **Clip curation**
 
@@ -177,7 +180,7 @@ A creator exports a clip for Premiere or DaVinci, or downloads many clips with a
 | ID | Requirement | Status | Evidence |
 |---|---|---|---|
 | FR-031 | The system MUST connect accounts (tokens Fernet-encrypted), publish immediately in the background, and list jobs by status. | Implemented | `tests/contract/test_social_publish_router.py`, `tests/unit/test_token_vault.py`, `test_social_adapters.py` |
-| FR-032 | The system MUST publish at `schedule_at`. | **Scaffolded-unwired** | `PublishScheduler` is referenced nowhere outside its own module; `app/main.py` never starts it. `tests/unit/test_publish_scheduler.py` tests it in isolation. |
+| FR-032 | ~~The system MUST publish at `schedule_at`.~~ | **Removed (owner decision 2026-10-09)** | T010: `schedule_at` dropped from the API and UI; `POST /social/publish` rejects it with 422 (`test_publish_create_rejects_schedule_at`). `publish_scheduler.py` and its test deleted. The `publish_jobs.schedule_at` column stays unused (constitution V, `docs/db-parity.md`). |
 | FR-033 | The system MUST support TikTok through a cookie session or an n8n sidecar. | Implemented | `tests/unit/test_tiktok_adapter.py`, `test_n8n_tiktok_adapter.py`, `test_registry_tiktok.py` |
 
 **Export**

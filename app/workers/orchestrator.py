@@ -123,7 +123,11 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
         step_t0 = time.perf_counter()
         await store.update(job_id, lambda s: setattr(s, "current_step", "folder"))
         destination, clips_folder = await asyncio.to_thread(
-            folder_service.create_video_subfolder, download_path, url, adapter.platform_id
+            folder_service.create_video_subfolder,
+            download_path,
+            url,
+            adapter.platform_id,
+            job_id=job_id,
         )
         log.info("[%s] Folder ready (%.2fs)  dest=%s", job_id, time.perf_counter() - step_t0, destination)
         cleanup_root = Path(clips_folder) / "_tmp" / job_id
