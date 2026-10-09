@@ -61,6 +61,8 @@ The API is served at both `/x` and `/api/x`. Routers are mounted without a prefi
 
 `render_service.render_clip` renders each chapter in **one ffmpeg pass straight from the source**: trim, blurred background still, scaled inset, caption overlay, even-dimension crop, then yuv420p libx264/AAC. The ffmpeg binary comes from `imageio-ffmpeg`, and probes and frame grabs use PyAV (`ffmpeg_tools`). Captions are drawn by the unchanged PIL renderer, once per unique caption, and composited as a single ffconcat overlay input (`caption_track`). See [ADR-004](decisions/004-ffmpeg-render-pipeline.md) for the timing rules and the deliberate behaviour changes.
 
+Two optional inputs extend the same graph; no pipeline caller passes either yet (FR-010). `crop_track` pans a canvas-aspect crop of the source instead of the letterboxed inset. `broll` (up to four `BrollInsert`s) adds one looped input per insert, cover-fits it to the canvas and overlays it full-canvas over its half-open window, above the inset composite and below the captions. Frame grid, duration and audio stay those of the render without them (ADR-004, B-roll addendum).
+
 ## Live Progress (SSE)
 
 - **Backend.** The backend sends **named** SSE events (`event: <EventType>`, `id: <event_id>`). The event bus keeps its last 200 events and replays this job's events from that history to each new subscriber.
