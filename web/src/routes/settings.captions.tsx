@@ -2,6 +2,7 @@
 import { createRoute } from '@tanstack/react-router'
 import { useState } from 'react'
 import { rootRoute } from './root'
+import { NotAppliedBadge } from '@/components/not-applied-badge'
 import {
   CaptionTemplatePicker,
   type CaptionStyleName,
@@ -18,7 +19,10 @@ function CaptionsSettingsPage() {
 
   return (
     <div className="max-w-3xl mx-auto px-6 py-10 text-zinc-200">
-      <h1 className="text-2xl font-semibold mb-6">Caption templates</h1>
+      <div className="flex items-center gap-3 mb-6">
+        <h1 className="text-2xl font-semibold">Caption templates</h1>
+        <NotAppliedBadge />
+      </div>
       <p className="text-sm text-zinc-400 mb-4">
         Pick the default animation style applied to new clips. Existing clips
         retain their per-clip selection.
