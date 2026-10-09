@@ -25,7 +25,7 @@ Learning project: YouTube-to-reels pipeline. FastAPI backend + React UI (`web/`)
 ## Key Conventions
 
 - All env vars are prefixed `YTVIDEO_` and defined in `app/settings.py`.
-- Domain events live in `app/domain/events.py`; all inter-service communication goes through `app/bus/event_bus.py`.
+- Domain events live in `app/domain/events.py`; job lifecycle and progress are reported through `app/bus/event_bus.py`. The orchestrator sequences stages; services are plain functions called directly.
 - Services are stateless functions — state lives in `JobStore` on `app.state`.
 - Run ffmpeg only through `app/services/ffmpeg_tools.run` (bundled binary, killed on timeout/cancel); never a system ffmpeg/ffprobe. MoviePy is not a dependency.
 - Test markers: `integration` (real network), `live` (real YouTube), `e2e` (fixtures), `playwright` (UI). Default run excludes `integration`, `live`, `playwright`.
