@@ -145,6 +145,36 @@ async def test_get_clip_unknown_is_none(store):
     assert await store.get_clip("missing") is None
 
 
+# ── list_clips min_score filter ───────────────────────────────────────────────
+
+
+async def _scored_clip(store: Any, clip_id: str, score: int | None) -> None:
+    await _job(store, f"job-{clip_id}", f"https://yt.test/{clip_id}")
+    await store.upsert_clip(
+        f"job-{clip_id}",
+        clip_id,
+        lambda c: c.update({"start": 0.0, "end": 1.0, "virality_score": score}),
+    )
+
+
+async def test_list_clips_min_score_is_inclusive_at_the_boundary(store):
+    for score in (49, 50, 51):
+        await _scored_clip(store, f"s{score}", score)
+
+    clips = await store.list_clips(min_score=50)
+
+    assert sorted(c["clip_id"] for c in clips) == ["s50", "s51"]
+
+
+async def test_list_clips_min_score_zero_includes_unscored(store):
+    await _scored_clip(store, "unscored", None)
+    await _scored_clip(store, "scored", 10)
+
+    clips = await store.list_clips(min_score=0)
+
+    assert sorted(c["clip_id"] for c in clips) == ["scored", "unscored"]
+
+
 # ── fail_interrupted_jobs (startup recovery) ─────────────────────────────────
 
 

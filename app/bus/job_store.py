@@ -430,14 +430,15 @@ class SqlJobStore:
         search: str = "",
     ) -> list[dict[str, Any]]:
         from app.db.models import ClipRecord
-        from sqlalchemy import select
+        from sqlalchemy import func, select
 
         async with self._factory() as session:
             q = select(ClipRecord).where(ClipRecord.retired == False)  # noqa: E712
             if job_id:
                 q = q.where(ClipRecord.job_id == job_id)
             if min_score is not None:
-                q = q.where(ClipRecord.virality_score >= min_score)
+                # Match InMemoryJobStore: an unscored clip counts as 0.
+                q = q.where(func.coalesce(ClipRecord.virality_score, 0) >= min_score)
             if search:
                 q = q.where(ClipRecord.title.ilike(f"%{search}%"))
             result = await session.execute(q)

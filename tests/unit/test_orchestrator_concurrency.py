@@ -30,6 +30,14 @@ from app.workers import orchestrator as orch
 
 URL = "https://www.youtube.com/watch?v=fake"
 
+# 3.12's TaskGroup leaves the parent task's cancelling() at 1 after a child
+# fails (fixed in 3.13), so _finish_then_honour_cancel re-raises a cancel
+# nobody sent. CI and the docs are 3.14 only.
+requires_py313 = pytest.mark.skipif(
+    sys.version_info < (3, 13),
+    reason="asyncio.TaskGroup leaves cancelling()==1 on 3.12; see PR #25",
+)
+
 
 # ── Job cap ───────────────────────────────────────────────────────────────────
 
@@ -230,6 +238,7 @@ def _job_events(bus: AsyncEventBus) -> list[Event]:
     return [e for e in bus._history if e.job_id == JOB_ID]
 
 
+@requires_py313
 async def test_failing_chapter_kills_sibling_ffmpeg_and_fails_job_once(
     fanout: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -284,6 +293,7 @@ async def test_failing_chapter_kills_sibling_ffmpeg_and_fails_job_once(
     assert len(_job_events(bus)) == count
 
 
+@requires_py313
 async def test_sibling_worker_thread_finishes_before_tmp_dir_cleanup(
     fanout: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -338,6 +348,7 @@ async def test_two_chapters_still_complete_with_parallel_fan_out(
     assert sorted(Path(p).name[:2] for p in state.output_paths) == ["00", "01"]
 
 
+@requires_py313
 async def test_sequential_chapters_stop_at_first_failure(
     fanout: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -468,6 +479,7 @@ async def test_outer_cancel_during_chapter_failure_still_marks_job_failed(
     assert types[-1] is EventType.JOB_FAILED
 
 
+@requires_py313
 async def test_other_chapter_failures_are_logged(
     fanout: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ):
