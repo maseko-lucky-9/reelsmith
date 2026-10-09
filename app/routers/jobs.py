@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import asyncio
 import json
-import subprocess
 from typing import Literal
 from urllib.parse import urlparse
 
@@ -17,12 +15,16 @@ from app.domain.events import Event, EventType
 from app.domain.ids import new_job_id
 from app.domain.models import JobState, PipelineOptions
 from app.services.platforms import detect_platform_id
+from app.services.yt_dlp_metadata import dump_json
 from app.settings import settings
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 # A new request for a URL with a job in one of these states reuses that job.
 _DEDUP_STATUSES = ("completed", "running", "pending")
+
+# Hard cap on a yt-dlp metadata lookup; the child process is killed after it.
+_YT_DLP_TIMEOUT_SECONDS = 12.0
 
 
 class CreateJobRequest(BaseModel):
@@ -55,17 +57,8 @@ class VideoPreviewResponse(BaseModel):
 @router.get("/preview", response_model=VideoPreviewResponse)
 async def preview_video(url: str) -> VideoPreviewResponse:
     """Fetch video metadata without downloading. Returns empty fields on failure."""
-    def _fetch() -> dict:
-        result = subprocess.run(
-            ["yt-dlp", "--dump-json", "--no-playlist", url],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode != 0:
-            return {}
-        return json.loads(result.stdout)
-
     try:
-        info = await asyncio.wait_for(asyncio.to_thread(_fetch), timeout=12)
+        info = await dump_json(url, timeout=_YT_DLP_TIMEOUT_SECONDS)
     except Exception:
         info = {}
 
@@ -83,22 +76,11 @@ async def preview_video(url: str) -> VideoPreviewResponse:
 async def preview_thumbnail(url: str) -> Response:
     """Server-side proxy for video thumbnails (handles CDN referer restrictions)."""
     # Fetch thumbnail URL from yt-dlp metadata
-    def _fetch_thumbnail_url() -> str:
-        result = subprocess.run(
-            ["yt-dlp", "--dump-json", "--no-playlist", url],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode != 0:
-            return ""
-        info = json.loads(result.stdout)
-        return info.get("thumbnail", "")
-
     try:
-        thumb_url = await asyncio.wait_for(
-            asyncio.to_thread(_fetch_thumbnail_url), timeout=12,
-        )
+        info = await dump_json(url, timeout=_YT_DLP_TIMEOUT_SECONDS)
     except Exception:
         raise HTTPException(status_code=404, detail="Could not resolve thumbnail")
+    thumb_url = info.get("thumbnail", "")
 
     if not thumb_url:
         raise HTTPException(status_code=404, detail="No thumbnail available")
