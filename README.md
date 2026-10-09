@@ -130,3 +130,5 @@ cd web && pnpm build
 # Then run API with YTVIDEO_SERVE_FRONTEND=true
 YTVIDEO_SERVE_FRONTEND=true uvicorn app.main:app
 ```
+
+The API is served at both `/x` and `/api/x` (`app/api_prefix.py`, [ADR-005](docs/decisions/005-api-route-prefix.md)). The UI calls `/api/...`: in dev the Vite proxy strips `/api`, and with `YTVIDEO_SERVE_FRONTEND=true` FastAPI strips it itself, so `curl localhost:8000/api/health` and `curl localhost:8000/health` both answer.

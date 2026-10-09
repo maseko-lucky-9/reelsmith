@@ -35,6 +35,10 @@ run_orchestrator  (max_concurrent_jobs semaphore around each _run_job;
 React SSE: GET /jobs/:id/events → EventSource streams events above
 ```
 
+## Routing
+
+The API is served at both `/x` and `/api/x`. Routers are mounted without a prefix, and `ApiPrefixMiddleware` (`app/api_prefix.py`) strips one leading `/api` segment before routing (`/api` alone becomes `/`; `/apixyz` is not rewritten). The React client calls `/api/...`: in dev the Vite proxy strips the prefix, and with `YTVIDEO_SERVE_FRONTEND=true` the middleware does, while `StaticFiles` serves the built UI at `/`. The middleware is pure ASGI: it rewrites `path` and `raw_path`, keeps `root_path`, and passes `receive`/`send` through, so SSE and streamed downloads are unaffected and the app-level API-key dependency applies the same at both addresses. See [ADR-005](decisions/005-api-route-prefix.md).
+
 ## Concurrency and Recovery
 
 - **Job cap.** `run_orchestrator` (`app/workers/orchestrator.py`) wraps each `_run_job` in a `max_concurrent_jobs` semaphore (values below 1 are clamped to 1 with a warning). On shutdown it waits for every running job to unwind.
@@ -53,7 +57,7 @@ React SSE: GET /jobs/:id/events → EventSource streams events above
 
 ## Bulk Export
 
-`GET /api/clips/bulk-export.zip` builds a stored (uncompressed) zip in a worker thread into an anonymous temp file. It streams the file in 1 MiB chunks with an exact `Content-Length`, and closes the handle when the stream ends, fails or the client disconnects.
+`GET /clips/bulk-export.zip` builds a stored (uncompressed) zip in a worker thread into an anonymous temp file. It streams the file in 1 MiB chunks with an exact `Content-Length`, and closes the handle when the stream ends, fails or the client disconnects.
 
 ## Provider Plug-points
 
