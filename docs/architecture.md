@@ -80,6 +80,7 @@ All providers follow the same pattern: `get_<feature>_service()` factory reads t
 | `ffmpeg_tools` | Bundled-ffmpeg runner (kills the child on timeout/cancel), PyAV probes and frame grab |
 | `render_service` | Final vertical-format MP4 in one ffmpeg pass from the source |
 | `thumbnail_service` | JPEG thumbnail from clip midpoint |
-| `segment_proposer` | Virality scoring + segment selection |
+| `segment_proposer` | Heuristic segment scoring + selection; picks the clips of a source without chapters when `YTVIDEO_SEGMENT_PROVIDER` is not `chapter` (default `chapter`: one Full Video clip) |
+| `segment_discovery` | Discovery helpers: words rebased to a clip window, `<stem>.words.json` sidecar, relative score bar |
 | `reframe_service` | Face-tracked crop track |
 | `broll_service` | Noun-phrase → local clip lookup |
