@@ -12,7 +12,7 @@ Format: `- [ ] T### [FR-xxx|E#] [Principle] description. Proving test → commit
 - [ ] T002 [E2] [I] Declare `log_level`, `piper_model`, `share_link_secret`, `social_provider` in `Settings` and read them from `settings` in `logging_config.py:18`, `voiceover_service.py:137`, `token_vault.py:29`, `share_link_service.py:51`, `social/registry.py:22,25`. Test: existing unit tests plus a settings test per field → `refactor(config): read env through Settings`
 - [ ] T003 [E3,E4] [III] Pass the bundled ffmpeg to yt-dlp (`ffmpeg_location`) in `app/services/platforms/_yt_dlp_base.py`, and use the yt-dlp Python API instead of the `yt-dlp` CLI in `app/routers/jobs.py:59,87`. Test: unit test asserting `ffmpeg_location` equals the imageio-ffmpeg path → `fix(download): use bundled ffmpeg for yt-dlp merges`
 - [x] T004 [E5] [VI] Run gitleaks in CI (`ci.yml`) and document `pre-commit install` in README. Test: CI job fails on a seeded fake key in a throwaway branch → `ci: scan for secrets with gitleaks`
-- [ ] T005 [E6] [II] Correct the "all inter-service communication goes through the event bus" line in `CLAUDE.md` to match constitution principle II. Test: n/a (docs) → `docs: align CLAUDE.md with constitution principle II`
+- [x] T005 [E6] [II] Correct the "all inter-service communication goes through the event bus" line in `CLAUDE.md` to match constitution principle II. Test: n/a (docs) → `docs: align CLAUDE.md with constitution principle II`
 
 ## Phase 2: Defects in shipped behaviour
 
@@ -39,8 +39,8 @@ Format: `- [ ] T### [FR-xxx|E#] [Principle] description. Proving test → commit
 - [ ] T019 Skip or fix the 4 tests in `tests/unit/test_orchestrator_concurrency.py` that fail on Python 3.12 (CI and docs are 3.14 only). → `test: mark concurrency tests 3.14-only`
 - [ ] T020 Seed Linux golden caption hashes in `tests/unit/test_subtitle_image_golden.py` (CI skips them today; the PNG-equality tests are the guard). → `test: seed linux caption goldens`
 - [ ] T021 Set ruff `target-version` (reports F821 on `ExceptionGroup`). → `chore(lint): set ruff target-version`
-- [ ] T022 Revisit the TypeScript hold at 6.0.x when typescript-eslint supports 7.1+. → `chore(web): upgrade TypeScript`
-- [ ] T023 Add a "superseded by ADR-004" note to ADR-003 decision 2 (it names MoviePy). `docs/wave-3-gate.md` is a dated gate record: do not edit it (it says 12 revisions at `:37` and `:94`; `46c8200` actually contained 14 migration files; there are 16 now).
+- [x] T022 (closed, blocked upstream 2026-10-09) typescript-eslint 8.71.1 has peer `typescript <6.1.0` and TypeScript latest is 7.0.2. Revisit when typescript-eslint publishes a release that supports 7.1+.
+- [x] T023 Add a "superseded by ADR-004" note to ADR-003 decision 2 (it names MoviePy). `docs/wave-3-gate.md` is a dated gate record: do not edit it (it says 12 revisions at `:37` and `:94`; `46c8200` actually contained 14 migration files; there are 16 now).
 
 - [ ] T024 [FR-017] [IV] Add a test for the `min_score` filter on `GET /clips`; mutating `>=` to `<=` at `app/bus/job_store.py:171` currently leaves 46 tests green. Test: fails under that mutation → `test(clips): cover min_score filter`
 

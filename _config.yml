@@ -4,3 +4,8 @@ theme: minima
 include:
   - TERMS.md
   - PRIVACY.md
+exclude:
+  - docs/archive/
+  - specs/
+  - tasks/
+  - .specify/
