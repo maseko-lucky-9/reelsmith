@@ -6,7 +6,7 @@ import re
 import shutil
 import time
 import uuid
-from collections.abc import Coroutine, Sequence
+from collections.abc import Callable, Coroutine, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -93,6 +93,9 @@ async def _emit(bus: AsyncEventBus, type_: EventType, job_id: str, **payload: An
 async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
     if trigger.payload.get("rerender_clip_id"):
         await _rerender_clip(trigger, bus, store)
+        return
+    if trigger.payload.get("reprompt"):
+        await _reprompt_job(trigger, bus, store)
         return
 
     job_id = trigger.job_id
@@ -613,6 +616,417 @@ async def _restore_chapter_status(
             "[%s] Could not reset chapter %d status after a failed re-render",
             job_id, index,
         )
+
+
+# ── Reprompt (FR-016) ─────────────────────────────────────────────────────────
+
+# Jobs whose reprompt was accepted and has not finished. In-process only: a
+# reprompt never changes the job's status (it stays "completed"), so a restart,
+# which loses the queue and this set, leaves nothing to recover.
+_reprompts_in_flight: set[str] = set()
+
+
+def claim_reprompt(job_id: str) -> bool:
+    """Mark a reprompt of ``job_id`` in flight; False if one already is.
+
+    ``POST /jobs/{id}/reprompt`` claims before it queues the reprompt;
+    ``_reprompt_job`` releases the claim when it ends, however it ends.
+    """
+    if job_id in _reprompts_in_flight:
+        return False
+    _reprompts_in_flight.add(job_id)
+    return True
+
+
+def release_reprompt(job_id: str) -> None:
+    _reprompts_in_flight.discard(job_id)
+
+
+def reprompt_in_flight(job_id: str) -> bool:
+    return job_id in _reprompts_in_flight
+
+
+def reprompt_unavailable_reason() -> str | None:
+    """Why a reprompt cannot propose clips (provider ``chapter`` has no
+    proposer), or None when it can. A reprompt of an explicit time range
+    needs no proposer."""
+    if settings.segment_provider == "chapter":
+        return (
+            "clip discovery is off (segment_provider=chapter); set "
+            "YTVIDEO_SEGMENT_PROVIDER to local_heuristic to reprompt"
+        )
+    return None
+
+
+def _clock(seconds: float) -> str:
+    whole = int(seconds)
+    return f"{whole // 60}:{whole % 60:02d}"
+
+
+def _span_chapter(start: float, end: float, safe_end: float) -> dict[str, Any]:
+    """The one chapter of an explicit reprompt range, clamped to the source."""
+    cstart = max(0.0, float(start))
+    cend = min(float(end), safe_end)
+    if cend - cstart < segment_discovery.MIN_CHAPTER_SECONDS:
+        raise RuntimeError(
+            f"range {start:g}-{end:g}s is outside the source (it ends at {safe_end:.1f}s)"
+        )
+    return {
+        "index": 0,
+        "title": f"Clip {_clock(cstart)}-{_clock(cend)}",
+        "start": cstart,
+        "end": cend,
+    }
+
+
+def _reprompt_clips_folder(job: JobState, live_clips: list[dict[str, Any]]) -> str:
+    """Where the job's clips live: the job's clips folder (memory store), else
+    the folder of a live clip (the SQL store keeps no folder), else
+    ``clips`` next to the source."""
+    if job.clips_folder:
+        return job.clips_folder
+    for clip in live_clips:
+        if clip.get("output_path"):
+            return str(Path(clip["output_path"]).parent)
+    return str(Path(job.video_path or ".").parent / "clips")
+
+
+def _next_clip_index(
+    job: JobState, live_clips: list[dict[str, Any]], clips_folder: str
+) -> int:
+    """One past the highest chapter index the job has used: its chapters, its
+    live clips' file names and every ``NN_*`` file in the clips folder (the
+    files of retired clips stay on disk), so a new clip never overwrites one."""
+    used = {int(i) for i in job.chapters}
+    names = [Path(c["output_path"]).name for c in live_clips if c.get("output_path")]
+    folder = Path(clips_folder)
+    if folder.is_dir():
+        names.extend(f.name for f in folder.iterdir())
+    for name in names:
+        match = _CLIP_INDEX_RE.match(name)
+        if match:
+            used.add(int(match.group(1)))
+    return max(used, default=-1) + 1
+
+
+async def _propose_reprompt_chapters(
+    *,
+    job_id: str,
+    video_path: str,
+    safe_end: float,
+    cleanup_root: Path,
+    opts: PipelineOptions,
+    language: str | None,
+    prompt: str | None,
+    words: list[transcription_service.WordTiming] | None,
+    first_index: int,
+    bus: AsyncEventBus,
+) -> tuple[list[dict[str, Any]], list[transcription_service.WordTiming]]:
+    """Chapters for the proposer's picks over the whole source.
+
+    The source's 16 kHz wav feeds the proposer's loudness features (as in
+    discovery); the words come from the sidecar, else the wav is transcribed
+    once and the sidecar written. Selection is discovery's
+    (``select_discovered``). Chapter indexes start at ``first_index``. Unlike
+    discovery, a failure or an empty pick raises: the reprompt then fails and
+    the job keeps its clips.
+    """
+    min_secs, max_secs = segment_discovery.clip_length_range(opts)
+    wav_path = cleanup_root / "reprompt_source.wav"
+    try:
+        audio_path = await ffmpeg_tools.to_thread_cancellable(
+            clip_service.extract_audio, video_path, 0.0, safe_end, str(wav_path)
+        )
+        if audio_path is None:
+            raise RuntimeError("source has no audio stream")
+        if words is None:
+            words = await transcription_service.transcribe_words_async(
+                audio_path, language=language, audio_duration_s=safe_end
+            )
+            try:
+                await asyncio.to_thread(
+                    segment_discovery.write_words_sidecar, video_path, words
+                )
+            except OSError as e:
+                log.warning("[%s] Could not save the words sidecar: %s", job_id, e)
+        proposer = segment_proposer.get_segment_proposer(
+            min_secs=min_secs, max_secs=max_secs
+        )
+        candidates = await asyncio.to_thread(
+            proposer.propose, words, audio_path, [], safe_end, prompt=prompt
+        )
+    finally:
+        wav_path.unlink(missing_ok=True)
+    kept = segment_discovery.select_discovered(candidates, safe_end)
+    chapters = [
+        {**c, "index": first_index + c["index"]}
+        for c in segment_discovery.segments_to_chapters(kept, safe_end)
+    ]
+    log.info(
+        "[%s] Reprompt proposal  words=%d  candidates=%d  kept=%s",
+        job_id, len(words), len(candidates),
+        [(c["start"], c["end"], c["virality_score"]) for c in chapters],
+    )
+    await _emit(
+        bus, EventType.SEGMENTS_PROPOSED, job_id,
+        count=len(chapters), candidates=len(candidates),
+    )
+    for c in chapters:
+        await _emit(
+            bus, EventType.SEGMENT_SCORED, job_id,
+            index=c["index"], start=c["start"], end=c["end"],
+            score=c["virality_score"], breakdown=c["score_breakdown"],
+        )
+    if not chapters:
+        raise RuntimeError("the proposer kept no segment for this prompt")
+    return chapters, words
+
+
+def _set_retired(retired: bool) -> Callable[[dict[str, Any]], None]:
+    def _mutate(c: dict[str, Any]) -> None:
+        c["retired"] = retired
+
+    return _mutate
+
+
+async def _undo_reprompt(
+    store: JobStore,
+    job_id: str,
+    new_clip_ids: list[str],
+    new_indexes: set[int],
+    retired_old_ids: list[str],
+) -> None:
+    """Put the job back as it was before a reprompt that did not finish.
+
+    The old clips this reprompt retired go live again, the new clips are
+    retired, their chapters leave the job and their files are deleted (none
+    is live; a file a live clip still uses is kept). Best effort: errors are
+    logged, the reprompt has already failed.
+    """
+    try:
+        for clip_id in retired_old_ids:
+            await store.upsert_clip(job_id, clip_id, _set_retired(False))
+        await store.retire_clips(job_id, new_clip_ids)
+
+        def _drop_new_chapters(s: JobState) -> None:
+            s.chapters = {i: c for i, c in s.chapters.items() if i not in new_indexes}
+
+        await store.update(job_id, _drop_new_chapters)
+        live_paths = {
+            path
+            for clip in await store.list_clips(job_id=job_id)
+            for path in (clip.get("output_path"), clip.get("thumbnail_path"))
+            if path
+        }
+        for clip_id in new_clip_ids:
+            clip = await store.get_clip(clip_id, include_retired=True) or {}
+            for path in (clip.get("output_path"), clip.get("thumbnail_path")):
+                if path and path not in live_paths:
+                    Path(path).unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001 — best effort; the reprompt already failed
+        log.exception("[%s] Could not fully undo a failed reprompt", job_id)
+
+
+async def _reprompt_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
+    """Re-discover the clips of a completed job from its retained source.
+
+    Forgets the job's replay history first (a new SSE subscriber must not be
+    handed the previous run's ``JobCompleted``). Takes the source's words
+    from the ``.words.json`` sidecar, or transcribes the source once and
+    saves them. The chapters are the payload's ``start_seconds``-
+    ``end_seconds`` range, or else the proposer's picks for the prompt and
+    length range. Each renders as a new clip whose index follows every
+    existing one, so no file is overwritten. The new clips stay hidden
+    (retired) until all of them have rendered and been exported; then they go
+    live, the old clips are retired, the prompt and length range (only those)
+    are recorded on the job, and ``JobReprompted`` + ``JobCompleted`` are
+    emitted.
+
+    The job stays ``completed`` throughout, so a restart mid-reprompt
+    (``fail_interrupted_jobs``) leaves it and its old clips alone. On any
+    failure ``_undo_reprompt`` keeps the old clips and drops the new ones, and
+    ``RepromptFailed`` is emitted, never ``JobFailed``. Cancellation undoes
+    the same way and propagates. The in-flight claim is always released.
+    """
+    job_id = trigger.job_id
+    payload = trigger.payload
+    log.info("[%s] Reprompt started  prompt=%r", job_id, payload.get("prompt"))
+    t0 = time.perf_counter()
+    cleanup_root: Path | None = None
+    new_clip_ids: list[str] = []
+    new_indexes: set[int] = set()
+    retired_old_ids: list[str] = []
+    try:
+        await bus.forget(job_id)
+        job = await store.get(job_id)
+        if job.status != "completed":
+            raise RuntimeError(
+                f"job is {job.status}; only a completed job can be reprompted"
+            )
+        video_path = job.video_path
+        if not video_path or not Path(video_path).is_file():
+            raise RuntimeError("source video not retained")
+        prompt = payload["prompt"] if "prompt" in payload else job.prompt
+        length_min = payload.get("target_length_min_seconds")
+        length_max = payload.get("target_length_max_seconds")
+        span_start = payload.get("start_seconds")
+        span_end = payload.get("end_seconds")
+        has_span = span_start is not None and span_end is not None
+        if not has_span and (reason := reprompt_unavailable_reason()):
+            raise RuntimeError(reason)
+        opts = _effective_options(job.pipeline_options.model_dump())
+        if length_min is not None:
+            opts.target_length_min_seconds = length_min
+        if length_max is not None:
+            opts.target_length_max_seconds = length_max
+        language = payload.get("language", job.language)
+
+        old_clips = await store.list_clips(job_id=job_id)
+        old_ids = [c["clip_id"] for c in old_clips]
+        clips_folder = _reprompt_clips_folder(job, old_clips)
+        first_index = _next_clip_index(job, old_clips, clips_folder)
+        cleanup_root = Path(clips_folder) / "_tmp" / f"{job_id}-reprompt"
+        cleanup_root.mkdir(parents=True, exist_ok=True)
+        safe_end = await asyncio.to_thread(clip_service.probe_safe_end, video_path)
+        words = await asyncio.to_thread(
+            segment_discovery.read_words_sidecar, video_path
+        )
+        log.info(
+            "[%s] Reprompt  first_index=%d  live_clips=%d  words=%s",
+            job_id, first_index, len(old_ids),
+            "none (transcribing)" if words is None else f"{len(words)} from the sidecar",
+        )
+
+        # ── Chapters ──────────────────────────────────────────────────────────
+        if has_span:
+            chapters = [
+                {**_span_chapter(span_start, span_end, safe_end), "index": first_index}
+            ]
+        else:
+            chapters, words = await _propose_reprompt_chapters(
+                job_id=job_id,
+                video_path=video_path,
+                safe_end=safe_end,
+                cleanup_root=cleanup_root,
+                opts=opts,
+                language=language,
+                prompt=prompt,
+                words=words,
+                first_index=first_index,
+                bus=bus,
+            )
+        await _emit(bus, EventType.CHAPTERS_DETECTED, job_id, chapters=chapters)
+
+        # ── New clips, hidden until every one has rendered ────────────────────
+        for chapter in chapters:
+            clip_id = str(uuid.uuid4())
+            await store.upsert_clip(job_id, clip_id, _set_retired(True))
+            new_clip_ids.append(clip_id)
+            new_indexes.add(int(chapter["index"]))
+
+        semaphore = asyncio.Semaphore(settings.max_parallel_chapters)
+
+        async def _bound(chapter: dict[str, Any], clip_id: str) -> str | None:
+            async with semaphore:
+                return await _process_chapter(
+                    chapter=chapter,
+                    job_id=job_id,
+                    video_path=video_path,
+                    clips_folder=clips_folder,
+                    cleanup_root=cleanup_root,
+                    caption_format=payload.get("caption_format", job.caption_format),
+                    target_aspect_ratio=payload.get(
+                        "target_aspect_ratio", job.target_aspect_ratio
+                    ),
+                    bus=bus,
+                    store=store,
+                    pipeline_options=opts,
+                    language=language,
+                    clip_id=clip_id,
+                    source_words=words,
+                )
+
+        try:
+            async with asyncio.TaskGroup() as chapter_group:
+                chapter_tasks = [
+                    chapter_group.create_task(_bound(c, cid))
+                    for c, cid in zip(chapters, new_clip_ids)
+                ]
+        except ExceptionGroup as group:
+            raise group.exceptions[0] from None
+        output_paths = [p for p in (t.result() for t in chapter_tasks) if p]
+
+        # ── Export + manifest of the new clips ────────────────────────────────
+        if settings.export_base_folder:
+            export_dir = str(Path(settings.export_base_folder) / job_id)
+        else:
+            export_dir = str(Path(clips_folder).parent / "exports")
+        exported_paths = await asyncio.to_thread(
+            export_service.export_clips, output_paths, export_dir
+        )
+        await _emit(bus, EventType.EXPORT_COMPLETED, job_id,
+                    export_dir=export_dir, count=len(exported_paths))
+        path_map = {Path(p).stem: p for p in exported_paths}
+        manifest_clips: list[dict[str, Any]] = []
+        for clip_id in new_clip_ids:
+            clip = dict(await store.get_clip(clip_id, include_retired=True) or {})
+            clip["export_path"] = path_map.get(Path(clip.get("output_path") or "").stem, "")
+            manifest_clips.append(clip)
+        manifest_path = await asyncio.to_thread(
+            manifest_service.write_manifest, manifest_clips, export_dir
+        )
+        await _emit(bus, EventType.MANIFEST_CREATED, job_id, manifest_path=manifest_path)
+
+        # ── Swap: new clips live, then old clips retired ──────────────────────
+        for clip_id in new_clip_ids:
+            await store.upsert_clip(job_id, clip_id, _set_retired(False))
+        retired_old_ids = list(old_ids)
+        await store.retire_clips(job_id, old_ids)
+
+        def _record(s: JobState) -> None:
+            s.prompt = prompt
+            if length_min is not None:
+                s.pipeline_options.target_length_min_seconds = length_min
+            if length_max is not None:
+                s.pipeline_options.target_length_max_seconds = length_max
+            s.output_paths = output_paths
+            s.chapters = {i: c for i, c in s.chapters.items() if i in new_indexes}
+
+        await store.update(job_id, _record)
+        log.info(
+            "[%s] Reprompt done in %.2fs  new=%d  retired=%d  paths=%s",
+            job_id, time.perf_counter() - t0, len(new_clip_ids), len(old_ids),
+            output_paths,
+        )
+        await _emit(
+            bus, EventType.JOB_REPROMPTED, job_id,
+            prompt=prompt, clip_ids=new_clip_ids, retired_clip_ids=old_ids,
+            output_paths=output_paths,
+        )
+        await _emit(bus, EventType.JOB_COMPLETED, job_id, output_paths=output_paths)
+    except asyncio.CancelledError:
+        log.warning("[%s] Reprompt cancelled; the job keeps its clips", job_id)
+        await _finish_then_honour_cancel(
+            _undo_reprompt(store, job_id, new_clip_ids, new_indexes, retired_old_ids)
+        )
+        raise
+    except Exception as e:  # noqa: BLE001 — a failed reprompt must not fail the job
+        log.exception(
+            "[%s] Reprompt failed after %.2fs; the job keeps its clips",
+            job_id, time.perf_counter() - t0,
+        )
+
+        async def _fail() -> None:
+            await _undo_reprompt(
+                store, job_id, new_clip_ids, new_indexes, retired_old_ids
+            )
+            await _emit(bus, EventType.REPROMPT_FAILED, job_id, error=str(e))
+
+        await _finish_then_honour_cancel(_fail())
+    finally:
+        release_reprompt(job_id)
+        if cleanup_root is not None:
+            shutil.rmtree(cleanup_root, ignore_errors=True)
 
 
 async def _record_failure(

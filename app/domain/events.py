@@ -35,6 +35,10 @@ class EventType(str, Enum):
     STAGE_SKIPPED = "StageSkipped"
     JOB_COMPLETED = "JobCompleted"
     JOB_FAILED = "JobFailed"
+    # Reprompt (FR-016): the clips of a completed job were re-discovered. The
+    # job stays completed either way; a failed reprompt keeps the old clips.
+    JOB_REPROMPTED = "JobReprompted"
+    REPROMPT_FAILED = "RepromptFailed"
     # ── Parity Wave (W1-W3) service emits ────────────────────────────────────
     AUDIO_ENHANCED = "AudioEnhanced"
     AI_HOOK_GENERATED = "AiHookGenerated"
