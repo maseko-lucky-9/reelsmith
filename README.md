@@ -85,7 +85,7 @@ The `/jobs/$jobId` page renders a per-stage timeline while the pipeline runs. St
 | UI | React 19 + Vite 8 + shadcn/ui |
 | Tests | pytest + vitest |
 
-**Performance & dependencies.** Each reel renders in a single ffmpeg pass from the source. MoviePy has been removed, and the binary is the one bundled by `imageio-ffmpeg`, never a system ffmpeg. `av` is pinned at 18.1.0 because 19.x breaks faster-whisper 1.2.1. Measured numbers and the deliberate output changes are recorded in [ADR-004](docs/decisions/004-ffmpeg-render-pipeline.md); the concurrency model is described in [docs/architecture.md](docs/architecture.md).
+**Performance & dependencies.** Each reel renders in a single ffmpeg pass from the source. MoviePy has been removed, and the binary is the one bundled by `imageio-ffmpeg`, never a system ffmpeg; yt-dlp merges video and audio with it too (`ffmpeg_location`), and URL previews run `python -m yt_dlp`, so neither `ffmpeg` nor `yt-dlp` needs to be on `PATH`. `av` is pinned at 18.1.0 because 19.x breaks faster-whisper 1.2.1. Measured numbers and the deliberate output changes are recorded in [ADR-004](docs/decisions/004-ffmpeg-render-pipeline.md); the concurrency model is described in [docs/architecture.md](docs/architecture.md).
 
 ## Environment Variables
 

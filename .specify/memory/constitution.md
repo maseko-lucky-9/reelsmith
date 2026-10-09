@@ -13,8 +13,8 @@ Source: `CLAUDE.md` (Key Conventions), `docs/db-parity.md` (Discriminators).
 Source: `CLAUDE.md` (Key Conventions), `docs/architecture.md`, `app/workers/orchestrator.py:71`, `app/routers/jobs.py:213`.
 
 ### III. One ffmpeg
-All media rendering goes through `app/services/ffmpeg_tools.run`, which resolves `argv[0] == "ffmpeg"` to the bundled `imageio-ffmpeg` binary and kills the child on timeout or cancel. Probing and frame grabs use PyAV. MoviePy is not a dependency; a guard test enforces it.
-Source: `CLAUDE.md`, ADR-004, `app/services/ffmpeg_tools.py:80,111`, `tests/unit/test_no_moviepy_in_app.py`.
+All media rendering goes through `app/services/ffmpeg_tools.run`, which resolves `argv[0] == "ffmpeg"` to the bundled `imageio-ffmpeg` binary and kills the child on timeout or cancel. Probing and frame grabs use PyAV. MoviePy is not a dependency; a guard test enforces it. yt-dlp merges with the same bundled binary (`ffmpeg_location`), and yt-dlp runs as the installed Python package (`python -m yt_dlp`), never a CLI on `PATH`.
+Source: `CLAUDE.md`, ADR-004, `app/services/ffmpeg_tools.py:80,111`, `tests/unit/test_no_moviepy_in_app.py`, `tests/unit/test_yt_dlp_bundled_ffmpeg.py`, `tests/unit/test_yt_dlp_metadata.py`.
 
 ### IV. The default test run is offline and deterministic
 `pytest` excludes `integration`, `live` and `playwright` markers (`pyproject.toml` `addopts`). Tests that need the network or a real browser carry a marker. CI runs Python 3.14 only; 3.12 is unsupported. Frontend changes pass `pnpm test` and `pnpm build`.
@@ -50,13 +50,15 @@ Source: `docs/decisions/001–004`, `CLAUDE.md`.
 
 ## Known exceptions (the code does not yet honour these)
 
-| # | Principle | Where | Detail | Tracked as |
-|---|---|---|---|---|
-| E3 | III | `app/services/platforms/_yt_dlp_base.py:17` | Format `bestvideo+bestaudio` makes yt-dlp merge with whichever `ffmpeg` is on `PATH`; no `ffmpeg_location` is set | tasks T003 |
-| E4 | III | `app/routers/jobs.py:59,87` | Shells out to the `yt-dlp` CLI on `PATH` | tasks T003 |
+None.
 
 ## Governance
 
 This constitution supersedes other practice notes for this repository. An amendment is a dated line in the version history with its reason; silent drift is a violation. `/speckit-analyze` treats a conflict with a MUST principle as CRITICAL, so unfixed gaps belong in *Known exceptions*, not in silence. Complexity beyond this document needs an ADR.
 
-**Version**: 1.0.0 | **Ratified**: 2026-10-09 | **Last Amended**: 2026-10-09
+**Version**: 1.1.0 | **Ratified**: 2026-10-09 | **Last Amended**: 2026-10-09
+
+### Version history
+
+- 1.0.0, 2026-10-09: ratified with Known exceptions E1-E6.
+- 1.1.0, 2026-10-09: all Known exceptions E1-E6 resolved (E3, E4 by T003: yt-dlp merges with the bundled ffmpeg, and metadata lookups run `python -m yt_dlp` as a killable child process). Principle III now names yt-dlp.
