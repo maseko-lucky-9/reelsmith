@@ -20,7 +20,7 @@ Format: `- [ ] T### [FR-xxx|E#] [Principle] description. Proving test → commit
 - [x] T007 [FR-015] [II] (done, owner chose the real re-render) The orchestrator now handles `rerender_clip_id`; `jobs.video_path` persists the source; the UI shows the 409 reason. → `fix(clips): re-render a single clip in place`
 - [ ] T028 [FR-015] [II] Follow-ups to T007: (a) a failed re-render can leave the chapter status at `rendering` in the memory store; (b) jobs created before migration `o3p4q5r6s7t8` can never be re-rendered (no saved source); consider a backfill by matching clips' folders; (c) the source video is now relied on, so retention (`retention_days`) must not delete it; (d) `ai_hook_text`, summary and hashtags regenerate on re-render, add an option to skip. Test: failed-render leaves chapter `completed` → `fix(clips): reset chapter status after a failed re-render`
 - [ ] T008 [FR-016] [II] **Decision** (depends on T011; today the job is left `pending` and blocks new submissions of its URL): re-enqueue the job after `POST /api/jobs/{id}/reprompt` and emit an event. Test: contract test asserts the job is queued → `fix(reprompt): enqueue the job`
-- [ ] T009 [FR-051] [II] Exclude retired clips from the bulk-export manifest in `app/routers/bulk_export.py`. Test: retired clip absent from manifest (fails before the fix) → `fix(export): skip retired clips in bulk manifest`
+- [x] T009 [FR-051] [II] (done) Exclude retired clips from the bulk-export manifest in `app/routers/bulk_export.py`. Test: retired clip absent from manifest (fails before the fix) → `fix(export): skip retired clips in bulk manifest`
 
 ## Phase 3: Scaffolded-unwired code (decide: wire or delete)
 

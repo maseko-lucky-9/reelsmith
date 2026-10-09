@@ -115,7 +115,7 @@ A creator exports a clip for Premiere or DaVinci, or downloads many clips with a
 
 1. **Given** a rendered clip, **When** requesting `export.xml`, **Then** NLE XML is returned; for an unrendered clip, 409.
 2. **Given** selected clips, **When** requesting the bulk zip, **Then** a zip with a manifest is streamed; more than `bulk_export_max_clips` (200) ids is rejected with 422.
-3. **Given** a retired clip, **When** bulk-exporting, **Then** it is absent from the manifest. *It is listed today, see FR-051.*
+3. **Given** a retired clip, **When** bulk-exporting, **Then** it is absent from the manifest and the zip; if every requested clip is retired the response is 404 (FR-051, fixed).
 
 ### Edge Cases
 
@@ -185,7 +185,7 @@ A creator exports a clip for Premiere or DaVinci, or downloads many clips with a
 | ID | Requirement | Status | Evidence |
 |---|---|---|---|
 | FR-050 | The system MUST export a rendered clip as Premiere or DaVinci XML (409 when unrendered). | Implemented | `tests/contract/test_xml_export_router.py`, `tests/unit/test_xml_export_service.py` |
-| FR-051 | The system MUST bulk-export non-retired clips as a zip with a manifest. | **Partial** | `app/routers/bulk_export.py` lists retired clips in the manifest although their files are deleted. Contract test: `tests/contract/test_bulk_export.py`. |
+| FR-051 | The system MUST bulk-export non-retired clips as a zip with a manifest. | Implemented (fixed in this branch; was Partial) | `app/routers/bulk_export.py` now selects only non-retired clips; ids that are all retired give 404, like an unknown id. Tests: `test_bulk_export_skips_retired_clips`, `test_bulk_export_only_retired_is_404` in `tests/contract/test_bulk_export.py`; dropping the filter turns both red. |
 | FR-052 | The system MUST write an export folder and `manifest.csv` for n8n hand-off. | Implemented | `tests/unit/test_export_service.py`, `test_manifest_service.py`; contract in `docs/social-publish-handoff.md` |
 
 **Cross-cutting**
