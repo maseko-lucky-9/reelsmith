@@ -61,9 +61,18 @@ The API is served at both `/x` and `/api/x`. Routers are mounted without a prefi
 
 `render_service.render_clip` renders each chapter in **one ffmpeg pass straight from the source**: trim, blurred background still, scaled inset, caption overlay, even-dimension crop, then yuv420p libx264/AAC. The ffmpeg binary comes from `imageio-ffmpeg`, and probes and frame grabs use PyAV (`ffmpeg_tools`). Captions are drawn by the unchanged PIL renderer, once per unique caption, and composited as a single ffconcat overlay input (`caption_track`). See [ADR-004](decisions/004-ffmpeg-render-pipeline.md) for the timing rules and the deliberate behaviour changes.
 
-Two optional inputs extend the same graph; the face-tracked reframe below passes `crop_track`; no pipeline caller passes `broll` yet (FR-010). `crop_track` pans a canvas-aspect crop of the source instead of the letterboxed inset. `broll` (up to four `BrollInsert`s) adds one looped input per insert, cover-fits it to the canvas and overlays it full-canvas over its half-open window, above the inset composite and below the captions. Frame grid, duration and audio stay those of the render without them (ADR-004, B-roll addendum).
+Two optional inputs extend the same graph (FR-010): `broll` is passed by the orchestrator's B-roll step (below); `crop_track` is passed by the face-tracked reframe step below. `crop_track` pans a canvas-aspect crop of the source instead of the letterboxed inset. `broll` (up to four `BrollInsert`s) adds one looped input per insert, cover-fits it to the canvas and overlays it full-canvas over its half-open window, above the inset composite and below the captions. Frame grid, duration and audio stay those of the render without them (ADR-004, B-roll addendum).
 
 **Face-tracked reframe** (FR-010, [ADR-005](decisions/005-face-track-reframe.md)). With the job's `reframe` option on and `YTVIDEO_REFRAME_PROVIDER=face_track` (default `letterbox`), `orchestrator._reframe_step` runs `reframe_service.face_track` in a worker thread (`to_thread_cancellable`) just before the render, for new renders and re-renders alike. It decodes the chapter with PyAV at 2 fps (rotation applied, fitted into 640x640), finds faces with YuNet on onnxruntime (`face_detector`; the 232 KB model is downloaded on first use into `YTVIDEO_REFRAME_MODEL_DIR` and checked against a pinned SHA-256), follows the largest face with a zero-phase-smoothed, dead-zoned, speed-capped crop position and passes at most 64 keyframes to `render_clip(crop_track=...)`, which pans a full-height 9:16 window instead of the letterboxed inset. A split screen, several faces of similar size, no face, a source with no pan room or any error emits `StageSkipped(reframe, reason)` and leaves the letterbox render unchanged; cancellation propagates.
+
+## B-roll
+
+`_broll_step` (`app/workers/orchestrator.py`) runs before each reel's render when the job's `render` and `broll` options are on. With `YTVIDEO_BROLL_PROVIDER=none` (the default) it emits `StageSkipped(broll, reason="no provider")` and the render is unchanged. Otherwise:
+
+- **Plan.** `broll_planner.plan_broll(words, duration)` is pure and deterministic: at most two 3 s windows on the clip's own clock, none starting before 3.0 s or ending after `duration - 2.0` s, at least 1 s apart. Each window's query is the longest token spoken inside it (lowercase, at least 4 letters, letters only, not one of the segment proposer's stopwords); windows are ranked by query length, then earliest start, one window per query. A clip under 8 s gets none.
+- **Fetch.** `broll_service.fetch_all` asks the provider for each query, two at a time on the event loop. `local` matches keyword-named `*.mp4` files in `YTVIDEO_BROLL_LIBRARY_DIR`; `pexels` (`broll_pexels_service`) searches Pexels videos with `YTVIDEO_PEXELS_API_KEY`, downloads at most 50 MB from `*.pexels.com` hosts only and caches by Pexels video id in `YTVIDEO_BROLL_CACHE_DIR`. A failed or empty query, or a file that does not decode, drops that one insert.
+- **Render and record.** Found assets become `BrollInsert`s for `render_clip(broll=...)`; `BRollApplied` reports them and the clip's `broll_assets` keeps `query, start, duration, provider, asset_id, author, source_url, path`. The export manifest's `broll_credits` column credits each asset (Pexels asks for the videographer and a link).
+- **Never fatal.** Any error, or nothing found, emits `StageSkipped(broll, reason)` and the reel renders without B-roll; cancellation propagates. A re-render goes through the same step, so it refreshes (or clears) `broll_assets`.
 
 ## Live Progress (SSE)
 
@@ -81,7 +90,7 @@ Two optional inputs extend the same graph; the face-tracked reframe below passes
 | Transcription | `YTVIDEO_TRANSCRIPTION_PROVIDER` | `whisper`, `stub` |
 | Segment scoring | `YTVIDEO_SEGMENT_PROVIDER` | `chapter`, `local_heuristic`, `stub` |
 | Reframe | `YTVIDEO_REFRAME_PROVIDER` | `letterbox` (default), `face_track`; any other value is `letterbox` |
-| B-Roll | `YTVIDEO_BROLL_PROVIDER` | `none`, `local` |
+| B-Roll | `YTVIDEO_BROLL_PROVIDER` | `none` (default), `local`, `pexels` |
 | Job store | `YTVIDEO_JOB_STORE` | `memory`, `sql` |
 
 All providers follow the same pattern: `get_<feature>_service()` factory reads the setting and returns a Protocol implementation. Adding a new provider only requires implementing the Protocol and registering in the factory. Reframe differs: `orchestrator._reframe_step` reads the setting, and the face detector behind the `FaceDetector` protocol comes from `face_detector.get_face_detector()`.
@@ -103,4 +112,6 @@ All providers follow the same pattern: `get_<feature>_service()` factory reads t
 | `segment_discovery` | Discovery helpers: words rebased to a clip window, `<stem>.words.json` sidecar, selection by relative score bar (60% of best), length-scaled clip budget (1 per 120 s, max 5), 50% coverage cap and a near-duplicate penalty (shared transcript words with a kept clip) |
 | `reframe_service` | Face-tracked crop track: 2 fps PyAV sampling, primary-face choice, split-screen / similar-faces fallbacks, smoothing, keyframe decimation |
 | `face_detector` | `FaceDetector` protocol; YuNet 2023mar on onnxruntime with own pre/post-processing; lazy, SHA-256-verified model download |
-| `broll_service` | Noun-phrase → local clip lookup |
+| `broll_planner` | B-roll windows and their one-word queries from a clip's words (pure) |
+| `broll_service` | B-roll providers (`local` keyword-named library, `pexels`) and the bounded fetch |
+| `broll_pexels_service` | Pexels video search + guarded, cached download (credit: author + page URL) |
