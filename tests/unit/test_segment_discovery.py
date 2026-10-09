@@ -302,3 +302,148 @@ def test_get_segment_proposer_takes_the_clip_length_range(
     assert isinstance(custom, LocalHeuristicProposer)
     assert (default.min_secs, default.max_secs) == (20, 60)
     assert (custom.min_secs, custom.max_secs) == (15, 45)
+
+
+# ── redundancy penalty (near-duplicate clips) ─────────────────────────────────
+
+
+def _tseg(score: int, start: float, text: str, length: float = 30.0) -> ProposedSegment:
+    return ProposedSegment(start=start, end=start + length, score=score, text=text)
+
+
+# Five / twelve distinct content words (>= 3 chars, not stopwords).
+FIVE = "alpha bravo charlie delta echo"
+OTHER = "kilo lima mike november oscar"
+TWELVE = "one1 two2 three3 four4 five5 six6 seven7 eight8 nine9 ten10 eleven11 twelve12"
+
+
+def test_content_words_reuse_the_proposer_tokens_and_drop_short_ones():
+    words = sd.content_words("The Cats sat on a mat, and it is OK. Dogs' bark!")
+
+    # "the/and/it/is/on/a" are stopwords; "ok" is < 3 chars; plurals stripped.
+    assert words == {"cat", "sat", "mat", "dog", "bark"}
+
+
+def test_redundancy_is_the_share_of_the_candidates_words_already_kept():
+    kept = [sd.content_words("alpha bravo charlie"), sd.content_words("delta")]
+
+    assert sd.redundancy(sd.content_words(FIVE), kept) == pytest.approx(0.6)
+    assert sd.redundancy(sd.content_words(FIVE), []) == 0.0
+    assert sd.redundancy(set(), kept) == 0.0
+
+
+def test_identical_text_is_skipped_for_a_novel_lower_score():
+    segments = [
+        _tseg(30, 0.0, FIVE),
+        _tseg(29, 100.0, FIVE),  # word-for-word repeat
+        _tseg(20, 200.0, OTHER),
+    ]
+
+    picked = sd.select_discovered(segments, duration=600.0)
+
+    assert [s.score for s in picked] == [30, 20]
+
+
+def test_half_shared_words_fall_below_the_bar_on_the_adjusted_score():
+    # 29 * (1 - 0.5) = 14.5 < ceil(0.6 * 30) = 18: dropped, although its
+    # original score clears the bar.
+    segments = [
+        _tseg(30, 0.0, "alpha bravo charlie delta"),
+        _tseg(29, 100.0, "alpha bravo xray yankee"),
+    ]
+
+    picked = sd.select_discovered(segments, duration=600.0)
+
+    assert [s.score for s in picked] == [30]
+
+
+def test_a_partly_shared_candidate_loses_to_a_novel_lower_scored_one():
+    # B shares 1 of 4 words with A: adjusted 29 * 0.75 = 21.75 < C's 22.
+    segments = [
+        _tseg(30, 0.0, "alpha bravo charlie delta"),
+        _tseg(29, 100.0, "alpha xray yankee zulu"),
+        _tseg(22, 200.0, OTHER),
+    ]
+
+    # Budget 2 (240 s): the novel C takes the second slot.
+    assert [s.score for s in sd.select_discovered(segments, duration=240.0)] == [30, 22]
+    # Budget 3 (600 s): B still survives with its reduced score.
+    assert [s.score for s in sd.select_discovered(segments, duration=600.0)] == [
+        30, 29, 22,
+    ]
+
+
+def test_redundancy_at_the_skip_threshold_is_skipped():
+    # All scores 0, so the bar is 0 and only REDUNDANCY_SKIP can stop a repeat.
+    segments = [
+        _tseg(0, 0.0, FIVE),
+        _tseg(0, 100.0, "alpha bravo charlie xray yankee"),  # 3/5 = 0.6
+    ]
+
+    picked = sd.select_discovered(segments, duration=600.0)
+
+    assert [s.start for s in picked] == [0.0]
+
+
+def test_redundancy_just_below_the_skip_threshold_is_kept():
+    shared = " ".join(TWELVE.split()[:7])
+    segments = [
+        _tseg(0, 0.0, TWELVE),
+        _tseg(0, 100.0, shared + " xray yankee zulu quebec romeo"),  # 7/12 = 0.583
+    ]
+
+    picked = sd.select_discovered(segments, duration=600.0)
+
+    assert [s.start for s in picked] == [0.0, 100.0]
+
+
+def test_empty_text_counts_as_novel():
+    segments = [_tseg(30, 0.0, FIVE), _tseg(29, 100.0, "")]
+
+    picked = sd.select_discovered(segments, duration=600.0)
+
+    assert [s.score for s in picked] == [30, 29]
+
+
+def test_the_best_clip_is_not_penalised_by_overlapping_neighbours():
+    # Sliding windows around the best share its words; they overlap it, so
+    # they are never kept, and they must not count against it either.
+    segments = [
+        _tseg(30, 0.0, FIVE),
+        _tseg(29, 10.0, FIVE),
+        _tseg(28, 20.0, FIVE),
+        _tseg(20, 200.0, OTHER),
+    ]
+
+    picked = sd.select_discovered(segments, duration=600.0)
+
+    assert [(s.start, s.score) for s in picked] == [(0.0, 30), (200.0, 20)]
+
+
+def test_ties_on_the_adjusted_score_go_to_the_earliest_start():
+    segments = [
+        _tseg(30, 0.0, FIVE),
+        _tseg(20, 300.0, "kilo lima"),
+        _tseg(20, 200.0, "mike november"),
+    ]
+
+    picked = sd.select_discovered(segments, duration=240.0)  # budget 2
+
+    assert [s.start for s in picked] == [0.0, 200.0]
+
+
+def test_the_heuristic_proposer_carries_the_full_window_text():
+    from app.services.segment_proposer import LocalHeuristicProposer
+
+    words = [
+        WordTiming(f"sentenceword{i}.", i * 1.0, i * 1.0 + 0.5) for i in range(60)
+    ]
+    segs = LocalHeuristicProposer(
+        weights={"hook": 1.0}, min_secs=20, max_secs=30
+    ).propose(words, None, [], 60.0)
+
+    assert segs
+    for seg in segs:
+        expected = " ".join(w.word for w in words if seg.start <= w.start < seg.end)
+        assert seg.text == expected
+        assert len(seg.text) > 200  # longer than the 200-char summary

@@ -592,7 +592,13 @@ def _speech(seconds: float) -> list[WordTiming]:
     t = 0.0
     i = 0
     while t < seconds - 1.0:
-        for token in _SENTENCES[i % len(_SENTENCES)].split():
+        # Each sentence gets its own words (a suffix per sentence), so windows
+        # do not repeat each other; the hook word and punctuation stay.
+        first, *rest = _SENTENCES[i % len(_SENTENCES)].split()
+        tokens = [first] + [
+            tok.rstrip(".?,") + f"s{i}" + tok[len(tok.rstrip(".?,")):] for tok in rest
+        ]
+        for token in tokens:
             words.append(WordTiming(token, t, t + 0.35))
             t += 0.45
         t += 0.7  # sentence pause
@@ -627,6 +633,75 @@ async def test_real_heuristic_proposer_yields_several_scored_clips(
         assert a["end"] <= b["start"]
     assert all(20.0 <= c["end"] - c["start"] <= 60.0 for c in clips)
 
+
+
+# ── near-duplicate clips ──────────────────────────────────────────────────────
+
+_DIALOGUE = (
+    "Anita? You in? Yeah. Wow, I didn't know you were in town! "
+    "I got back last year. Why didn't you call me? Sorry, I meant to get in touch."
+)
+
+
+async def test_two_windows_repeating_the_same_lines_yield_one_clip(
+    harness, memory_store
+):
+    harness.proposer = _FakeProposer(
+        [
+            ProposedSegment(start=10.0, end=40.0, title="Scene", score=30, text=_DIALOGUE),
+            ProposedSegment(start=200.0, end=230.0, title="Scene again", score=29, text=_DIALOGUE),
+            ProposedSegment(
+                start=100.0, end=130.0, title="Thesis", score=22,
+                text="Emptiness is an unnatural but common state for a theatre.",
+            ),
+        ]
+    )
+
+    recorder = await harness.run(memory_store)
+
+    assert _chapters(recorder) == [("Scene", 10.0, 40.0), ("Thesis", 100.0, 130.0)]
+
+
+def _dialogue_talk(seconds: float) -> list[WordTiming]:
+    """Unique narration, with the same dialogue played at 60 s and at 240 s."""
+    words: list[WordTiming] = []
+    t = 0.0
+    n = 0
+    while t < seconds - 1.0:
+        if 60.0 <= t < 100.0 or 240.0 <= t < 280.0:
+            tokens = _DIALOGUE.split()
+        else:
+            tokens = [f"narration{n}x{k}" for k in range(9)]
+            tokens[-1] += "."
+            n += 1
+        for token in tokens:
+            words.append(WordTiming(token, t, t + 0.35))
+            t += 0.45
+        t += 0.7
+    return words
+
+
+async def test_real_proposer_keeps_one_of_two_repeated_dialogue_scenes(
+    harness, memory_store
+):
+    harness.monkeypatch.setattr(
+        orch.segment_proposer, "get_segment_proposer", real_get_segment_proposer
+    )
+    speech = _dialogue_talk(SOURCE_SECONDS)
+    harness.monkeypatch.setattr(
+        orch.transcription_service,
+        "transcribe_to_words",
+        lambda audio_path, **_: list(speech),
+    )
+
+    await harness.run(memory_store)
+
+    clips = await memory_store.list_clips(job_id=JOB_ID)
+    scenes = [
+        c for c in clips if "Anita?" in c["transcript"] or "town!" in c["transcript"]
+    ]
+    assert len(clips) >= 2
+    assert len(scenes) == 1, [(c["start"], c["end"]) for c in clips]
 
 
 # ── single-clip re-render reuses the sidecar ──────────────────────────────────

@@ -98,6 +98,9 @@ class ProposedSegment:
     summary: str = ""
     score: int = 0
     score_breakdown: dict[str, float] = field(default_factory=dict)
+    # Full transcript of the window (``summary`` is cut at 200 characters);
+    # clip discovery compares it across clips to skip near-duplicates.
+    text: str = ""
 
     @property
     def virality_score(self) -> int:
@@ -230,6 +233,7 @@ class LocalHeuristicProposer:
             summary=text[:200],
             score=_combine_score(breakdown, {**EXTRA_WEIGHTS, **self.weights}),
             score_breakdown=breakdown,
+            text=text,
         )
 
     def _build_candidates(

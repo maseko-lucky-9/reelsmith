@@ -11,7 +11,8 @@ holds the pure pieces it needs:
 * ``select_discovered`` picks highlights rather than slicing the source: a
   bar relative to the best score (heuristic scores run low, about 13-38 on a
   real talk, so no fixed bar works), a clip budget that grows with the
-  source's length, and a cap on how much of the source the clips may cover;
+  source's length, a cap on how much of the source the clips may cover, and
+  a penalty for clips that repeat what an already kept clip says;
 * ``segments_to_chapters`` gives the kept segments the same chapter shape the
   YouTube-chapter path builds, plus the score fields the clip row stores.
 """
@@ -28,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from app.domain.models import PipelineOptions
-from app.services.segment_proposer import ProposedSegment
+from app.services.segment_proposer import ProposedSegment, _content_tokens
 from app.services.transcription_service import WordTiming
 from app.settings import settings
 
@@ -52,6 +53,17 @@ half is allowed). The best segment is always kept, whatever its length."""
 MIN_SCORE_RATIO = 0.6
 """A segment is kept only if it scores at least this share of the best one. At
 0.4 the bar dropped just 2 of 32 candidates on the G1 talk."""
+
+REDUNDANCY_SKIP = 0.6
+"""A candidate is skipped when at least this share of its content words is
+already in one kept clip. Below it the candidate competes on an adjusted score,
+``score * (1 - redundancy)``, held to the same bar (``MIN_SCORE_RATIO`` of the
+best original score). With a non-zero best that bar already drops anything
+more than ~40% redundant; this hard skip is the backstop when every score is 0
+(bar 0). On the G1 TEDx talk 4 of 5 clips were the same staged dialogue."""
+
+MIN_CONTENT_WORD_CHARS = 3
+"""Content words shorter than this ("ok", "go") are ignored for redundancy."""
 
 # Absorbs float noise when clip lengths are summed against the coverage cap.
 _COVERAGE_EPSILON = 1e-6
@@ -154,36 +166,73 @@ def clip_budget(duration: float) -> int:
     return min(max(budget, 1), DEFAULT_MAX_CLIPS)
 
 
+def content_words(text: str) -> set[str]:
+    """Lowercased content words of ``text``: the proposer's prompt-overlap
+    tokens (stopwords dropped, simple plurals stripped), without the ones
+    shorter than ``MIN_CONTENT_WORD_CHARS``."""
+    return {t for t in _content_tokens(text) if len(t) >= MIN_CONTENT_WORD_CHARS}
+
+
+def redundancy(words: set[str], kept: Sequence[set[str]]) -> float:
+    """Largest share of ``words`` already in one of the ``kept`` word sets:
+    ``max |A & B| / |A|``. 0 for empty ``words`` or nothing kept."""
+    if not words:
+        return 0.0
+    return max((len(words & k) / len(words) for k in kept), default=0.0)
+
+
 def select_discovered(
     segments: Sequence[ProposedSegment], duration: float
 ) -> list[ProposedSegment]:
     """Highlights of a ``duration``-second source, returned in start order.
 
-    Candidates scoring below ``relative_min_score`` are dropped. The rest are
-    taken greedily by score (ties: earliest start) until ``clip_budget`` clips
-    are kept, skipping a candidate that overlaps one already kept (touching
-    ends do not overlap) or that would take the kept clips past
-    ``MAX_COVERAGE`` of the source; the first (best) candidate is always kept.
+    Greedy, one clip per step, until ``clip_budget`` clips are kept. At each
+    step every remaining candidate gets an adjusted score,
+    ``score * (1 - redundancy)`` against the clips kept so far (MMR style),
+    and the highest adjusted score wins (ties: earliest start). A candidate is
+    out when it overlaps a kept clip (touching ends do not overlap), would
+    take the kept clips past ``MAX_COVERAGE`` of the source (the first clip
+    is exempt), is at least ``REDUNDANCY_SKIP`` redundant, or its adjusted
+    score is below ``relative_min_score`` (the bar from the best *original*
+    score). The first pick has nothing to repeat, so it is the best segment.
     """
     budget = clip_budget(duration)
     max_total = MAX_COVERAGE * duration
     bar = relative_min_score(segments)
-    ranked = sorted(
+    remaining = sorted(
         (s for s in segments if s.score >= bar),
         key=lambda s: (-s.score, s.start, s.end),
     )
+    words = {id(s): content_words(s.text) for s in remaining}
     picked: list[ProposedSegment] = []
+    kept_words: list[set[str]] = []
     total = 0.0
-    for seg in ranked:
-        if len(picked) >= budget:
+    while remaining and len(picked) < budget:
+        best: tuple[tuple[float, float, float], ProposedSegment] | None = None
+        eligible: list[ProposedSegment] = []
+        for seg in remaining:
+            if any(seg.start < p.end and p.start < seg.end for p in picked):
+                continue
+            if picked and total + (seg.end - seg.start) > max_total + _COVERAGE_EPSILON:
+                continue
+            red = redundancy(words[id(seg)], kept_words)
+            if red >= REDUNDANCY_SKIP:
+                continue
+            adjusted = round(seg.score * (1.0 - red), 9)
+            if adjusted < bar:
+                continue
+            # Every exclusion above only gets stricter as clips are kept.
+            eligible.append(seg)
+            key = (-adjusted, seg.start, seg.end)
+            if best is None or key < best[0]:
+                best = (key, seg)
+        if best is None:
             break
-        if any(seg.start < p.end and p.start < seg.end for p in picked):
-            continue
-        length = seg.end - seg.start
-        if picked and total + length > max_total + _COVERAGE_EPSILON:
-            continue
-        picked.append(seg)
-        total += length
+        chosen = best[1]
+        picked.append(chosen)
+        kept_words.append(words[id(chosen)])
+        total += chosen.end - chosen.start
+        remaining = [s for s in eligible if s is not chosen]
     return sorted(picked, key=lambda s: (s.start, s.end))
 
 
