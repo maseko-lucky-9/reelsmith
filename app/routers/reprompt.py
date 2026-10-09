@@ -4,9 +4,13 @@ Re-runs the segment proposer for an existing job with a new prompt
 and/or length range. Cheap — does not re-download or re-transcribe.
 
 Per the plan, the actual segment_proposer re-run is delegated to a
-background worker hook so this router stays small. We update the
-job's pipeline_options + prompt and emit a `JOB_REPROMPTED` event;
-the worker (or W3 scheduled refresh) picks it up.
+background worker hook so this router stays small. We record the new
+prompt and clip-length range; nothing re-runs the job yet (task T008).
+
+The job's stage switches (render, captions, transcription, ...) are never
+changed here: a later clip re-render reuses the saved options, and a
+persisted ``render=False``/``captions=False`` made it lose its captions
+(task T028 a2).
 """
 from __future__ import annotations
 
@@ -78,17 +82,7 @@ async def reprompt_job(
         options["target_length_min_seconds"] = lo
     if hi is not None:
         options["target_length_max_seconds"] = hi
-    # Reprompt = re-run segment proposer; everything else off so we don't
-    # re-download / re-transcribe.
-    options.update({
-        "transcription": False,
-        "captions": False,
-        "render": False,
-        "reframe": False,
-        "broll": False,
-        "thumbnail": False,
-        "segment_proposer": True,
-    })
+    # Only the length range is recorded; the stage switches stay as saved.
     job.pipeline_options = options
     job.status = "pending"
     job.updated_at = datetime.now(timezone.utc)
