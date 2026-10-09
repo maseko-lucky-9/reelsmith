@@ -19,7 +19,14 @@ def _slugify(name: str, fallback: str) -> str:
 
 
 def fetch_video_title(video_url: str) -> str:
-    ydl_opts = {"quiet": True, "extract_flat": True, "no_warnings": True}
+    # socket_timeout bounds each network read: this runs in a worker thread
+    # (asyncio.to_thread), which no asyncio timeout can stop.
+    ydl_opts = {
+        "quiet": True,
+        "extract_flat": True,
+        "no_warnings": True,
+        "socket_timeout": 10,
+    }
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(video_url, download=False)
         return info["title"]
