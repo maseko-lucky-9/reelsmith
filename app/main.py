@@ -5,6 +5,7 @@ import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import Depends, FastAPI
@@ -37,6 +38,7 @@ from app.routers import (
     xml_export,
 )
 from app.services import transcription_service
+from app.services.retention import sweep_expired_clips
 from app.settings import settings
 from app.workers.orchestrator import run_orchestrator
 
@@ -132,35 +134,20 @@ async def lifespan(app: FastAPI):
     retention_task: asyncio.Task | None = None
     if settings.job_store == "sql":
         async def _janitor():
-            import datetime
-            from sqlalchemy import update as sa_update
-            from app.db.models import ClipRecord
             from app.db.session import get_session_factory
 
             while True:
                 await asyncio.sleep(settings.retention_sweep_minutes * 60)
-                cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
-                    days=settings.retention_days
-                )
                 try:
-                    factory = get_session_factory()
-                    async with factory() as session:
-                        result = await session.execute(
-                            sa_update(ClipRecord)
-                            .where(ClipRecord.created_at < cutoff)
-                            .where(ClipRecord.retired == False)  # noqa: E712
-                            .values(retired=True)
-                            .returning(ClipRecord.output_path, ClipRecord.thumbnail_path)
-                        )
-                        for row in result.all():
-                            for path_field in row:
-                                if path_field:
-                                    p = Path(path_field)
-                                    if p.exists():
-                                        p.unlink(missing_ok=True)
-                        await session.commit()
-                except Exception:  # noqa: BLE001
-                    pass
+                    retired = await sweep_expired_clips(
+                        get_session_factory(),
+                        retention_days=settings.retention_days,
+                        now=datetime.now(UTC),
+                    )
+                    if retired:
+                        log.info("Retention: retired %d clip(s)", len(retired))
+                except Exception:  # noqa: BLE001 — keep the janitor alive
+                    log.exception("Retention sweep failed")
 
         retention_task = asyncio.create_task(_janitor())
 
