@@ -104,3 +104,25 @@ Source-of-truth probe was performed against `app/services/`, `app/routers/`, `ap
 - Phantom paths (predicted file does not exist AND is not a new-creation): none — all predicted edits are either to files confirmed present via `ls` of `app/services/`, `app/routers/`, `app/templates/`, `tests/unit/`, `tests/contract/`, or are explicitly new test/template files declared as additions.
 - Undeclared overlaps (two tasks share a predicted file but neither lists the other in Independence): none — each task touches a disjoint file set. Verified pairwise: T-01 (thumbnail_service), T-02 (brand_vocabulary tests-only), T-03 (voiceover_service), T-04 (xml_export_service + davinci template), T-05 (social_publish router), T-06 (animated_caption_service + timeline_render_service), T-07 (enhance_speech router). No file appears in two tasks.
 - Conftest convention detected: **Option B (hard-coded)** — `conftest.py` filters Docker containers via the literal string `label=pytest=reelsmith` and does not read `REELSMITH_PYTEST_LABEL` or any env var. Factory orchestrator should hardcode `pytest=reelsmith` when starting test containers, or patch conftest to read an env var first.
+
+---
+
+## Known issues (found during the perf and dependency upgrade, PRs #16–#25; not fixed)
+
+Each was observed on `main` at `3b402e5` and needs an owner decision.
+
+**Bugs**
+- Like/dislike never persists: `_toggle` in `app/routers/clips.py` is an async function that is never awaited.
+- Re-render is broken: it enqueues `url: ""` under the original job id, which would flip a completed job to failed.
+- Bulk export (`app/routers/bulk_export.py`) lists retired clips in its manifest even though their files were deleted.
+
+**Dead or unwired code**
+- Settings that no code reads: `scheduler_enabled`, `scheduler_poll_seconds`, `scheduler_max_concurrent`, `tiktok_profile_url_base`, `tiktok_node_bin`, `pexels_api_key`, `broll_cache_dir`, `ltx_model_path`, `ltx_use_mps`, `ltx_num_frames`, `stage_timeout_seconds`.
+- `PublishScheduler` is never started by `app/main.py`; `app/sse_heartbeat.py` is used by no route.
+
+**Tooling**
+- `alembic check` reports 13 index-name differences between migrations and models; offline `alembic upgrade --sql` fails on a data migration.
+- 4 tests in `tests/unit/test_orchestrator_concurrency.py` fail on Python 3.12 (CI and docs are 3.14 only).
+- Linux golden caption hashes are unseeded, so CI skips them; the PNG-equality tests are the cross-platform guard.
+- ruff has no `target-version` (reports F821 on `ExceptionGroup`).
+- TypeScript is held at 6.0.x: typescript-eslint needs a programmatic API that TS 7.0 lacks (revisit at 7.1+).

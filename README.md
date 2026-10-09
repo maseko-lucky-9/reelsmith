@@ -21,8 +21,8 @@ URLs are routed via a `PlatformAdapter` strategy registry (`app/services/platfor
 # 1. Start Postgres
 docker compose up -d postgres
 
-# 2. Install Python deps
-python -m venv .venv-mac && source .venv-mac/bin/activate
+# 2. Install Python deps (Python 3.14 required; 3.12 is unsupported, see CLAUDE.md)
+python3.14 -m venv .venv-mac && source .venv-mac/bin/activate
 pip install -r requirements.txt
 
 # 3. Start API (memory store for dev)
