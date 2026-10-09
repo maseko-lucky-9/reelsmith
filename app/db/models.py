@@ -218,7 +218,13 @@ PUBLISH_JOB_STATUSES: tuple[str, ...] = (
 
 
 class PublishJob(Base):
-    """Scheduled or immediate publish to a social platform (W1.4)."""
+    """Immediate publish to a social platform (W1.4).
+
+    ``schedule_at`` is unused: scheduled publishing was dropped (FR-032,
+    T010). The column stays because migrations are additive-only
+    (constitution V); rows written before the drop may still carry it
+    with ``status='pending'``, which nothing advances.
+    """
 
     __tablename__ = "publish_jobs"
 
@@ -244,6 +250,7 @@ class PublishJob(Base):
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default="pending", index=True
     )
+    # Unused since FR-032 was dropped; kept for additive-only migrations.
     schedule_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
