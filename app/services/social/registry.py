@@ -6,10 +6,9 @@ per-platform: ``YTVIDEO_SOCIAL_PROVIDER_YOUTUBE=real``).
 """
 from __future__ import annotations
 
-import os
-
 from app.services.social.base import PlatformAdapter, UnsupportedPlatformError
 from app.services.social.stub import StubAdapter
+from app.settings import settings
 
 SUPPORTED: tuple[str, ...] = ("youtube", "tiktok", "instagram", "linkedin", "x")
 
@@ -19,10 +18,10 @@ def supported_platforms() -> tuple[str, ...]:
 
 
 def _provider_for(platform: str) -> str:
-    per_platform = os.environ.get(f"YTVIDEO_SOCIAL_PROVIDER_{platform.upper()}", "")
+    per_platform = getattr(settings, f"social_provider_{platform}").strip()
     if per_platform:
-        return per_platform.strip().lower()
-    return os.environ.get("YTVIDEO_SOCIAL_PROVIDER", "stub").strip().lower()
+        return per_platform.lower()
+    return settings.social_provider.strip().lower()
 
 
 def get_adapter(platform: str) -> PlatformAdapter:

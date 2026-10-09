@@ -20,6 +20,7 @@ from app.domain.events import EventType
 from app.services import token_vault
 from app.services.social.base import PublishRequest, PublishResult
 from app.services.social_publish_service import run_publish_job
+from app.settings import settings
 
 # ── Check whether Agent B's bus= param exists ────────────────────────────────
 
@@ -131,7 +132,7 @@ async def _seed(
 @pytest.mark.asyncio
 async def test_emits_queued_then_completed(factory, monkeypatch, tmp_path):
     """PUBLISH_QUEUED then PUBLISH_COMPLETED are emitted on a successful publish."""
-    monkeypatch.setenv("YTVIDEO_OAUTH_ENCRYPT_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(settings, "oauth_encrypt_key", Fernet.generate_key().decode())
     output = tmp_path / "clip.mp4"
     output.write_bytes(b"x")
 
@@ -169,7 +170,7 @@ async def test_emits_queued_then_completed(factory, monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_emits_failed_on_error(factory, monkeypatch, tmp_path):
     """PUBLISH_FAILED is emitted when the adapter raises."""
-    monkeypatch.setenv("YTVIDEO_OAUTH_ENCRYPT_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(settings, "oauth_encrypt_key", Fernet.generate_key().decode())
     output = tmp_path / "clip.mp4"
     output.write_bytes(b"x")
 
@@ -196,7 +197,7 @@ async def test_emits_failed_on_error(factory, monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_no_token_in_payload(factory, monkeypatch, tmp_path):
     """SECURITY: the decrypted access_token value must not appear in any event payload."""
-    monkeypatch.setenv("YTVIDEO_OAUTH_ENCRYPT_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(settings, "oauth_encrypt_key", Fernet.generate_key().decode())
     output = tmp_path / "clip.mp4"
     output.write_bytes(b"x")
 
@@ -225,7 +226,7 @@ async def test_no_token_in_payload(factory, monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_all_fail_paths_emit_failed_no_output_path(factory, monkeypatch):
     """PUBLISH_FAILED emitted when clip has no output_path."""
-    monkeypatch.setenv("YTVIDEO_OAUTH_ENCRYPT_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(settings, "oauth_encrypt_key", Fernet.generate_key().decode())
     pj_id = await _seed(factory, output_path=None)
     bus = FakeBus()
 
@@ -244,7 +245,7 @@ async def test_all_fail_paths_emit_failed_no_output_path(factory, monkeypatch):
 @pytest.mark.asyncio
 async def test_all_fail_paths_emit_failed_adapter_error(factory, monkeypatch, tmp_path):
     """PUBLISH_FAILED emitted when adapter.publish() raises."""
-    monkeypatch.setenv("YTVIDEO_OAUTH_ENCRYPT_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(settings, "oauth_encrypt_key", Fernet.generate_key().decode())
     output = tmp_path / "clip.mp4"
     output.write_bytes(b"x")
 
@@ -271,7 +272,7 @@ async def test_all_fail_paths_emit_failed_adapter_error(factory, monkeypatch, tm
 @pytest.mark.asyncio
 async def test_failed_event_not_emitted_on_success(factory, monkeypatch, tmp_path):
     """PUBLISH_FAILED must NOT be emitted when the job succeeds."""
-    monkeypatch.setenv("YTVIDEO_OAUTH_ENCRYPT_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(settings, "oauth_encrypt_key", Fernet.generate_key().decode())
     output = tmp_path / "clip.mp4"
     output.write_bytes(b"x")
 
@@ -298,7 +299,7 @@ async def test_failed_event_not_emitted_on_success(factory, monkeypatch, tmp_pat
 @pytest.mark.asyncio
 async def test_completed_event_not_emitted_on_failure(factory, monkeypatch, tmp_path):
     """PUBLISH_COMPLETED must NOT be emitted when the adapter raises."""
-    monkeypatch.setenv("YTVIDEO_OAUTH_ENCRYPT_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(settings, "oauth_encrypt_key", Fernet.generate_key().decode())
     output = tmp_path / "clip.mp4"
     output.write_bytes(b"x")
 
@@ -331,7 +332,7 @@ async def test_emits_failed_on_decrypt_error(factory, monkeypatch, tmp_path):
     decrypt-fail branch in social_publish_service.py.
     """
     key_a = Fernet.generate_key().decode()
-    monkeypatch.setenv("YTVIDEO_OAUTH_ENCRYPT_KEY", key_a)
+    monkeypatch.setattr(settings, "oauth_encrypt_key", key_a)
     output = tmp_path / "clip.mp4"
     output.write_bytes(b"x")
 
@@ -339,7 +340,7 @@ async def test_emits_failed_on_decrypt_error(factory, monkeypatch, tmp_path):
 
     # Switch to a different key so the stored ciphertext is unreadable
     key_b = Fernet.generate_key().decode()
-    monkeypatch.setenv("YTVIDEO_OAUTH_ENCRYPT_KEY", key_b)
+    monkeypatch.setattr(settings, "oauth_encrypt_key", key_b)
     token_vault.reset_for_tests()
 
     bus = FakeBus()
@@ -359,10 +360,10 @@ async def test_emits_failed_on_decrypt_error(factory, monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_emits_failed_on_unsupported_platform(factory, monkeypatch, tmp_path):
     """PUBLISH_FAILED emitted when the platform has no live adapter."""
-    monkeypatch.setenv("YTVIDEO_OAUTH_ENCRYPT_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(settings, "oauth_encrypt_key", Fernet.generate_key().decode())
     # Ensure we use the stub provider (not a per-platform real override) so
     # "unsupported_xyz" hits the UnsupportedPlatformError branch.
-    monkeypatch.delenv("YTVIDEO_SOCIAL_PROVIDER", raising=False)
+    monkeypatch.setattr(settings, "social_provider", "stub")
     output = tmp_path / "clip.mp4"
     output.write_bytes(b"x")
 

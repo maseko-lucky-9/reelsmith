@@ -15,6 +15,7 @@ from app.services import (
     token_vault,
     webhook_dispatcher as wd,
 )
+from app.settings import settings
 
 
 @pytest.fixture
@@ -28,7 +29,7 @@ async def factory():
 
 @pytest.fixture(autouse=True)
 def _vault_key(monkeypatch):
-    monkeypatch.setenv("YTVIDEO_OAUTH_ENCRYPT_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(settings, "oauth_encrypt_key", Fernet.generate_key().decode())
     token_vault.reset_for_tests()
     yield
     token_vault.reset_for_tests()

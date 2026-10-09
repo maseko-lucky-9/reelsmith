@@ -6,6 +6,8 @@ import os
 import pytest
 from cryptography.fernet import Fernet
 
+from app.settings import settings
+
 
 @pytest.fixture(autouse=True)
 def _reset_vault():
@@ -17,7 +19,7 @@ def _reset_vault():
 
 def test_round_trip_with_configured_key(monkeypatch):
     key = Fernet.generate_key().decode()
-    monkeypatch.setenv("YTVIDEO_OAUTH_ENCRYPT_KEY", key)
+    monkeypatch.setattr(settings, "oauth_encrypt_key", key)
     from app.services import token_vault
 
     ct = token_vault.encrypt("hunter2")
@@ -28,7 +30,7 @@ def test_round_trip_with_configured_key(monkeypatch):
 def test_bytes_input_round_trip(monkeypatch):
     """OAuth tokens are ASCII; encrypt accepts bytes for symmetry but
     decrypt returns str (utf-8 decoded), matching real-world usage."""
-    monkeypatch.setenv("YTVIDEO_OAUTH_ENCRYPT_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(settings, "oauth_encrypt_key", Fernet.generate_key().decode())
     from app.services import token_vault
 
     ct = token_vault.encrypt(b"ya29.bearer-token")
@@ -36,7 +38,7 @@ def test_bytes_input_round_trip(monkeypatch):
 
 
 def test_ephemeral_key_when_env_missing(monkeypatch):
-    monkeypatch.delenv("YTVIDEO_OAUTH_ENCRYPT_KEY", raising=False)
+    monkeypatch.setattr(settings, "oauth_encrypt_key", None)
     from app.services import token_vault
 
     ct = token_vault.encrypt("ephemeral")
@@ -45,7 +47,7 @@ def test_ephemeral_key_when_env_missing(monkeypatch):
 
 
 def test_decrypt_invalid_ciphertext_raises(monkeypatch):
-    monkeypatch.setenv("YTVIDEO_OAUTH_ENCRYPT_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(settings, "oauth_encrypt_key", Fernet.generate_key().decode())
     from app.services import token_vault
 
     with pytest.raises(ValueError):
@@ -53,7 +55,7 @@ def test_decrypt_invalid_ciphertext_raises(monkeypatch):
 
 
 def test_encrypt_none_raises(monkeypatch):
-    monkeypatch.setenv("YTVIDEO_OAUTH_ENCRYPT_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(settings, "oauth_encrypt_key", Fernet.generate_key().decode())
     from app.services import token_vault
 
     with pytest.raises(ValueError):
@@ -64,11 +66,11 @@ def test_two_keys_produce_different_ciphertext(monkeypatch):
     """Sanity: rotating the key invalidates old ciphertexts."""
     from app.services import token_vault
 
-    monkeypatch.setenv("YTVIDEO_OAUTH_ENCRYPT_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(settings, "oauth_encrypt_key", Fernet.generate_key().decode())
     ct1 = token_vault.encrypt("rotate-me")
 
     token_vault.reset_for_tests()
-    monkeypatch.setenv("YTVIDEO_OAUTH_ENCRYPT_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(settings, "oauth_encrypt_key", Fernet.generate_key().decode())
 
     with pytest.raises(ValueError):
         token_vault.decrypt(ct1)

@@ -22,6 +22,7 @@ from app.services import (
     scheduler_service as sch,
     share_link_service as sl,
 )
+from app.settings import settings
 
 
 @pytest.fixture
@@ -170,7 +171,7 @@ async def test_analytics_aggregate_empty(factory):
 
 
 async def test_share_link_round_trip(factory, monkeypatch):
-    monkeypatch.setenv("YTVIDEO_SHARE_LINK_SECRET", "test-secret-123")
+    monkeypatch.setattr(settings, "share_link_secret", "test-secret-123")
     _, clip_id, _ = await _seed_publish_job(factory)
 
     async with factory() as session:
@@ -181,14 +182,14 @@ async def test_share_link_round_trip(factory, monkeypatch):
 
 
 async def test_share_link_expired(monkeypatch):
-    monkeypatch.setenv("YTVIDEO_SHARE_LINK_SECRET", "x")
+    monkeypatch.setattr(settings, "share_link_secret", "x")
     past = datetime.now(timezone.utc) - timedelta(hours=1)
     token = sl._build_token("clip-1", past, "x")
     assert sl.verify_token(token) is None
 
 
 async def test_share_link_tampered_signature(monkeypatch):
-    monkeypatch.setenv("YTVIDEO_SHARE_LINK_SECRET", "x")
+    monkeypatch.setattr(settings, "share_link_secret", "x")
     future = datetime.now(timezone.utc) + timedelta(hours=1)
     token = sl._build_token("clip-1", future, "x")
     bad = token[:-3] + "AAA"
@@ -196,14 +197,14 @@ async def test_share_link_tampered_signature(monkeypatch):
 
 
 async def test_share_link_wrong_prefix(monkeypatch):
-    monkeypatch.setenv("YTVIDEO_SHARE_LINK_SECRET", "x")
+    monkeypatch.setattr(settings, "share_link_secret", "x")
     future = datetime.now(timezone.utc) + timedelta(hours=1)
     token = sl._build_token("clip-1", future, "x").replace("rs.", "xx.", 1)
     assert sl.verify_token(token) is None
 
 
 async def test_share_link_revoke(factory, monkeypatch):
-    monkeypatch.setenv("YTVIDEO_SHARE_LINK_SECRET", "x")
+    monkeypatch.setattr(settings, "share_link_secret", "x")
     _, clip_id, _ = await _seed_publish_job(factory)
     async with factory() as session:
         link = await sl.create_link(session, clip_id)

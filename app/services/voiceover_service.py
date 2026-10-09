@@ -19,13 +19,13 @@ The Piper path requires:
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 import struct
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Sequence
 
 from app.domain.events import EventType, emit_from_sync
+from app.settings import settings
 
 if TYPE_CHECKING:  # pragma: no cover - import only for typing
     from app.bus.event_bus import AsyncEventBus
@@ -134,7 +134,7 @@ def synthesize(
             raise VoiceoverError(
                 "piper binary not found on PATH — install piper-tts or add it to PATH"
             )
-        piper_model = os.environ.get("YTVIDEO_PIPER_MODEL", "").strip()
+        piper_model = settings.piper_model.strip()
         if not piper_model:
             raise VoiceoverError(
                 "YTVIDEO_PIPER_MODEL is not set — provide a path to the .onnx model file"

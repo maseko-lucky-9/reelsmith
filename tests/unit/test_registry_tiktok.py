@@ -13,6 +13,7 @@ import pytest
 
 from app.services.social import UnsupportedPlatformError, get_adapter
 from app.services.social.stub import StubAdapter
+from app.settings import settings
 
 # ── Check Agent A adapter availability ───────────────────────────────────────
 
@@ -50,8 +51,8 @@ def test_tiktok_provider_resolution(monkeypatch, provider, expected_type_name, r
         pytest.skip("requires Agent A N8nTikTokAdapter (app.services.social.n8n_tiktok)")
 
     # Clear the global provider so per-platform env has full control
-    monkeypatch.delenv("YTVIDEO_SOCIAL_PROVIDER", raising=False)
-    monkeypatch.setenv("YTVIDEO_SOCIAL_PROVIDER_TIKTOK", provider)
+    monkeypatch.setattr(settings, "social_provider", "stub")
+    monkeypatch.setattr(settings, "social_provider_tiktok", provider)
 
     adapter = get_adapter("tiktok")
     assert type(adapter).__name__ == expected_type_name, (
@@ -62,8 +63,8 @@ def test_tiktok_provider_resolution(monkeypatch, provider, expected_type_name, r
 
 def test_tiktok_default_is_stub_when_no_env(monkeypatch):
     """Without any YTVIDEO_SOCIAL_PROVIDER* vars, tiktok defaults to stub."""
-    monkeypatch.delenv("YTVIDEO_SOCIAL_PROVIDER", raising=False)
-    monkeypatch.delenv("YTVIDEO_SOCIAL_PROVIDER_TIKTOK", raising=False)
+    monkeypatch.setattr(settings, "social_provider", "stub")
+    monkeypatch.setattr(settings, "social_provider_tiktok", "")
 
     adapter = get_adapter("tiktok")
     assert isinstance(adapter, StubAdapter)
@@ -73,8 +74,8 @@ def test_tiktok_default_is_stub_when_no_env(monkeypatch):
 def test_tiktok_global_real_provider_returns_cookie(monkeypatch):
     """YTVIDEO_SOCIAL_PROVIDER=real should resolve tiktok to TikTokCookieAdapter
     (not fall back to stub the way legacy code did)."""
-    monkeypatch.setenv("YTVIDEO_SOCIAL_PROVIDER", "real")
-    monkeypatch.delenv("YTVIDEO_SOCIAL_PROVIDER_TIKTOK", raising=False)
+    monkeypatch.setattr(settings, "social_provider", "real")
+    monkeypatch.setattr(settings, "social_provider_tiktok", "")
 
     adapter = get_adapter("tiktok")
     # After Agent A ships, 'real' for tiktok resolves to TikTokCookieAdapter.
@@ -88,9 +89,9 @@ def test_tiktok_global_real_provider_returns_cookie(monkeypatch):
 
 def test_youtube_resolution_unaffected_by_tiktok_env(monkeypatch):
     """Setting YTVIDEO_SOCIAL_PROVIDER_TIKTOK must not affect youtube resolution."""
-    monkeypatch.delenv("YTVIDEO_SOCIAL_PROVIDER", raising=False)
-    monkeypatch.delenv("YTVIDEO_SOCIAL_PROVIDER_YOUTUBE", raising=False)
-    monkeypatch.setenv("YTVIDEO_SOCIAL_PROVIDER_TIKTOK", "cookie")
+    monkeypatch.setattr(settings, "social_provider", "stub")
+    monkeypatch.setattr(settings, "social_provider_youtube", "")
+    monkeypatch.setattr(settings, "social_provider_tiktok", "cookie")
 
     yt = get_adapter("youtube")
     # No YTVIDEO_SOCIAL_PROVIDER_YOUTUBE set -> falls back to global -> stub
@@ -102,8 +103,8 @@ def test_youtube_real_provider_returns_youtube_adapter(monkeypatch):
     """Per-platform YTVIDEO_SOCIAL_PROVIDER_YOUTUBE=real returns YouTubeAdapter."""
     from app.services.social.youtube import YouTubeAdapter
 
-    monkeypatch.setenv("YTVIDEO_SOCIAL_PROVIDER_YOUTUBE", "real")
-    monkeypatch.setenv("YTVIDEO_SOCIAL_PROVIDER_TIKTOK", "cookie")
+    monkeypatch.setattr(settings, "social_provider_youtube", "real")
+    monkeypatch.setattr(settings, "social_provider_tiktok", "cookie")
 
     yt = get_adapter("youtube")
     assert isinstance(yt, YouTubeAdapter)
@@ -111,7 +112,7 @@ def test_youtube_real_provider_returns_youtube_adapter(monkeypatch):
 
 def test_unknown_platform_still_raises(monkeypatch):
     """Adding tiktok logic must not suppress UnsupportedPlatformError."""
-    monkeypatch.setenv("YTVIDEO_SOCIAL_PROVIDER_TIKTOK", "cookie")
+    monkeypatch.setattr(settings, "social_provider_tiktok", "cookie")
     with pytest.raises(UnsupportedPlatformError):
         get_adapter("myspace")
 
@@ -124,8 +125,8 @@ def test_n8n_adapter_importable(monkeypatch):
     if not HAS_N8N_ADAPTER:
         pytest.skip("requires Agent A N8nTikTokAdapter (app.services.social.n8n_tiktok)")
 
-    monkeypatch.delenv("YTVIDEO_SOCIAL_PROVIDER", raising=False)
-    monkeypatch.setenv("YTVIDEO_SOCIAL_PROVIDER_TIKTOK", "n8n")
+    monkeypatch.setattr(settings, "social_provider", "stub")
+    monkeypatch.setattr(settings, "social_provider_tiktok", "n8n")
 
     # Should not raise — even without a configured sidecar URL
     adapter = get_adapter("tiktok")

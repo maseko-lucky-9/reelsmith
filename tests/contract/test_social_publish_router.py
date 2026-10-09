@@ -13,12 +13,13 @@ from app.db.models import ClipRecord, JobRecord
 from app.db.session import get_session
 from app.main import create_app
 from app.services import token_vault
+from app.settings import settings
 
 
 @pytest.fixture(autouse=True)
 def _vault_key(monkeypatch):
-    monkeypatch.setenv("YTVIDEO_OAUTH_ENCRYPT_KEY", Fernet.generate_key().decode())
-    monkeypatch.setenv("YTVIDEO_SOCIAL_PROVIDER", "stub")
+    monkeypatch.setattr(settings, "oauth_encrypt_key", Fernet.generate_key().decode())
+    monkeypatch.setattr(settings, "social_provider", "stub")
     token_vault.reset_for_tests()
     yield
     token_vault.reset_for_tests()
@@ -354,12 +355,7 @@ async def test_tiktok_connect_412_when_no_encrypt_key(monkeypatch):
     This test explicitly removes it and resets the vault so has_stable_key()
     returns False, triggering the 412 security gate.
     """
-    monkeypatch.delenv("YTVIDEO_OAUTH_ENCRYPT_KEY", raising=False)
-    # Also clear settings.oauth_encrypt_key — pydantic-settings reads .env into
-    # settings fields (not os.environ), so delenv alone isn't enough now that
-    # has_stable_key() checks both sources.
-    from app.settings import settings as _settings
-    monkeypatch.setattr(_settings, "oauth_encrypt_key", None)
+    monkeypatch.setattr(settings, "oauth_encrypt_key", None)
     token_vault.reset_for_tests()
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
