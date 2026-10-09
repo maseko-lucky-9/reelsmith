@@ -53,7 +53,7 @@ The input was a 75.9 s 1920x1080 video with 3 chapters, transcribed with real Wh
 ### Caption-identity guards
 
 - **PNG equality (platform-independent).** `tests/unit/test_caption_track.py` asserts that every cropped caption PNG equals the matching window of the full `create_subtitle_image` canvas, pixel for pixel.
-- **Golden hashes.** `tests/unit/test_subtitle_image_golden.py` stores the sha256 of the caption pixels, keyed by `(raqm available, platform.system(), platform.machine())`. Only `(True, "Darwin", "arm64")` is seeded. Other platforms skip and print the hash they computed.
+- **Golden hashes.** `tests/unit/test_subtitle_image_golden.py` stores the sha256 of the caption pixels, keyed by `(raqm available, platform.system(), platform.machine())`. `(True, "Darwin", "arm64")` and `(True, "Linux", "x86_64")` (the CI runner) are seeded. Other platforms skip and print the hash they computed.
 - **A/V sync.** `tests/sync_checker.py` decodes renders of the P0 fixtures (frame-index bit blocks and an audio click track) to check sync.
 
 ### Dependency notes

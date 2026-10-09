@@ -37,7 +37,7 @@ Format: `- [ ] T### [FR-xxx|E#] [Principle] description. Proving test → commit
 
 - [ ] T018 `alembic check` reports 13 drift operations between migrations and models (11 index add/remove, 2 unique-constraint removals on `clip_edits` and `social_accounts`); `alembic upgrade --sql` fails on a data migration. Test: `alembic check` exits 0 → `fix(db): align migrations with models`
 - [ ] T019 Skip or fix the 4 tests in `tests/unit/test_orchestrator_concurrency.py` that fail on Python 3.12 (CI and docs are 3.14 only). → `test: mark concurrency tests 3.14-only`
-- [ ] T020 Seed Linux golden caption hashes in `tests/unit/test_subtitle_image_golden.py` (CI skips them today; the PNG-equality tests are the guard). → `test: seed linux caption goldens`
+- [x] T020 (done: `(True, "Linux", "x86_64")` seeded from the CI runner; the basic-layout Linux key is not seeded because CI has raqm) Seed Linux golden caption hashes in `tests/unit/test_subtitle_image_golden.py` (CI skips them today; the PNG-equality tests are the guard). → `test: seed linux caption goldens`
 - [ ] T021 Set ruff `target-version` (reports F821 on `ExceptionGroup`). → `chore(lint): set ruff target-version`
 - [ ] T022 Revisit the TypeScript hold at 6.0.x when typescript-eslint supports 7.1+. → `chore(web): upgrade TypeScript`
 - [ ] T023 Add a "superseded by ADR-004" note to ADR-003 decision 2 (it names MoviePy). `docs/wave-3-gate.md` is a dated gate record: do not edit it (it says 12 revisions at `:37` and `:94`; `46c8200` actually contained 14 migration files; there are 16 now).
