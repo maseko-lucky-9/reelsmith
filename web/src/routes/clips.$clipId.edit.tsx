@@ -20,6 +20,7 @@ import {
 } from 'lucide-react'
 import { rootRoute } from './root'
 import { api } from '@/api/client'
+import { apiErrorDetail } from '@/lib/apiErrorDetail'
 import { toast } from 'sonner'
 import { useTimelineEditor } from '@/hooks/useTimelineEditor'
 import { MultiTrackTimeline } from '@/components/editor/MultiTrackTimeline'
@@ -71,7 +72,10 @@ export function ClipEditorPage() {
   const rerenderMutation = useMutation({
     mutationFn: () => api.rerenderClip(clipId, { reframe_provider: 'letterbox' }),
     onSuccess: () => toast.success('Re-render queued'),
-    onError: () => toast.error('Failed to queue re-render'),
+    onError: (err) => {
+      const detail = apiErrorDetail(err)
+      toast.error(detail ? `Cannot re-render: ${detail}` : 'Failed to queue re-render')
+    },
   })
 
   const words: Array<{ word: string; start: number; end: number }> =
