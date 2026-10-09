@@ -11,6 +11,7 @@ import pytest
 from app.bus.event_bus import AsyncEventBus
 from app.domain.events import EventType
 from app.services import voiceover_service as svc
+from app.settings import settings
 
 
 def test_stub_synth_writes_wav(tmp_path):
@@ -79,7 +80,7 @@ def test_piper_argv_shape(tmp_path, monkeypatch):
     captured_argv: list[tuple[str, ...]] = []
     captured_stdin: list[str] = []
 
-    monkeypatch.setenv("YTVIDEO_PIPER_MODEL", "/models/en_US-lessac-medium.onnx")
+    monkeypatch.setattr(settings, "piper_model", "/models/en_US-lessac-medium.onnx")
 
     def fake(argv, stdin_text=""):
         captured_argv.append(tuple(argv))
@@ -105,7 +106,7 @@ def test_piper_argv_shape(tmp_path, monkeypatch):
 
 def test_piper_missing_binary_raises(tmp_path, monkeypatch):
     """When piper binary is absent, VoiceoverError with 'piper' in message."""
-    monkeypatch.setenv("YTVIDEO_PIPER_MODEL", "/models/en_US-lessac-medium.onnx")
+    monkeypatch.setattr(settings, "piper_model", "/models/en_US-lessac-medium.onnx")
 
     with mock.patch("shutil.which", return_value=None):
         with pytest.raises(svc.VoiceoverError, match="piper"):
@@ -114,7 +115,7 @@ def test_piper_missing_binary_raises(tmp_path, monkeypatch):
 
 def test_piper_missing_model_env_raises(tmp_path, monkeypatch):
     """When YTVIDEO_PIPER_MODEL is unset, VoiceoverError before invocation."""
-    monkeypatch.delenv("YTVIDEO_PIPER_MODEL", raising=False)
+    monkeypatch.setattr(settings, "piper_model", "")
 
     with mock.patch("shutil.which", return_value="/usr/bin/piper"):
         with pytest.raises(svc.VoiceoverError, match="YTVIDEO_PIPER_MODEL"):
@@ -123,7 +124,7 @@ def test_piper_missing_model_env_raises(tmp_path, monkeypatch):
 
 def test_piper_missing_output_raises(tmp_path, monkeypatch):
     """When piper produces no file, VoiceoverError is raised."""
-    monkeypatch.setenv("YTVIDEO_PIPER_MODEL", "/models/en_US-lessac-medium.onnx")
+    monkeypatch.setattr(settings, "piper_model", "/models/en_US-lessac-medium.onnx")
 
     def fake(argv, stdin_text=""):
         # produce nothing

@@ -12,11 +12,12 @@ in the column ``access_token_enc`` / ``refresh_token_enc``.
 from __future__ import annotations
 
 import logging
-import os
 import threading
 from functools import lru_cache
 
 from cryptography.fernet import Fernet, InvalidToken
+
+from app.settings import settings
 
 log = logging.getLogger(__name__)
 
@@ -25,17 +26,8 @@ _EPHEMERAL_KEY: bytes | None = None
 
 
 def _configured_key() -> str:
-    """Return the raw key string from os.environ OR pydantic settings (whichever is set)."""
-    from_env = os.environ.get("YTVIDEO_OAUTH_ENCRYPT_KEY", "").strip()
-    if from_env:
-        return from_env
-    # pydantic-settings reads .env into settings fields but NOT into os.environ,
-    # so we also check settings.oauth_encrypt_key as a fallback.
-    try:
-        from app.settings import settings as _s  # lazy — avoids circular at module load
-        return (_s.oauth_encrypt_key or "").strip()
-    except Exception:
-        return ""
+    """Return the configured key: ``settings.oauth_encrypt_key`` (env or .env)."""
+    return (settings.oauth_encrypt_key or "").strip()
 
 
 def _resolve_key() -> bytes:
@@ -84,12 +76,12 @@ def decrypt(ciphertext: bytes) -> str:
 
 
 def has_stable_key() -> bool:
-    """True when YTVIDEO_OAUTH_ENCRYPT_KEY is set in the environment (non-empty).
+    """True when YTVIDEO_OAUTH_ENCRYPT_KEY is configured (env or .env, non-empty).
 
     Returns False when the vault is using the ephemeral in-process fallback key.
     Call this before storing cookies — ephemeral mode means tokens die on
-    restart. Reads the same source as ``_resolve_key`` (the raw environment,
-    NOT app.settings) so the two never disagree.
+    restart. Reads the same source as ``_resolve_key`` (``settings``) so the
+    two never disagree.
     """
     return bool(_configured_key())
 

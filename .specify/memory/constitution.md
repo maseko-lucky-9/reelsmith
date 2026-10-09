@@ -52,8 +52,6 @@ Source: `docs/decisions/001–004`, `CLAUDE.md`.
 
 | # | Principle | Where | Detail | Tracked as |
 |---|---|---|---|---|
-| E1 | I | `app/main.py:73` | `SKIP_ALEMBIC` is unprefixed | tasks T001 |
-| E2 | I | `app/logging_config.py:18`, `app/services/voiceover_service.py:137`, `token_vault.py:29`, `share_link_service.py:51`, `social/registry.py:22,25` | Prefixed variables read from `os.environ` instead of `settings`; `YTVIDEO_LOG_LEVEL`, `YTVIDEO_PIPER_MODEL`, `YTVIDEO_SHARE_LINK_SECRET` and `YTVIDEO_SOCIAL_PROVIDER[_<PLATFORM>]` are not declared in `Settings` at all | tasks T002 |
 | E3 | III | `app/services/platforms/_yt_dlp_base.py:17` | Format `bestvideo+bestaudio` makes yt-dlp merge with whichever `ffmpeg` is on `PATH`; no `ffmpeg_location` is set | tasks T003 |
 | E4 | III | `app/routers/jobs.py:59,87` | Shells out to the `yt-dlp` CLI on `PATH` | tasks T003 |
 

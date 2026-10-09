@@ -21,6 +21,7 @@ from app.services.social import (
 from app.services.social.stub import StubAdapter
 from app.services.social.youtube import YouTubeAdapter
 from app.services.social_publish_service import run_publish_job
+from app.settings import settings
 
 
 # ── Registry ────────────────────────────────────────────────────────────────
@@ -36,16 +37,17 @@ def test_get_adapter_unknown_raises():
 
 
 def test_get_adapter_default_is_stub(monkeypatch):
-    monkeypatch.delenv("YTVIDEO_SOCIAL_PROVIDER", raising=False)
-    monkeypatch.delenv("YTVIDEO_SOCIAL_PROVIDER_YOUTUBE", raising=False)
+    monkeypatch.setattr(settings, "social_provider", "stub")
+    monkeypatch.setattr(settings, "social_provider_youtube", "")
     a = get_adapter("youtube")
     assert isinstance(a, StubAdapter)
     assert a.platform == "youtube"
 
 
 def test_get_adapter_per_platform_override(monkeypatch):
-    monkeypatch.setenv("YTVIDEO_SOCIAL_PROVIDER", "stub")
-    monkeypatch.setenv("YTVIDEO_SOCIAL_PROVIDER_YOUTUBE", "real")
+    monkeypatch.setattr(settings, "social_provider", "stub")
+    monkeypatch.setattr(settings, "social_provider_youtube", "real")
+    monkeypatch.setattr(settings, "social_provider_tiktok", "")
     yt = get_adapter("youtube")
     assert isinstance(yt, YouTubeAdapter)
     # Other platforms still stub.
@@ -54,7 +56,8 @@ def test_get_adapter_per_platform_override(monkeypatch):
 
 def test_get_adapter_real_for_unimplemented_falls_back_to_stub(monkeypatch):
     """Unimplemented live adapters fall back to stub so dashboard keeps working."""
-    monkeypatch.setenv("YTVIDEO_SOCIAL_PROVIDER", "real")
+    monkeypatch.setattr(settings, "social_provider", "real")
+    monkeypatch.setattr(settings, "social_provider_tiktok", "")
     a = get_adapter("tiktok")
     assert isinstance(a, StubAdapter)
 
@@ -179,7 +182,7 @@ async def _seed(factory, output_path: str | None) -> str:
 
 
 async def test_run_publish_job_happy_path(factory, tmp_path, monkeypatch):
-    monkeypatch.setenv("YTVIDEO_OAUTH_ENCRYPT_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(settings, "oauth_encrypt_key", Fernet.generate_key().decode())
     output = tmp_path / "clip.mp4"
     output.write_bytes(b"x")
     pj_id = await _seed(factory, output_path=str(output))
@@ -195,7 +198,7 @@ async def test_run_publish_job_happy_path(factory, tmp_path, monkeypatch):
 
 
 async def test_run_publish_job_clip_without_output_fails(factory, monkeypatch):
-    monkeypatch.setenv("YTVIDEO_OAUTH_ENCRYPT_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(settings, "oauth_encrypt_key", Fernet.generate_key().decode())
     pj_id = await _seed(factory, output_path=None)
 
     async with factory() as session:
@@ -205,7 +208,7 @@ async def test_run_publish_job_clip_without_output_fails(factory, monkeypatch):
 
 
 async def test_run_publish_job_idempotent_on_terminal(factory, monkeypatch, tmp_path):
-    monkeypatch.setenv("YTVIDEO_OAUTH_ENCRYPT_KEY", Fernet.generate_key().decode())
+    monkeypatch.setattr(settings, "oauth_encrypt_key", Fernet.generate_key().decode())
     output = tmp_path / "clip.mp4"
     output.write_bytes(b"x")
     pj_id = await _seed(factory, output_path=str(output))

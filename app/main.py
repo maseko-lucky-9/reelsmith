@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -72,7 +71,7 @@ async def lifespan(app: FastAPI):
     loop.set_default_executor(executor)
 
     # Run DB migrations on startup when using the SQL store.
-    if settings.job_store == "sql" and not os.environ.get("SKIP_ALEMBIC"):
+    if settings.job_store == "sql" and not settings.skip_alembic:
         from alembic import command as alembic_command
         from alembic.config import Config as AlembicConfig
 

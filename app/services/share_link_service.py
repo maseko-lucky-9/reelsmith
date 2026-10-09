@@ -22,6 +22,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ShareLink
+from app.settings import settings
 
 DEFAULT_TTL_HOURS = 72
 
@@ -47,11 +48,11 @@ def _build_token(clip_id: str, expires_at: datetime, secret: str) -> str:
 
 
 def _resolve_secret() -> str:
-    import os
-    secret = os.environ.get("YTVIDEO_SHARE_LINK_SECRET", "").strip()
+    secret = (settings.share_link_secret or "").strip()
     if not secret:
         # Dev/CI fallback: a stable per-process secret. Operators MUST set
-        # the env var in production for tokens to survive restarts.
+        # YTVIDEO_SHARE_LINK_SECRET in production for tokens to survive
+        # restarts.
         global _DEV_SECRET
         try:
             return _DEV_SECRET

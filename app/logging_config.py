@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import logging
-import os
 import sys
 import time
 from contextlib import contextmanager
 from typing import Generator
+
+from app.settings import settings
 
 _CONFIGURED = False
 
@@ -15,7 +16,7 @@ def configure_logging(level: int | None = None) -> None:
     if _CONFIGURED:
         return
     if level is None:
-        raw = os.environ.get("YTVIDEO_LOG_LEVEL", "INFO").upper()
+        raw = settings.log_level.upper()
         level = getattr(logging, raw, logging.INFO)
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(

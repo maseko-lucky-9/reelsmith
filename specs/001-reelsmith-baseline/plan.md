@@ -24,7 +24,7 @@ FastAPI backend with an asyncio orchestrator that turns a video URL into caption
 
 | Principle | Status | Enforcement today |
 |---|---|---|
-| I. One configuration surface | Exceptions E1, E2 | `tests/unit/test_settings_module.py` |
+| I. One configuration surface | Holds (E1, E2 fixed in T001, T002) | `tests/unit/test_settings_module.py`, `test_settings_env_reads.py`, `test_skip_alembic.py` |
 | II. Orchestrator sequences; events report | Exception E6 (CLAUDE.md wording) | `tests/unit/test_event_bus.py`, `test_orchestrator.py` |
 | III. One ffmpeg | Exceptions E3, E4 | `tests/unit/test_no_moviepy_in_app.py`, `test_ffmpeg_tools.py` |
 | IV. Offline, deterministic default tests | Holds | `pyproject.toml` `addopts`, `ci.yml` |

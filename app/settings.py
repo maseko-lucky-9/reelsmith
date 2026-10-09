@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     db_url: str = "sqlite+aiosqlite:///./reelsmith.db"
     # "sql" | "memory"
     job_store: str = "sql"
+    # Skip ``alembic upgrade head`` at API start-up (sql store only).
+    skip_alembic: bool = False
+
+    # ── Logging ───────────────────────────────────────────────────────────
+    # Root log level name (DEBUG | INFO | WARNING | ERROR); unknown → INFO.
+    log_level: str = "INFO"
 
     # ── Jobs & concurrency ────────────────────────────────────────────────
     max_concurrent_jobs: int = 1
@@ -112,6 +118,21 @@ class Settings(BaseSettings):
     # cannot survive process restarts in that mode.
     oauth_encrypt_key: str | None = None
 
+    # ── Share links (W3.4) ────────────────────────────────────────────────
+    # HMAC secret for share-link tokens. Unset → a random per-process
+    # secret, so links stop verifying after a restart.
+    share_link_secret: str | None = None
+
+    # ── Social adapter selection (W1.5) ───────────────────────────────────
+    # Global provider: "stub" | "real". A non-empty per-platform value wins
+    # over it (TikTok: "cookie" | "n8n"; YouTube: "real").
+    social_provider: str = "stub"
+    social_provider_youtube: str = ""
+    social_provider_tiktok: str = ""
+    social_provider_instagram: str = ""
+    social_provider_linkedin: str = ""
+    social_provider_x: str = ""
+
     # ── Publish scheduler (W1.4) ──────────────────────────────────────────
     scheduler_enabled: bool = False
     scheduler_poll_seconds: int = 30
@@ -175,6 +196,10 @@ class Settings(BaseSettings):
     voicebox_api_key: str | None = None
     voicebox_engine: str = "kokoro"
     generate_voice_profile: str = ""
+
+    # ── Voice-over (W2.3) ─────────────────────────────────────────────────
+    # Path to the .onnx model for the ``piper`` voice-over provider.
+    piper_model: str = ""
 
     # ── Bulk export (W3.7) ────────────────────────────────────────────────
     bulk_export_max_clips: int = 200
