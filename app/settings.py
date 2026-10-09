@@ -91,8 +91,14 @@ class Settings(BaseSettings):
     )
 
     # ── Reframe ───────────────────────────────────────────────────────────
-    # "letterbox" | "face_track" | "stub"
+    # "letterbox" (default: scaled inset over the blurred background) |
+    # "face_track" (9:16 window pans with the speaker's face; YuNet on
+    # onnxruntime). Any other value is treated as "letterbox". Only applies
+    # when a job's ``reframe`` option is on.
     reframe_provider: str = "letterbox"
+    # Where face_track downloads its face model on first use (232 KB,
+    # SHA-256 pinned in app/services/face_detector.py). Gitignored.
+    reframe_model_dir: str = str(_PROJECT_ROOT / "data" / "models")
 
     # ── B-Roll ────────────────────────────────────────────────────────────
     # "local" | "none"
