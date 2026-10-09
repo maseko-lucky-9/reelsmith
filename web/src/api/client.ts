@@ -92,7 +92,8 @@ export interface VideoPreviewResponse {
 
 export interface CreateJobRequest {
   url: string
-  download_path: string
+  /** Omit to use the server's YTVIDEO_DEFAULT_DOWNLOAD_PATH. */
+  download_path?: string
   caption_format?: string
   target_aspect_ratio?: number
   language?: string

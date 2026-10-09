@@ -126,7 +126,7 @@ A creator exports a clip for Premiere or DaVinci, or downloads many clips with a
 - A stage fails inside one chapter: the chapter task is bounded by `max_parallel_chapters`; the job status reflects failure through `JobFailed`.
 - Auth: with `YTVIDEO_REQUIRE_AUTH=true`, every API route requires the API key; the docs routes and the static frontend mount do not (FR-060).
 - Output folders: each job writes to `<download_path>/<slug>-<job_id[:8]>/clips` (slug: the video title, or `upload_video` / `generate_video` / `<platform>_video`), so two jobs never share a clip path (T030). Folders made before T030 are named `<slug>/clips`; re-render still finds them because it works from the clip's own `output_path`. `POST /folders` has no job and keeps the bare slug.
-- Storage: `YTVIDEO_DEFAULT_DOWNLOAD_PATH` defaults to `<project>/data/downloads` (gitignored), uploads live in its `uploads/` subfolder (T031). The UI still sends `/tmp/yt` for URL jobs (T035).
+- Storage: `YTVIDEO_DEFAULT_DOWNLOAD_PATH` defaults to `<project>/data/downloads` (gitignored), uploads live in its `uploads/` subfolder (T031). `POST /jobs` uses it when the request has no `download_path`; the UI sends none (T035).
 - Route prefixes: six routers are served under `/api/...` and the rest are not; the dev proxy strips `/api` and `serve_frontend` does not, so some UI calls 404 in each mode (T034). The `/api/...` paths below are the backend paths as they stand.
 
 ## Requirements *(mandatory)*
@@ -137,7 +137,7 @@ A creator exports a clip for Premiere or DaVinci, or downloads many clips with a
 
 | ID | Requirement | Status | Evidence |
 |---|---|---|---|
-| FR-001 | The system MUST accept a URL via `POST /jobs`, dedupe by URL, and reject unsupported platforms with 400. | Implemented (the 400 returns `{"detail": "Unsupported platform for URL: <url>"}` and creates no job; T027) | `tests/contract/test_jobs_router.py`, `test_store_lookup_routes.py` |
+| FR-001 | The system MUST accept a URL via `POST /jobs`, dedupe by URL, and reject unsupported platforms with 400. | Implemented (the 400 returns `{"detail": "Unsupported platform for URL: <url>"}` and creates no job; T027. `download_path` is optional and defaults to `YTVIDEO_DEFAULT_DOWNLOAD_PATH`; T035) | `tests/contract/test_jobs_router.py`, `test_store_lookup_routes.py`, `test_jobs_download_path_default.py` |
 | FR-002 | The system MUST support YouTube, TikTok, Instagram, Facebook, upload and generate sources through platform adapters. | Implemented | `tests/unit/test_platform_adapters.py`, `test_platform_registry.py` |
 | FR-003 | The system MUST stream per-job events over SSE. | Implemented | `tests/contract/test_generate_pipeline.py`, `tests/e2e/test_happy_path.py`; keep-alive pings every `YTVIDEO_SSE_KEEPALIVE_SECONDS`: `tests/unit/test_sse_keepalive.py` |
 | FR-004 | The system MUST run at most `max_concurrent_jobs` jobs and `max_parallel_chapters` chapters at once. | Implemented | `tests/unit/test_orchestrator_concurrency.py` (4 tests fail on Python 3.12; 3.14 only) |
