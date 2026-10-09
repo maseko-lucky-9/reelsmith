@@ -50,6 +50,8 @@ The API is served at both `/x` and `/api/x`. Routers are mounted without a prefi
 
 `render_service.render_clip` renders each chapter in **one ffmpeg pass straight from the source**: trim, blurred background still, scaled inset, caption overlay, even-dimension crop, then yuv420p libx264/AAC. The ffmpeg binary comes from `imageio-ffmpeg`, and probes and frame grabs use PyAV (`ffmpeg_tools`). Captions are drawn by the unchanged PIL renderer, once per unique caption, and composited as a single ffconcat overlay input (`caption_track`). See [ADR-004](decisions/004-ffmpeg-render-pipeline.md) for the timing rules and the deliberate behaviour changes.
 
+**Face-tracked reframe** (FR-010, [ADR-005](decisions/005-face-track-reframe.md)). With the job's `reframe` option on and `YTVIDEO_REFRAME_PROVIDER=face_track` (default `letterbox`), `orchestrator._reframe_step` runs `reframe_service.face_track` in a worker thread (`to_thread_cancellable`) just before the render, for new renders and re-renders alike. It decodes the chapter with PyAV at 2 fps (rotation applied, fitted into 640x640), finds faces with YuNet on onnxruntime (`face_detector`; the 232 KB model is downloaded on first use into `YTVIDEO_REFRAME_MODEL_DIR` and checked against a pinned SHA-256), follows the largest face with a zero-phase-smoothed, dead-zoned, speed-capped crop position and passes at most 64 keyframes to `render_clip(crop_track=...)`, which pans a full-height 9:16 window instead of the letterboxed inset. A split screen, several faces of similar size, no face, a source with no pan room or any error emits `StageSkipped(reframe, reason)` and leaves the letterbox render unchanged; cancellation propagates.
+
 ## Live Progress (SSE)
 
 - **Backend.** The backend sends **named** SSE events (`event: <EventType>`, `id: <event_id>`). The event bus keeps its last 200 events and replays this job's events from that history to each new subscriber.
@@ -65,11 +67,11 @@ The API is served at both `/x` and `/api/x`. Routers are mounted without a prefi
 |---|---|---|
 | Transcription | `YTVIDEO_TRANSCRIPTION_PROVIDER` | `whisper`, `stub` |
 | Segment scoring | `YTVIDEO_SEGMENT_PROVIDER` | `chapter`, `local_heuristic`, `stub` |
-| Reframe | `YTVIDEO_REFRAME_PROVIDER` | `letterbox`, `face_track`, `stub` |
+| Reframe | `YTVIDEO_REFRAME_PROVIDER` | `letterbox` (default), `face_track`; any other value is `letterbox` |
 | B-Roll | `YTVIDEO_BROLL_PROVIDER` | `none`, `local` |
 | Job store | `YTVIDEO_JOB_STORE` | `memory`, `sql` |
 
-All providers follow the same pattern: `get_<feature>_service()` factory reads the setting and returns a Protocol implementation. Adding a new provider only requires implementing the Protocol and registering in the factory.
+All providers follow the same pattern: `get_<feature>_service()` factory reads the setting and returns a Protocol implementation. Adding a new provider only requires implementing the Protocol and registering in the factory. Reframe differs: `orchestrator._reframe_step` reads the setting, and the face detector behind the `FaceDetector` protocol comes from `face_detector.get_face_detector()`.
 
 ## Key Services
 
@@ -86,5 +88,6 @@ All providers follow the same pattern: `get_<feature>_service()` factory reads t
 | `thumbnail_service` | JPEG thumbnail from clip midpoint |
 | `segment_proposer` | Heuristic segment scoring + selection; picks the clips of a source without chapters when `YTVIDEO_SEGMENT_PROVIDER` is not `chapter` (default `chapter`: one Full Video clip) |
 | `segment_discovery` | Discovery helpers: words rebased to a clip window, `<stem>.words.json` sidecar, selection by relative score bar (60% of best), length-scaled clip budget (1 per 120 s, max 5), 50% coverage cap and a near-duplicate penalty (shared transcript words with a kept clip) |
-| `reframe_service` | Face-tracked crop track |
+| `reframe_service` | Face-tracked crop track: 2 fps PyAV sampling, primary-face choice, split-screen / similar-faces fallbacks, smoothing, keyframe decimation |
+| `face_detector` | `FaceDetector` protocol; YuNet 2023mar on onnxruntime with own pre/post-processing; lazy, SHA-256-verified model download |
 | `broll_service` | Noun-phrase → local clip lookup |

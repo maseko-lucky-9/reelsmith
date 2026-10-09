@@ -79,7 +79,7 @@ The `/jobs/$jobId` page renders a per-stage timeline while the pipeline runs. St
 | Video editing | ffmpeg (bundled via imageio-ffmpeg) + PyAV |
 | Transcription | faster-whisper (word-level) |
 | Segment scoring | NumPy + standard library (wav RMS, word timings); VADER and spaCy optional |
-| Reframe | MediaPipe face detection (optional, not in `requirements.txt`; `face_track` falls back to a centre crop without it) |
+| Reframe | YuNet face detector on onnxruntime (already a dependency); the 232 KB model is downloaded on first `face_track` use and SHA-256 checked ([ADR-005](docs/decisions/005-face-track-reframe.md)) |
 | Captions | pysrt / webvtt-py |
 | Subtitle images | Pillow + NumPy |
 | UI | React 19 + Vite 8 + shadcn/ui |
@@ -98,7 +98,7 @@ See `.env.example` for the full list. Key settings:
 | `YTVIDEO_MAX_CONCURRENT_JOBS` | `1` | Pipelines running at once; extra jobs wait as `pending` |
 | `YTVIDEO_MAX_PARALLEL_CHAPTERS` | `1` | Chapters processed concurrently within a job |
 | `YTVIDEO_SEGMENT_PROVIDER` | `chapter` | `chapter`, `local_heuristic`, or `stub` |
-| `YTVIDEO_REFRAME_PROVIDER` | `letterbox` | `letterbox`, `face_track`, or `stub` |
+| `YTVIDEO_REFRAME_PROVIDER` | `letterbox` | `letterbox` or `face_track` (the 9:16 window follows the speaker's face; falls back to `letterbox`) |
 | `YTVIDEO_SERVE_FRONTEND` | `false` | Serve built React app from FastAPI |
 | `YTVIDEO_REQUIRE_AUTH` | `false` | Enable API key auth |
 | `YTVIDEO_API_KEY` | `null` | API key when auth enabled |
