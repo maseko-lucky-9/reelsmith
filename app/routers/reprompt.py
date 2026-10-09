@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import JobRecord
 from app.db.session import get_session
 
-router = APIRouter(prefix="/api/jobs", tags=["reprompt"])
+router = APIRouter(prefix="/jobs", tags=["reprompt"])
 
 
 _LENGTH_RANGES = {

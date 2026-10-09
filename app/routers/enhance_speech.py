@@ -15,7 +15,7 @@ from app.db.session import get_session
 from app.services import audio_enhance_service
 from app.settings import settings
 
-router = APIRouter(prefix="/api/clips", tags=["enhance-speech"])
+router = APIRouter(prefix="/clips", tags=["enhance-speech"])
 
 _AUDIO_PROVIDERS = ("loudnorm", "rnnoise", "passthrough")
 
