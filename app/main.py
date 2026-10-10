@@ -180,11 +180,20 @@ def create_app() -> FastAPI:
     from app.auth import require_api_key
 
     dependencies = [Depends(require_api_key)] if settings.require_auth else []
+    # FastAPI adds /docs, /redoc and /openapi.json outside the app-level
+    # dependencies, and the Swagger page could not send the key on its own
+    # schema fetch anyway, so with auth on the docs surface is switched off
+    # (FR-060, T043): those paths get the 404 of any unknown path. app.openapi()
+    # still builds the schema in process.
+    docs_on = not settings.require_auth
     app = FastAPI(
         title="Reelsmith API",
         version="0.1.0",
         lifespan=lifespan,
         dependencies=dependencies,
+        docs_url="/docs" if docs_on else None,
+        redoc_url="/redoc" if docs_on else None,
+        openapi_url="/openapi.json" if docs_on else None,
     )
 
     app.add_middleware(
