@@ -178,6 +178,8 @@ YTVIDEO_SERVE_FRONTEND=true uvicorn app.main:app
 
 The API is served at both `/x` and `/api/x` (`app/api_prefix.py`, [ADR-005](docs/decisions/005-api-route-prefix.md)). The UI calls `/api/...`: in dev the Vite proxy strips `/api`, and with `YTVIDEO_SERVE_FRONTEND=true` FastAPI strips it itself, so `curl localhost:8000/api/health` and `curl localhost:8000/health` both answer.
 
+Reloading a client route such as `/uploads/new` or `/jobs/<id>` serves the UI (`app/spa_fallback.py`, T036): a browser navigation (`Accept: text/html`) to a route of `web/src/routeTree.ts` gets `index.html`, while `fetch`, `curl` and anything under `/api/...` get the API. Add a new client route to `CLIENT_ROUTES` in `app/spa_fallback.py` too; a test fails until you do.
+
 ## Decision Records
 
 | ADR | Decision |

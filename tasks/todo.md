@@ -10,7 +10,7 @@ Open work is tracked per feature in `specs/*/tasks.md`; this file keeps the fini
 
 | Spec | Tasks | State |
 |---|---|---|
-| [001 Reelsmith baseline](../specs/001-reelsmith-baseline/spec.md) | [tasks.md](../specs/001-reelsmith-baseline/tasks.md) | 12 open: T021, T032 (lint, wait on a `pyproject.toml` OK), backlog T036-T045 |
+| [001 Reelsmith baseline](../specs/001-reelsmith-baseline/spec.md) | [tasks.md](../specs/001-reelsmith-baseline/tasks.md) | 10 open: T021, T032 (lint, wait on a `pyproject.toml` OK), backlog T038-T045 |
 | [002-007 roadmap stubs](../specs/README.md) | none yet | stubs only: caption/brand pipeline, analytics, share links, webhooks, API tokens, workspaces |
 
 Constitution: [.specify/memory/constitution.md](../.specify/memory/constitution.md)
