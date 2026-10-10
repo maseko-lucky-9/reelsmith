@@ -61,6 +61,8 @@ The job stays `completed` throughout, so a restart (`fail_interrupted_jobs`) nev
 
 The API is served at both `/x` and `/api/x`. Routers are mounted without a prefix, and `ApiPrefixMiddleware` (`app/api_prefix.py`) strips one leading `/api` segment before routing (`/api` alone becomes `/`; `/apixyz` is not rewritten). The React client calls `/api/...`: in dev the Vite proxy strips the prefix, and with `YTVIDEO_SERVE_FRONTEND=true` the middleware does, while `StaticFiles` serves the built UI at `/`. The middleware is pure ASGI: it rewrites `path` and `raw_path`, keeps `root_path`, and passes `receive`/`send` through, so SSE and streamed downloads are unaffected and the app-level API-key dependency applies the same at both addresses. See [ADR-005](decisions/005-api-route-prefix.md).
 
+Reloading a client route under `serve_frontend` gets the UI: `SpaFallbackMiddleware` (`app/spa_fallback.py`, T036), added after `ApiPrefixMiddleware` so it runs first, rewrites a GET or HEAD to `/index.html` when `Accept` prefers `text/html`, the path is not under `/api`, it matches `CLIENT_ROUTES` (a copy of `web/src/routeTree.ts`; `tests/unit/test_spa_client_routes_drift.py` fails on drift) and not `API_ONLY_PATHS`, and it is not a file in `web/dist`. Paths shared by the UI and the API (`/jobs/{id}`, `/clips/{id}`, `/clips/{id}/edit`) give the page to a browser navigation and the JSON to everything else, both with `Vary: Accept`. A new client route goes in `web/src/routeTree.ts` and `CLIENT_ROUTES` together.
+
 ## Concurrency and Recovery
 
 - **Job cap.** `run_orchestrator` (`app/workers/orchestrator.py`) wraps each `_run_job` in a `max_concurrent_jobs` semaphore (values below 1 are clamped to 1 with a warning). On shutdown it waits for every running job to unwind.

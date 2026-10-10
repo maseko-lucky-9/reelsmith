@@ -40,6 +40,7 @@ from app.routers import (
 from app.services import transcription_service
 from app.services.retention import sweep_expired_clips
 from app.settings import settings
+from app.spa_fallback import SpaFallbackMiddleware
 from app.workers.orchestrator import run_orchestrator
 
 import app.logging_config  # noqa: F401
@@ -235,6 +236,10 @@ def create_app() -> FastAPI:
     if settings.serve_frontend:
         frontend_dir = FRONTEND_DIST
         if frontend_dir.is_dir():
+            # Reloading a client route (/uploads/new, /jobs/<id>) gets index.html
+            # (T036). Added after ApiPrefixMiddleware, so it runs before it and
+            # still sees the /api prefix.
+            app.add_middleware(SpaFallbackMiddleware, dist=frontend_dir)
             app.mount("/", StaticFiles(directory=str(frontend_dir), html=True), name="frontend")
 
     return app
