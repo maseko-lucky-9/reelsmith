@@ -54,7 +54,6 @@ class EventType(str, Enum):
     ANIMATED_CAPTION_RENDERED = "AnimatedCaptionRendered"
     TRANSITIONS_APPLIED = "TransitionsApplied"
     BRAND_VOCAB_APPLIED = "BrandVocabApplied"
-    SCHEDULED_POST_QUEUED = "ScheduledPostQueued"
     WEBHOOK_DISPATCHED = "WebhookDispatched"
     BULK_EXPORT_COMPLETED = "BulkExportCompleted"
     SHARE_LINK_CREATED = "ShareLinkCreated"
