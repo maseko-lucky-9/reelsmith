@@ -697,6 +697,111 @@ def test_a_stint_survives_a_faceless_gap_up_to_switch_seconds(gap, moves):
     assert (max(x for _t, x in plan.track) > SPEAKER_X + DEADBAND) is moves
 
 
+def test_the_reach_counts_from_the_stints_own_last_sighting():
+    """Review round 2, X1: after 1.5 s of slides, B for one sample, then C
+    600 px from B in the very next sample. The reach grows with the time
+    since the stint's own last sighting (0.5 s: one radius, 304 px), not
+    since the primary was last seen, so B and C are two short stints and
+    the crop stays on A."""
+    obs = [
+        *[_obs(k * 0.5, _hd(500)) for k in range(10)],
+        *[_obs(5.0 + k * 0.5) for k in range(3)],  # slides, 5.0 - 6.0 s
+        _obs(6.5, _hd(1000)),
+        *[_obs(7.0 + k * 0.5, _hd(1600)) for k in range(3)],
+        *[_obs(8.5 + k * 0.5, _hd(500)) for k in range(12)],
+    ]
+
+    plan = plan_crop_track(obs, HD)
+
+    assert {x for _t, x in plan.track} == {_hd_x(500)}
+
+
+def test_a_walker_seen_every_third_sample_is_followed():
+    """The other side of the trade-off below: 1.5 s after a sighting the
+    reach is 3 radii (912 px), so a walker 800 px between sightings seen
+    every third sample (200 → 1000 → 1800 px, then standing) is one subject:
+    the track is exactly the one without continuity."""
+    sightings = {0.0: 200, 1.5: 1000, 3.0: 1800, 3.5: 1800, 4.0: 1800, 4.5: 1800, 5.0: 1800}
+    obs = [
+        _obs(k * 0.5, *([_hd(sightings[k * 0.5])] if k * 0.5 in sightings else []))
+        for k in range(11)
+    ]
+
+    plan = plan_crop_track(obs, HD)
+
+    assert plan.track == _largest_face_track(obs, HD)
+
+
+def test_faces_beyond_the_grown_reach_are_two_people():
+    """Review round 2, X5 (probe N10): B for 1 s, 1 s with no face, then C
+    1,140 px from B for 1 s. 1.5 s after B's last sighting the reach is 3
+    radii (912 px); C is beyond it, so B and C are separate 1 s stints and
+    the crop stays on A."""
+    obs = [
+        *[_obs(k * 0.5, _hd(300)) for k in range(10)],
+        _obs(5.0, _hd(700)),
+        _obs(5.5, _hd(700)),
+        _obs(6.0),
+        _obs(6.5),
+        _obs(7.0, _hd(1840)),
+        _obs(7.5, _hd(1840)),
+        *[_obs(8.0 + k * 0.5, _hd(300)) for k in range(16)],
+    ]
+
+    plan = plan_crop_track(obs, HD)
+
+    assert {x for _t, x in plan.track} == {_hd_x(300)} == {0.0}
+
+
+@pytest.mark.parametrize(
+    ("cutaways", "moved"),
+    [
+        # N1: B one sample, 1 s with no face, C one sample (500 px from B)
+        ([(5.0, 1000), (5.5, None), (6.0, None), (6.5, 1500)], 418),
+        # N2: B 1 s, 1 s with no face, C 1 s
+        ([(5.0, 1000), (5.5, 1000), (6.0, None), (6.5, None), (7.0, 1500), (7.5, 1500)], 595),
+    ],
+    ids=["N1", "N2"],
+)
+def test_known_limit_short_cutaways_across_faceless_frames_add_up(cutaways, moved):
+    """A DOCUMENTED LIMIT (ADR-006 *Known limits*, owner decision T046), pinned
+    so that changing it is deliberate. Two different people in short
+    cutaways, 500 px apart and 1.5 s apart with no face between, fall within
+    the grown reach (3 radii), so they count as one stint that lasts 1.5 s
+    and the crop leaves A (by 418 px for N1, 595 px for N2; main moved as
+    much, round 1 of the PR did not move). The same reach is what follows a
+    walker seen every other sample (S3c, S3d)."""
+    obs = [
+        *[_obs(k * 0.5, _hd(500)) for k in range(10)],
+        *[_obs(t, *([] if cx is None else [_hd(cx)])) for t, cx in cutaways],
+    ]
+    back = cutaways[-1][0] + 0.5
+    obs += [_obs(back + k * 0.5, _hd(500)) for k in range(16)]
+
+    plan = plan_crop_track(obs, HD)
+
+    farthest = max(abs(x - _hd_x(500)) for _t, x in plan.track)
+    assert farthest == pytest.approx(moved, abs=1.0)
+
+
+def test_near_equal_faces_follow_the_frames_main_face():
+    """Review round 2, H2 (the documented rule, kept): among the faces that
+    can continue the primary, the frame's main face wins, and on a tie within
+    10 % of the area that is the more central one. A stands off centre at
+    1300 px; B, 250 px away, as large within 10 % and more central, joins for
+    1 s. The crop leans toward B (64 px) instead of holding on A."""
+    obs = [
+        *[_obs(k * 0.5, _hd(1300)) for k in range(10)],
+        *[_obs(5.0 + k * 0.5, _hd(1300), _hd(1050, h=145)) for k in range(2)],
+        *[_obs(6.0 + k * 0.5, _hd(1300)) for k in range(10)],
+    ]
+
+    plan = plan_crop_track(obs, HD)
+
+    lean = _hd_x(1300) - min(x for _t, x in plan.track)
+    assert lean == pytest.approx(64, abs=2.0)
+
+
 @pytest.mark.parametrize(("shot", "moves"), [(3, False), (4, True)])
 def test_switch_seconds_allows_for_frame_time_jitter(shot, moves):
     """Sample times are frame times: at 2 fps they fall at 0.02 and 0.50 s
