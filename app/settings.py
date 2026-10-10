@@ -113,6 +113,9 @@ class Settings(BaseSettings):
     max_upload_mb: int = 500
     retention_days: int = 30
     retention_sweep_minutes: int = 60
+    # Files of retired clips still on disk (e.g. the clips a reprompt
+    # replaced) are deleted once the file is older than this (T033).
+    retired_files_grace_hours: int = 24
 
     # ── Frontend ──────────────────────────────────────────────────────────
     serve_frontend: bool = False
