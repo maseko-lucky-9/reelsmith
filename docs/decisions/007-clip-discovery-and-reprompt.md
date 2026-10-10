@@ -3,7 +3,7 @@
 **Status:** Accepted (opt-in: `YTVIDEO_SEGMENT_PROVIDER` defaults to `chapter` by owner choice; whether the heuristic picks good clips is not signed off, gate G1)
 **Date:** 2026-10-09
 **Author:** Thulani Maseko
-**Implements:** FR-009 (T011; the optional re-rank, T040), FR-016 (T008); PRs #43, #49, #51, #PRNUM
+**Implements:** FR-009 (T011; the optional re-rank, T040), FR-016 (T008); PRs #43, #49, #51, #66
 
 ## Context
 
@@ -49,7 +49,7 @@
 - **Fallback.** A source shorter than the minimum clip, no kept segment, or any discovery error keeps the single "Full Video" chapter. The short-source and error cases emit `StageSkipped(segment_proposer, reason)`. Discovery never fails the job; cancellation propagates.
 - **Events and fields.** `SegmentsProposed` is emitted, then one `SegmentScored` per kept segment. The clip stores `virality_score`, `score_breakdown` and the proposer's `summary`.
 
-### Re-rank (T040, PR #PRNUM; opt-in)
+### Re-rank (T040, PR #66; opt-in)
 
 `YTVIDEO_SEGMENT_RERANK_PROVIDER` (`none` by default, or `ollama`) adds an optional local-LLM pass between the proposer and `select_discovered`: `_discover_segments` calls `segment_rerank.rerank` (`app/services/segment_rerank.py`). With `none` discovery is unchanged.
 
