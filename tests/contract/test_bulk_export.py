@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import io
+import json
 import os
 import tempfile
 import threading
@@ -19,6 +21,35 @@ from app.db.models import ClipRecord, JobRecord
 from app.db.session import get_session
 from app.main import create_app
 from app.routers import bulk_export as bulk_export_router
+
+# B-roll files live under the server's cache and library dirs; the manifest
+# must credit them without naming those paths.
+_SERVER_BROLL_DIR = "/var/reelsmith-test/broll"
+_PEXELS_ASSET = {
+    "query": "ocean",
+    "start": 3.0,
+    "duration": 3.0,
+    "provider": "pexels",
+    "asset_id": "1234",
+    # A comma and quotes, so the CSV cell must be quoted and escaped.
+    "author": 'Jane "JD" Doe, Studio',
+    "source_url": "https://www.pexels.com/video/ocean-1234/",
+    "path": f"{_SERVER_BROLL_DIR}/cache/videos/1234.mp4",
+}
+_LOCAL_ASSET = {
+    "query": "forest",
+    "start": 7.0,
+    "duration": 3.0,
+    "provider": "local",
+    "asset_id": "forest.mp4",
+    "author": "",
+    "source_url": "",
+    "path": f"{_SERVER_BROLL_DIR}/library/forest.mp4",
+}
+_MANIFEST_COLUMNS = [
+    "clip_id", "title", "summary", "start", "end", "output_path",
+    "thumbnail_path", "virality_score", "hashtags",
+]  # fmt: skip
 
 
 @pytest.fixture
@@ -50,6 +81,8 @@ async def export_client(tmp_path):
             thumbnail_path=str(jpg_a),
             title="A",
             hashtags=["fun"],
+            # The Pexels asset is inserted twice; credits list it once.
+            broll_assets=[_PEXELS_ASSET, _LOCAL_ASSET, {**_PEXELS_ASSET, "start": 9.0}],
         )
         b = ClipRecord(
             job_id=job.id, start=5, end=10, output_path=str(mp4_b), title="B"
@@ -99,6 +132,64 @@ async def test_bulk_export_returns_zip(export_client):
     manifest = z.read("manifest.csv").decode("utf-8")
     assert "clip_id" in manifest
     assert "fun" in manifest  # hashtag
+
+
+async def _manifest_rows(client, ids) -> tuple[list[str], dict[str, dict[str, str]]]:
+    """The zip manifest's header and its rows keyed by clip id."""
+    q = "&".join(f"ids={i}" for i in ids)
+    r = await client.get(f"/api/clips/bulk-export.zip?{q}")
+    assert r.status_code == 200
+    text = zipfile.ZipFile(io.BytesIO(r.content)).read("manifest.csv").decode("utf-8")
+    reader = csv.DictReader(io.StringIO(text))
+    rows = {row["clip_id"]: row for row in reader}
+    return list(reader.fieldnames or []), rows
+
+
+async def test_bulk_manifest_appends_broll_credits_after_the_existing_columns(
+    export_client,
+):
+    client, ids = export_client
+
+    header, _rows = await _manifest_rows(client, ids)
+
+    assert header == [*_MANIFEST_COLUMNS, "broll_credits"]
+
+
+async def test_bulk_manifest_credits_each_distinct_broll_asset(export_client):
+    client, ids = export_client
+
+    _header, rows = await _manifest_rows(client, ids)
+
+    assert json.loads(rows[ids[0]]["broll_credits"]) == [
+        {
+            "provider": "pexels",
+            "author": 'Jane "JD" Doe, Studio',
+            "source_url": "https://www.pexels.com/video/ocean-1234/",
+        },
+        {"provider": "local", "author": "", "source_url": ""},
+    ]
+    # The other columns of the row are unchanged.
+    assert rows[ids[0]]["title"] == "A"
+    assert rows[ids[0]]["hashtags"] == "fun"
+
+
+async def test_bulk_manifest_has_no_credits_for_a_clip_without_broll(export_client):
+    client, ids = export_client
+
+    _header, rows = await _manifest_rows(client, ids)
+
+    assert json.loads(rows[ids[1]]["broll_credits"]) == []
+
+
+async def test_bulk_manifest_does_not_name_server_broll_paths(export_client):
+    client, ids = export_client
+    q = "&".join(f"ids={i}" for i in ids)
+
+    r = await client.get(f"/api/clips/bulk-export.zip?{q}")
+
+    manifest = zipfile.ZipFile(io.BytesIO(r.content)).read("manifest.csv").decode()
+    assert _SERVER_BROLL_DIR not in manifest
+    assert "forest.mp4" not in manifest
 
 
 async def test_bulk_export_skips_retired_clips(export_client):
