@@ -16,11 +16,12 @@ from app.db.models import (
     ClipRecord,
     JobRecord,
     PublishJob,
-    ShareLink,
     SocialAccount,
 )
 from app.services import (
     analytics_service as anal,
+)
+from app.services import (
     share_link_service as sl,
 )
 from app.settings import settings

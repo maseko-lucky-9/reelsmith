@@ -90,10 +90,9 @@ import pysrt
 from PIL import Image
 from webvtt import WebVTT
 
+import app.logging_config  # noqa: F401
 from app.services import caption_track, clip_service, ffmpeg_tools
 from app.settings import settings
-
-import app.logging_config  # noqa: F401
 
 log = logging.getLogger(__name__)
 

@@ -16,7 +16,6 @@ import pytest
 
 from app.services import ltx_producer as svc
 
-
 # ── stub provider ─────────────────────────────────────────────────────────────
 
 

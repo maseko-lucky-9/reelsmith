@@ -50,8 +50,9 @@ async def db_store(monkeypatch):
     _eng._engine = None
     _ses._factory = None
 
-    from app.bus.job_store import SqlJobStore
     from sqlalchemy import text
+
+    from app.bus.job_store import SqlJobStore
 
     store = SqlJobStore()
 

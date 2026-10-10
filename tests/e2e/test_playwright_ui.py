@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import os
 import re
-import tempfile
 
 import pytest
 from playwright.sync_api import Page, expect

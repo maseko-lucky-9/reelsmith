@@ -10,7 +10,7 @@ because we don't bill anything.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass
 from typing import Mapping
 
 

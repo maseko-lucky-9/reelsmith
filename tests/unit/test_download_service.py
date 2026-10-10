@@ -1,9 +1,9 @@
 from unittest.mock import MagicMock, patch
 
 from app.services.download_service import (
+    download_video,
     extract_chapters,
     is_supported_url,
-    download_video,
 )
 
 

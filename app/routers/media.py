@@ -8,8 +8,6 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
-from app.bus.job_store import JobNotFoundError
-
 router = APIRouter(prefix="/clips", tags=["media"])
 
 _RANGE_RE = re.compile(r"bytes=(\d+)-(\d*)")

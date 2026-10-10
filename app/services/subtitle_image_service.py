@@ -5,9 +5,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
-from app.settings import settings
-
 import app.logging_config  # noqa: F401
+from app.settings import settings
 
 log = logging.getLogger(__name__)
 

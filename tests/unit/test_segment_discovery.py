@@ -12,7 +12,6 @@ from app.services import segment_discovery as sd
 from app.services.segment_proposer import ProposedSegment
 from app.services.transcription_service import WordTiming
 
-
 # ── rebase_words ──────────────────────────────────────────────────────────────
 
 

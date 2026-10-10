@@ -23,10 +23,10 @@ from app.domain.models import JobState
 from app.services.transcription_service import WordTiming
 from app.workers import orchestrator as orch
 from tests.unit.test_orchestrator import (
-    _FakeAdapter,
     _fake_extract_audio,
     _fake_render,
     _fake_subfolder,
+    _FakeAdapter,
 )
 
 JOB_ID = "job-stage-events"

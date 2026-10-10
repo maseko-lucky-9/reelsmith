@@ -218,8 +218,8 @@ class SqlJobStore:
         self._factory = get_session_factory()
 
     async def create(self, state: JobState) -> JobState:
+
         from app.db.models import JobRecord
-        from sqlalchemy import select
 
         async with self._factory() as session:
             record = JobRecord(
@@ -240,9 +240,10 @@ class SqlJobStore:
         return state
 
     async def get(self, job_id: str) -> JobState:
-        from app.db.models import JobRecord
         from sqlalchemy import select
         from sqlalchemy.orm import selectinload
+
+        from app.db.models import JobRecord
 
         async with self._factory() as session:
             result = await session.execute(
@@ -256,9 +257,10 @@ class SqlJobStore:
         return _record_to_state(record)
 
     async def update(self, job_id: str, mutator: Callable[[JobState], None]) -> JobState:
-        from app.db.models import JobRecord
         from sqlalchemy import select
         from sqlalchemy.orm import selectinload
+
+        from app.db.models import JobRecord
 
         async with self._factory() as session:
             result = await session.execute(
@@ -290,8 +292,9 @@ class SqlJobStore:
         mutator: Callable[[ChapterArtifacts], None],
         chapter_index: int,
     ) -> ChapterArtifacts:
-        from app.db.models import ChapterRecord, JobRecord
         from sqlalchemy import select
+
+        from app.db.models import ChapterRecord
 
         async with self._factory() as session:
             result = await session.execute(
@@ -310,8 +313,9 @@ class SqlJobStore:
         return chapter
 
     async def all_ids(self) -> list[str]:
-        from app.db.models import JobRecord
         from sqlalchemy import select
+
+        from app.db.models import JobRecord
 
         async with self._factory() as session:
             result = await session.execute(select(JobRecord.id))
@@ -320,8 +324,9 @@ class SqlJobStore:
     async def upsert_clip(
         self, job_id: str, clip_id: str, mutator: ClipMutator
     ) -> dict[str, Any]:
-        from app.db.models import ClipRecord
         from sqlalchemy import select
+
+        from app.db.models import ClipRecord
 
         async with self._factory() as session:
             result = await session.execute(
@@ -368,8 +373,9 @@ class SqlJobStore:
     ) -> dict[str, Any] | None:
         """The clip, or None if unknown or (unless asked for) retired —
         the same retired filter ``list_clips`` applies."""
-        from app.db.models import ClipRecord
         from sqlalchemy import select
+
+        from app.db.models import ClipRecord
 
         async with self._factory() as session:
             q = select(ClipRecord).where(ClipRecord.id == clip_id)
@@ -385,8 +391,9 @@ class SqlJobStore:
         left alone. Returns how many clips this call retired. Files are not
         deleted; that is the caller's job.
         """
-        from app.db.models import ClipRecord
         from sqlalchemy import update
+
+        from app.db.models import ClipRecord
 
         ids = list(set(clip_ids))
         if not ids:
@@ -407,9 +414,10 @@ class SqlJobStore:
     async def list_jobs(
         self, limit: int = 20, offset: int = 0, search: str = ""
     ) -> list[JobState]:
-        from app.db.models import JobRecord
         from sqlalchemy import select
         from sqlalchemy.orm import selectinload
+
+        from app.db.models import JobRecord
 
         async with self._factory() as session:
             q = (
@@ -428,9 +436,10 @@ class SqlJobStore:
     ) -> JobState | None:
         """Newest job whose URL equals ``url`` exactly and whose status is in
         ``statuses``; None if there is none. One row, whatever the table size."""
-        from app.db.models import JobRecord
         from sqlalchemy import select
         from sqlalchemy.orm import selectinload
+
+        from app.db.models import JobRecord
 
         async with self._factory() as session:
             result = await session.execute(
@@ -451,8 +460,9 @@ class SqlJobStore:
         left these jobs without a pipeline, and they would otherwise block
         their URL in the duplicate check forever.
         """
-        from app.db.models import JobRecord
         from sqlalchemy import update
+
+        from app.db.models import JobRecord
 
         async with self._factory() as session:
             result = await session.execute(
@@ -471,8 +481,9 @@ class SqlJobStore:
         min_score: int | None = None,
         search: str = "",
     ) -> list[dict[str, Any]]:
-        from app.db.models import ClipRecord
         from sqlalchemy import func, select
+
+        from app.db.models import ClipRecord
 
         async with self._factory() as session:
             q = select(ClipRecord).where(ClipRecord.retired == False)  # noqa: E712

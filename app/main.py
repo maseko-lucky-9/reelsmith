@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+import app.logging_config  # noqa: F401
 from app.api_prefix import ApiPrefixMiddleware
 from app.bus.event_bus import AsyncEventBus
 from app.bus.job_store import InMemoryJobStore, SqlJobStore
@@ -42,8 +43,6 @@ from app.services.retention import run_retention_sweeps
 from app.settings import settings
 from app.spa_fallback import SpaFallbackMiddleware
 from app.workers.orchestrator import run_orchestrator
-
-import app.logging_config  # noqa: F401
 
 log = logging.getLogger(__name__)
 

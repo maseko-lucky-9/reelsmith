@@ -12,7 +12,6 @@ from app.services.timeline_render_service import (
     build_render_plan,
 )
 
-
 _BASE = "/render/main.mp4"
 
 

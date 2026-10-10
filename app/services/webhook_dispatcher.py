@@ -13,7 +13,6 @@ import hmac
 import json
 import logging
 from dataclasses import dataclass
-from typing import Sequence
 
 import httpx
 from sqlalchemy import select

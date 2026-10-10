@@ -18,7 +18,6 @@ from app.bus.event_bus import AsyncEventBus
 from app.domain.events import EventType
 from app.services import animated_caption_service as svc
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
