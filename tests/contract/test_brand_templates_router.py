@@ -5,9 +5,9 @@ tests never touch the dev database and are fully isolated from each other.
 """
 from __future__ import annotations
 
-import pytest
 import httpx
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db.base import Base
 from app.db.session import get_session

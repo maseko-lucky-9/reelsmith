@@ -12,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from app.bus.job_store import JobStore
 from app.bus.event_bus import AsyncEventBus
+from app.bus.job_store import JobStore
 from app.domain.models import JobState, PipelineOptions
 from app.services.transcription_service import WordTiming
 from app.workers import orchestrator as orch

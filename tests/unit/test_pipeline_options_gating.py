@@ -11,8 +11,8 @@ from app.bus.event_bus import AsyncEventBus
 from app.bus.job_store import JobStore
 from app.domain.events import Event, EventType
 from app.domain.models import JobState, PipelineOptions
-from app.workers import orchestrator as orch
 from app.services.platforms.base import Chapter, DownloadResult
+from app.workers import orchestrator as orch
 
 
 def _fake_subfolder(

@@ -7,10 +7,9 @@ from typing import Any
 
 from yt_dlp import YoutubeDL
 
+import app.logging_config  # noqa: F401
 from app.services import ffmpeg_tools
 from app.services.platforms.base import DownloadResult
-
-import app.logging_config  # noqa: F401
 
 log = logging.getLogger(__name__)
 

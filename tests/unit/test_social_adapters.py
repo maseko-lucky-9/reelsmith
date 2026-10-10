@@ -23,7 +23,6 @@ from app.services.social.youtube import YouTubeAdapter
 from app.services.social_publish_service import run_publish_job
 from app.settings import settings
 
-
 # ── Registry ────────────────────────────────────────────────────────────────
 
 

@@ -1,5 +1,5 @@
-import pytest
 import pysrt
+import pytest
 from webvtt import WebVTT
 
 from app.services.caption_service import (

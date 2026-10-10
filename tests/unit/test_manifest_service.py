@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from app.services.manifest_service import write_manifest, COLUMNS
+from app.services.manifest_service import COLUMNS, write_manifest
 
 
 def _read_csv(path: str) -> list[dict]:

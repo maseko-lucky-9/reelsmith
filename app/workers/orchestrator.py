@@ -10,6 +10,7 @@ from collections.abc import Callable, Coroutine, Sequence
 from pathlib import Path
 from typing import Any
 
+import app.logging_config  # noqa: F401
 from app.bus.event_bus import AsyncEventBus
 from app.bus.job_store import JobStore
 from app.domain.events import Event, EventType
@@ -38,8 +39,6 @@ from app.services import (
 )
 from app.services.platforms import resolve as resolve_adapter
 from app.settings import settings
-
-import app.logging_config  # noqa: F401
 
 log = logging.getLogger(__name__)
 

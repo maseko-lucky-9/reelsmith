@@ -20,9 +20,9 @@ image-sequence input described by an ffconcat list:
 from __future__ import annotations
 
 import heapq
-import threading
 import logging
 import os
+import threading
 from collections.abc import Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass

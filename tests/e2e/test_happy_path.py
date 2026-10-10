@@ -15,7 +15,6 @@ from asgi_lifespan import LifespanManager
 from app.main import create_app
 from app.workers import orchestrator as orch
 
-
 pytestmark = pytest.mark.e2e
 
 

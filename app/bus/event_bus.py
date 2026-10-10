@@ -6,9 +6,8 @@ from collections import deque
 from collections.abc import AsyncIterator
 from typing import Iterable
 
-from app.domain.events import Event, EventType
-
 import app.logging_config  # noqa: F401
+from app.domain.events import Event, EventType
 
 log = logging.getLogger(__name__)
 

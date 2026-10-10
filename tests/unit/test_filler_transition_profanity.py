@@ -9,10 +9,13 @@ from app.bus.event_bus import AsyncEventBus
 from app.domain.events import EventType
 from app.services import (
     filler_removal_service as filler,
+)
+from app.services import (
     profanity_filter_service as prof,
+)
+from app.services import (
     transition_service as trans,
 )
-
 
 # ── W2.5 filler_removal_service ────────────────────────────────────────────
 

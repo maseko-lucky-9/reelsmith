@@ -11,9 +11,8 @@ from pathlib import Path
 
 from PIL import Image, ImageFilter
 
-from app.services import ffmpeg_tools
-
 import app.logging_config  # noqa: F401
+from app.services import ffmpeg_tools
 
 log = logging.getLogger(__name__)
 

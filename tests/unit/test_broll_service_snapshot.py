@@ -30,7 +30,6 @@ import pytest
 from app.services.broll_service import LocalBRoll
 from app.settings import settings
 
-
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
 
