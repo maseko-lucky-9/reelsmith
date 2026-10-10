@@ -81,7 +81,7 @@
 
   Set `YTVIDEO_SEGMENT_PROVIDER=local_heuristic` to opt in. Flipping the default is an open owner decision, recorded with the ranking work in `specs/001-reelsmith-baseline/tasks.md`.
 - **Cost.** Discovery transcribes the whole source once. The sidecar saves a second transcription on every re-render and reprompt.
-- **Disk.** Retired clips' files stay on disk after a reprompt, because retention deletes only the files of clips it retires itself. The sidecar lives as long as the source does. Both are covered by the disk-growth task T033.
+- **Disk.** `retire_clips` deletes no files, so the clips a reprompt replaced stay on disk until the retention janitor's `sweep_retired_files` deletes them, once each file is older than `YTVIDEO_RETIRED_FILES_GRACE_HOURS` (24); a job with a reprompt in flight is skipped. The sidecar lives as long as the source does: `sweep_unused_sources` removes both once the job has no live clip and has been idle for `retention_days` (T033, FR-013).
 - **Concurrency.** The in-flight guard is per process. One API process is assumed.
 - **Quality.** The ranking is heuristic and partly loudness-driven: `audio` is the window's relative RMS, and `hook` averages text cues with the opening's RMS. It is not signed off (G1).
 - **Not exercised.** PostgreSQL was not exercised for reprompt; the tests cover the memory and SQLite stores.

@@ -68,6 +68,15 @@ The API is served at both `/x` and `/api/x`. Routers are mounted without a prefi
 - **Cancellable blocking work.** ffmpeg and Whisper run in worker threads through `ffmpeg_tools.to_thread_cancellable`. A timeout or cancel kills the ffmpeg child, and Whisper checks a cancel event between segments.
 - **Restart recovery.** At startup with the SQL store, `fail_interrupted_jobs()` marks jobs left `pending`/`running` as `failed` ("interrupted by restart"), so the duplicate-URL check no longer blocks their URL. It runs before the queue worker starts.
 
+## Retention
+
+With the SQL store, the lifespan janitor (`app/main.py`) calls `retention.run_retention_sweeps` every `YTVIDEO_RETENTION_SWEEP_MINUTES` (60) with a timezone-aware `now` (FR-013). Three sweeps run in order:
+
+- **Expired clips.** `sweep_expired_clips` retires live clips older than `YTVIDEO_RETENTION_DAYS` (30) and deletes their video and thumbnail files.
+- **Unused sources** (T033). `sweep_unused_sources` removes a job's source video (`jobs.video_path`), its `<stem>.words.json` sidecar and its emptied folders (a URL job's `<slug>-<job8>/` and its `clips/`, an upload job's `uploads/upload_video-<job8>/clips/`). All must hold: the job is `completed` or `failed`; it has no live clip; its last activity (`updated_at`) is older than `retention_days`; neither the job row nor any of its clip rows changed in the last hour (a re-render has no in-flight registry; the clip sweep's retire also bumps the row, so a source outlives its last clip by at least an hour); no reprompt is in flight (`orchestrator.reprompt_in_flight`); the source resolves (symlinks and `..` followed) below a managed root (`YTVIDEO_DEFAULT_DOWNLOAD_PATH`, its `uploads/`, or the legacy `/tmp/yt/uploads`); and no other job references the same file. `jobs.video_path` is set to NULL and committed first, by an UPDATE that re-checks the conditions; a later re-render or reprompt answers 409 "source video not retained".
+- **Retired clip files** (T033). `sweep_retired_files` deletes a retired clip's video and thumbnail that are still on disk (`retire_clips`, used by a reprompt, deletes none) once the file's mtime is older than `YTVIDEO_RETIRED_FILES_GRACE_HOURS` (24). A file a live clip uses, or any clip of a job with a reprompt in flight (its new clips stay retired until the swap), is kept, as is anything outside the managed roots.
+- **Rules.** Rows change and commit before files are deleted. Folders are removed only when empty (`rmdir`), and a managed root never is. A delete that fails is logged and the sweep goes on. Not swept: `exports/` copies and manifests, empty `_tmp` folders, sources outside the managed roots (such as pre-T031 `/tmp/yt/<slug>/`), and a source two jobs share.
+
 ## Render Pipeline
 
 `render_service.render_clip` renders each chapter in **one ffmpeg pass straight from the source**: trim, blurred background still, scaled inset, caption overlay, even-dimension crop, then yuv420p libx264/AAC. The ffmpeg binary comes from `imageio-ffmpeg`, and probes and frame grabs use PyAV (`ffmpeg_tools`). Captions are drawn by the unchanged PIL renderer, once per unique caption, and composited as a single ffconcat overlay input (`caption_track`). See [ADR-004](decisions/004-ffmpeg-render-pipeline.md) for the timing rules and the deliberate behaviour changes.
@@ -126,3 +135,4 @@ All providers follow the same pattern: `get_<feature>_service()` factory reads t
 | `broll_planner` | B-roll windows and their one-word queries from a clip's words (pure) |
 | `broll_service` | B-roll providers (`local` keyword-named library, `pexels`) and the bounded fetch |
 | `broll_pexels_service` | Pexels video search + guarded, cached download (credit: author + page URL) |
+| `retention` | The janitor's sweeps: expired clips, unused sources (source, sidecar, empty folders), retired clip files after a grace period |
