@@ -18,7 +18,7 @@ FastAPI backend with an asyncio orchestrator that turns a video URL into caption
 **Project Type**: web application (API + SPA)
 **Performance Goals**: see SC-001 in the spec (measured, not targeted)
 **Constraints**: bundled ffmpeg only; offline default test run
-**Scale/Scope**: 46 HTTP operations, 40 event types, 16 tables, 18 web routes (counted at `67dd68d`; 38 event types at `40ab44d`)
+**Scale/Scope**: 46 HTTP operations, 40 event types, 16 tables, 18 web routes (counted at `67dd68d`; 38 event types at `40ab44d`; T045 removed one event type and one web route, leaving 39 and 17)
 
 ## Constitution Check
 
