@@ -10,7 +10,7 @@ Open work is tracked per feature in `specs/*/tasks.md`; this file keeps the fini
 
 | Spec | Tasks | State |
 |---|---|---|
-| [001 Reelsmith baseline](../specs/001-reelsmith-baseline/spec.md) | [tasks.md](../specs/001-reelsmith-baseline/tasks.md) | 3 open: T040, T041, T043 (owner decisions: ranking, face-track review, docs auth) |
+| [001 Reelsmith baseline](../specs/001-reelsmith-baseline/spec.md) | [tasks.md](../specs/001-reelsmith-baseline/tasks.md) | 2 open: T040, T041 (owner decisions: ranking, face-track review) |
 | [002-007 roadmap stubs](../specs/README.md) | none yet | stubs only: caption/brand pipeline, analytics, share links, webhooks, API tokens, workspaces |
 
 Constitution: [.specify/memory/constitution.md](../.specify/memory/constitution.md)

@@ -20,7 +20,7 @@ Reelsmith's Streamlit UI was a single form that submitted one job at a time with
 - TanStack Query — server state caching, SSE invalidation hooks
 - shadcn/ui — accessible, composable, Tailwind-native components
 - Served as static files from FastAPI in production (`YTVIDEO_SERVE_FRONTEND=true`)
-- API contract typed via openapi-typescript codegen from FastAPI's /openapi.json (dropped in T038: the client, `web/src/api/client.ts`, is hand-written, and the live schema is served by the backend at `/openapi.json` and `/api/openapi.json`)
+- API contract typed via openapi-typescript codegen from FastAPI's /openapi.json (dropped in T038: the client, `web/src/api/client.ts`, is hand-written, and the live schema is served by the backend at `/openapi.json` and `/api/openapi.json` while `YTVIDEO_REQUIRE_AUTH` is off, T043)
 
 ## Consequences
 

@@ -412,6 +412,41 @@ async def test_with_auth_the_spa_shell_stays_open_and_the_api_closed(
     )
 
 
+DOCS_PATHS = [
+    "/docs",
+    "/docs/oauth2-redirect",
+    "/redoc",
+    "/openapi.json",
+    "/api/docs",
+    "/api/docs/oauth2-redirect",
+    "/api/redoc",
+    "/api/openapi.json",
+]
+
+
+@pytest.mark.parametrize("accept", [HTML, JSON])
+async def test_with_auth_the_switched_off_docs_get_the_404_not_the_shell(
+    tmp_path, monkeypatch, accept
+):
+    """FR-060, T043: auth on switches the docs routes off. No docs path is a
+    client route and none is a file in dist, so the SPA fallback does not
+    answer for it and the static mount's own 404 is the response: a browser
+    navigation gets the same plain 404 as ``fetch``, with or without the key."""
+    monkeypatch.setattr(settings, "require_auth", True)
+    monkeypatch.setattr(settings, "api_key", "test-key")
+    key = {"Authorization": "Bearer test-key"}
+
+    async with _client(tmp_path, monkeypatch) as (client, _):
+        responses = [
+            await client.get(path, headers={"Accept": accept, **extra})
+            for path in DOCS_PATHS
+            for extra in ({}, key)
+        ]
+
+    assert [r.status_code for r in responses] == [404] * (2 * len(DOCS_PATHS))
+    assert all(r.json() == GENERIC_404 for r in responses)
+
+
 # ── SSE under serve_frontend ─────────────────────────────────────────────────
 
 
