@@ -507,6 +507,28 @@ async def test_a_failure_logs_its_cause_on_one_line(ollama_on, monkeypatch, capl
     assert message == f"[job-1] Clip re-rank failed ({cause}); clips keep the heuristic ranking"
 
 
+@pytest.mark.parametrize(
+    ("reply", "scored"),
+    [
+        ('{"c1": "95", "c2": 90, "c3": 50}', 2),
+        ('{"c1": true, "c2": 90, "c3": 50}', 2),
+        ('{"c1": NaN, "c2": 90, "c3": Infinity}', 1),
+    ],
+    ids=["string", "bool", "non-finite"],
+)
+async def test_a_partial_reply_keeps_the_heuristic_order_and_says_how_much_it_scored(ollama_on, caplog, reply, scored):
+    caplog.set_level(logging.INFO, logger=rr.__name__)
+    candidates = _candidates()
+
+    result = await _rerank(_Model(reply), candidates, job_id="job-1")
+
+    _assert_unchanged(result, candidates)
+    (message,) = _rerank_messages(caplog, logging.WARNING)
+    assert message.startswith(
+        f"[job-1] Clip re-rank reply scored {scored} of 3 candidates; clips keep the heuristic ranking (reply "
+    )
+
+
 async def test_done_log_compares_the_kept_clips_with_the_rerank_off_and_on(ollama_on, caplog):
     caplog.set_level(logging.INFO, logger=rr.__name__)
     model = _Model({"c1": 10, "c2": 90, "c3": 50})
