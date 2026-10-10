@@ -18,6 +18,9 @@ import pytest
 # any local .env file present in the developer's working directory.
 os.environ.setdefault("YTVIDEO_OLLAMA_ENABLED", "false")
 os.environ.setdefault("YTVIDEO_SEGMENT_PROVIDER", "chapter")
+# The LLM re-rank of discovered clips stays off (a developer's .env may turn
+# it on); tests that need it set it on settings and stub the model.
+os.environ.setdefault("YTVIDEO_SEGMENT_RERANK_PROVIDER", "none")
 os.environ.setdefault("YTVIDEO_JOB_STORE", "memory")
 # Never load a real Whisper model in the default run: the stub provider for
 # every test, and no lifespan warm-up. Real-model coverage lives in
