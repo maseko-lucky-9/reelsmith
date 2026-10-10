@@ -38,7 +38,7 @@ from app.routers import (
     xml_export,
 )
 from app.services import transcription_service
-from app.services.retention import sweep_expired_clips
+from app.services.retention import run_retention_sweeps
 from app.settings import settings
 from app.spa_fallback import SpaFallbackMiddleware
 from app.workers.orchestrator import run_orchestrator
@@ -143,13 +143,10 @@ async def lifespan(app: FastAPI):
             while True:
                 await asyncio.sleep(settings.retention_sweep_minutes * 60)
                 try:
-                    retired = await sweep_expired_clips(
-                        get_session_factory(),
-                        retention_days=settings.retention_days,
-                        now=datetime.now(UTC),
+                    # Expired clips, unused sources, retired clip files (T033).
+                    await run_retention_sweeps(
+                        get_session_factory(), now=datetime.now(UTC)
                     )
-                    if retired:
-                        log.info("Retention: retired %d clip(s)", len(retired))
                 except Exception:  # noqa: BLE001 — keep the janitor alive
                     log.exception("Retention sweep failed")
 
