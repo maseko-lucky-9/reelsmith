@@ -137,7 +137,6 @@ CLIENT_PATHS = [
     "/settings/api",
     "/settings/webhooks",
     "/team",
-    "/calendar",
     "/analytics",
     "/share/tok",
     "/share/rs.eyJjIjoiMSJ9.c2ln",  # share tokens are rs.<payload>.<sig>
@@ -220,6 +219,7 @@ NOT_CLIENT_PATHS = [
     "/uploads/new/",
     "/settings",
     "/no-such-page",
+    "/calendar",  # page removed with scheduled publishing (FR-032, T045)
 ]
 
 
@@ -236,6 +236,16 @@ async def test_html_navigation_to_other_paths_is_not_rewritten(served, path):
         as_json.content,
     )
     assert INDEX_HTML not in as_html.text
+
+
+async def test_html_navigation_to_the_removed_calendar_page_gets_the_api_404(served):
+    """``/calendar`` went with scheduled publishing (FR-032, T045): a reload
+    gets the API's plain 404, not the shell and not a server error."""
+    client, _ = served
+
+    response = await client.get("/calendar", headers={"Accept": HTML})
+
+    assert (response.status_code, response.json()) == (404, GENERIC_404)
 
 
 @pytest.mark.parametrize(

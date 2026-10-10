@@ -156,7 +156,6 @@ def test_does_not_prefer_html_otherwise(accept):
         "/settings/api",
         "/settings/webhooks",
         "/team",
-        "/calendar",
         "/analytics",
         "/share/tok",
         "/share/rs.eyJjIjoiMSJ9.c2ln",
@@ -198,6 +197,7 @@ def test_client_routes_match(path):
         "/api/uploads/new",
         "/Workflow",
         "/workflowx",
+        "/calendar",  # page removed with scheduled publishing (FR-032, T045)
     ],
 )
 def test_other_paths_do_not_match(path):
