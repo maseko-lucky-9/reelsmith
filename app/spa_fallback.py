@@ -71,7 +71,6 @@ CLIENT_ROUTES: tuple[str, ...] = (
     "/settings/api",
     "/settings/webhooks",
     "/team",
-    "/calendar",
     "/analytics",
     "/share/$token",
 )

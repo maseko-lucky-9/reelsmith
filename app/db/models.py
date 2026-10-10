@@ -347,8 +347,18 @@ class WorkspaceMember(Base):
 
 
 class ScheduledPost(Base):
+    """Unused since scheduling was dropped (T010/T045); table kept for
+    migration history.
+
+    Scheduled publishing was removed (FR-032) and its W3.2 worker
+    (``scheduler_service``) deleted, so nothing reads or writes this table.
+    Migrations are additive-only (constitution V): deployed databases have
+    it, and ``tests/unit/test_alembic_parity.py`` requires the models to
+    match the migrations, so the model stays.
+    """
+
     __tablename__ = "scheduled_posts"
-    # Worker poll path: WHERE status = ... AND scheduled_for <= now.
+    # Index created by migration l0m1n2o3p4q5 (status, scheduled_for).
     __table_args__ = (
         Index("ix_sp_status_scheduled_for", "status", "scheduled_for"),
     )

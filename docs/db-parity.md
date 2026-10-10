@@ -55,11 +55,15 @@ break it.
 7. **`server_default`** for new not-null columns OR backfill in a follow-up
    migration before flipping nullability.
 
-### Unused columns kept by rule 2
+### Unused columns and tables kept by rule 2
 
-| Column | Unused since | Why it stays |
+Migrations are additive (constitution V), so a dropped feature leaves its
+schema behind.
+
+| Column or table | Unused since | Why it stays |
 |---|---|---|
 | `publish_jobs.schedule_at` (+ `ix_publish_jobs_schedule_at`) | Scheduled publishing dropped (FR-032, T010) | No `DROP COLUMN`. The API no longer reads or writes it and rejects `schedule_at` in `POST /social/publish` with 422. Rows written before the drop may carry it with `status=pending`; nothing advances them. |
+| `scheduled_posts` (+ `ix_sp_status_scheduled_for`) | Scheduled publishing dropped (FR-032, T010); its W3.2 worker `scheduler_service` deleted (T045) | No `DROP TABLE`. Deployed databases have it (migration `l0m1n2o3p4q5`), and `tests/unit/test_alembic_parity.py` needs the `ScheduledPost` model to match the migrations. Nothing reads or writes it. |
 
 ## Models match migrations
 
@@ -91,22 +95,19 @@ Offline `--sql` is a Postgres-dialect check: on SQLite, batch
 
 ## Postgres-only features (W3)
 
-The Wave 3 scheduler relies on `SELECT … FOR UPDATE SKIP LOCKED`, which has
-no SQLite equivalent. Constraints:
+None. The only one planned was the W3.2 scheduler (`scheduler_service`,
+`SELECT … FOR UPDATE SKIP LOCKED`, which has no SQLite equivalent). No code
+ever called it, and it was deleted with the rest of scheduled publishing
+(FR-032, T045); its `scheduled_posts` table stays, unused (see above).
 
 | W3 Feature | SQLite | Postgres |
 |---|---|---|
-| `scheduled_posts` worker | **Unsupported** (worker refuses to start; logs `requires_postgres`) | Supported |
 | `analytics` snapshots refresh | Supported (single-writer) | Supported |
 | Webhook dispatcher retry budget | Supported | Supported |
 | API token bcrypt store | Supported | Supported |
 
-W3 PRs must:
-
-- Detect dialect at startup and gate the worker with a clear log line.
-- Document the SQLite limitation in the W3 release note.
-- Keep the calendar / analytics UI functional read-only when the worker is
-  disabled.
+A future Postgres-only feature must detect the dialect at startup, gate itself
+with a clear log line, and document the SQLite limitation in its release note.
 
 ## Audit findings (current HEAD `5865534`)
 
