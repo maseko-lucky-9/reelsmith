@@ -429,9 +429,9 @@ async def test_with_auth_the_switched_off_docs_get_the_404_not_the_shell(
     tmp_path, monkeypatch, accept
 ):
     """FR-060, T043: auth on switches the docs routes off. No docs path is a
-    client route and none is a file in dist, so neither the SPA fallback nor
-    the static mount answers for it: a browser navigation gets the same plain
-    404 as ``fetch``, with or without the key."""
+    client route and none is a file in dist, so the SPA fallback does not
+    answer for it and the static mount's own 404 is the response: a browser
+    navigation gets the same plain 404 as ``fetch``, with or without the key."""
     monkeypatch.setattr(settings, "require_auth", True)
     monkeypatch.setattr(settings, "api_key", "test-key")
     key = {"Authorization": "Bearer test-key"}
