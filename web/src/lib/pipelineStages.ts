@@ -371,7 +371,6 @@ const NON_STAGE_EVENT_TYPES = [
   'AnimatedCaptionRendered',
   'TransitionsApplied',
   'BrandVocabApplied',
-  'ScheduledPostQueued',
   'WebhookDispatched',
   'BulkExportCompleted',
   'ShareLinkCreated',

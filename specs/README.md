@@ -95,5 +95,5 @@ From T017.
 
 ## Not on the roadmap
 
-- **Scheduled publishing** was dropped by owner decision (FR-032, T010). The `/calendar` page, `app/services/scheduler_service.py` and the `scheduled_posts` table remain; cleaning them up is task T045.
+- **Scheduled publishing** was dropped by owner decision (FR-032, T010). T045 removed its leftovers (the `/calendar` page, `app/services/scheduler_service.py`, the `ScheduledPostQueued` event); the `scheduled_posts` table stays, unused, because migrations are additive (constitution V, `docs/db-parity.md`).
 - **Speaker diarisation and speaker-coloured captions** (W3.10) were deferred: see `tasks/todo.md` and `docs/wave-3-gate.md`. ADR-003 only says speaker-coloured captions are paired with diarisation. The "ADR-003 §A.15" cited there does not exist in ADR-003.
