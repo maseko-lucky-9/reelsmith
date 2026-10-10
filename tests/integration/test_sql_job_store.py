@@ -89,8 +89,12 @@ async def test_list_clips_min_score_filter(db_store: SqlJobStore):
     state = JobState(job_id="integ-score", url="https://yt.test/score", download_path="/tmp")
     await db_store.create(state)
 
-    await db_store.upsert_clip("integ-score", "clip-low", lambda c: c.update({"start": 0, "end": 10, "virality_score": 20}))
-    await db_store.upsert_clip("integ-score", "clip-high", lambda c: c.update({"start": 10, "end": 20, "virality_score": 80}))
+    await db_store.upsert_clip(
+        "integ-score", "clip-low", lambda c: c.update({"start": 0, "end": 10, "virality_score": 20})
+    )
+    await db_store.upsert_clip(
+        "integ-score", "clip-high", lambda c: c.update({"start": 10, "end": 20, "virality_score": 80})
+    )
 
     high = await db_store.list_clips(job_id="integ-score", min_score=50)
     assert all(c["virality_score"] >= 50 for c in high)

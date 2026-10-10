@@ -23,8 +23,9 @@ static mount serves the shell with its usual headers, when all of these hold:
    file there (assets, the favicon and other static files win).
 
 Shared paths. ``/jobs/{id}``, ``/jobs/new``, ``/clips/{id}`` and
-``/clips/{id}/edit`` are both client routes and API routes. An HTML-preferring GET or HEAD gets the SPA; every other request
-(``fetch``, ``EventSource``, ``curl``, any non-GET) gets the API, unchanged.
+``/clips/{id}/edit`` are both client routes and API routes. An HTML-preferring GET or HEAD gets
+the SPA; every other request (``fetch``, ``EventSource``, ``curl``, any non-GET) gets the API,
+unchanged.
 Because one URL then has two representations, every GET or HEAD that meets
 conditions 1 and 3-5 gets ``Vary: Accept`` on its response (merged into an
 existing ``Vary``), whichever one it got, so a cache never replays the shell

@@ -1012,6 +1012,7 @@ async def _reprompt_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> 
         )
         raise
     except Exception as e:  # noqa: BLE001 — a failed reprompt must not fail the job
+        error_text = str(e)
         log.exception(
             "[%s] Reprompt failed after %.2fs; the job keeps its clips",
             job_id, time.perf_counter() - t0,
@@ -1021,7 +1022,7 @@ async def _reprompt_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> 
             await _undo_reprompt(
                 store, job_id, new_clip_ids, new_indexes, retired_old_ids
             )
-            await _emit(bus, EventType.REPROMPT_FAILED, job_id, error=str(e))
+            await _emit(bus, EventType.REPROMPT_FAILED, job_id, error=error_text)
 
         await _finish_then_honour_cancel(_fail())
     finally:
@@ -1317,13 +1318,8 @@ async def _process_chapter(
         log.info("[%s] Chapter %d  removing fillers  before=%d", job_id, index, len(words))
         step_t0 = time.perf_counter()
         words_before = len(words)
-        spans = [
-            filler_removal_service.WordSpan(text=w.word, start=w.start, end=w.end)
-            for w in words
-        ]
-        # plan_keep_intervals collapses the kept WordSpans into (start, end)
-        # intervals. For caption/render alignment we want the per-word list
-        # filtered, which we do here directly with the same allowlist.
+        # For caption/render alignment we want the per-word list filtered, which
+        # we do here directly with the filler allowlist.
         allowlist = {f.lower() for f in filler_removal_service.DEFAULT_FILLERS}
         kept_words = [
             w for w in words

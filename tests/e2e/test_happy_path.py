@@ -13,6 +13,7 @@ import pytest
 from asgi_lifespan import LifespanManager
 
 from app.main import create_app
+from app.services.platforms.base import Chapter, DownloadResult
 from app.workers import orchestrator as orch
 
 pytestmark = pytest.mark.e2e
@@ -26,8 +27,6 @@ def _fake_subfolder(
     clips.mkdir(parents=True, exist_ok=True)
     return str(base), str(clips)
 
-
-from app.services.platforms.base import Chapter, DownloadResult
 
 
 class _FakeAdapter:

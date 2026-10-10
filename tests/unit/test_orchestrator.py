@@ -10,6 +10,7 @@ from app.bus.event_bus import AsyncEventBus
 from app.bus.job_store import JobStore
 from app.domain.events import Event, EventType
 from app.domain.models import JobState
+from app.services.platforms.base import Chapter, DownloadResult
 from app.workers import orchestrator as orch
 
 
@@ -21,8 +22,6 @@ def _fake_subfolder(
     clips.mkdir(parents=True, exist_ok=True)
     return str(base), str(clips)
 
-
-from app.services.platforms.base import Chapter, DownloadResult
 
 
 class _FakeAdapter:

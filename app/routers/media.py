@@ -8,7 +8,6 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
-
 router = APIRouter(prefix="/clips", tags=["media"])
 
 _RANGE_RE = re.compile(r"bytes=(\d+)-(\d*)")
