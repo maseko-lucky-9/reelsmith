@@ -9,3 +9,6 @@ markers = [
 ]
 addopts = "-m 'not integration and not live and not playwright'"
 filterwarnings = []
+
+[tool.ruff]
+target-version = "py314"

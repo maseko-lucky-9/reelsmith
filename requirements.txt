@@ -38,9 +38,6 @@ numpy==2.5.3
 # Wave 1 — secrets at rest (OAuth tokens for social accounts)
 cryptography==50.0.2
 
-# Wave 1 — publishing scheduler (replaced by Postgres-backed worker in W3)
-apscheduler==3.11.3
-
 # Wave 1 — XML export templates (Premiere FCP7 + DaVinci FCPXML)
 Jinja2==3.1.6
 
