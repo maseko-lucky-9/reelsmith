@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -740,7 +741,8 @@ def _candidate_blocks(prompt: str) -> list[tuple[str, str]]:
     return re.findall(r'<candidate id="(c\d+)">(.*?)</candidate>', prompt)
 
 
-async def test_discover_stores_the_blended_score(harness, store):
+async def test_discover_stores_the_blended_score(harness, store, caplog):
+    caplog.set_level(logging.INFO, logger=segment_rerank.__name__)
     fake = _use_ollama(harness, '{"c1": 40, "c2": 60}')
 
     recorder = await harness.run(store)
@@ -759,6 +761,10 @@ async def test_discover_stores_the_blended_score(harness, store):
     assert [e.payload["score"] for e in recorder.of(EventType.SEGMENT_SCORED)] == [35, 40]
     (proposed,) = recorder.of(EventType.SEGMENTS_PROPOSED)
     assert proposed.payload == {"count": 2, "candidates": 4}
+    # The source's length reaches the re-rank, which logs the kept clips with
+    # the re-rank off and on (gate G1 measures the clip count with it).
+    (done,) = [r.getMessage() for r in caplog.records if "Clip re-rank done" in r.getMessage()]
+    assert "kept off=2 [c1, c2] on=2 [c1, c2]" in done
 
 
 async def test_discover_selection_runs_on_the_blended_scores(harness, memory_store):

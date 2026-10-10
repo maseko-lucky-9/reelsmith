@@ -12,25 +12,29 @@ on), ``rerank`` runs between the proposer and
 2. **One call.** The shortlist goes to the configured Ollama model as ids
    ``c1``..``cN`` in start order, each with at most ``EXCERPT_CHARS`` of its
    transcript (and the job's prompt, if any); the reply is a 0-100 integer
-   per id, requested through Ollama's JSON-schema output.
+   per id, requested through Ollama's JSON-schema output. Thinking is off and
+   the context and reply length are set (``NUM_CTX``, ``NUM_PREDICT``): a
+   thinking model otherwise spends the deadline thinking and can overflow
+   its context, which discards the instructions.
 3. **Blend.** ``(1 - MODEL_WEIGHT) * heuristic + MODEL_WEIGHT * model``,
-   rounded half up. A shortlisted candidate without a usable model score keeps
-   its heuristic score. The usual selection then runs on the shortlist alone.
+   rounded half up, only when every shortlisted id got a usable score. The
+   usual selection then runs on the shortlist alone.
 
 Trust boundary: the transcript is untrusted (a speaker can say "ignore
 previous instructions"). Excerpts and the job prompt enter the request as
-delimited data, flattened to one line with angle brackets removed, so they
-cannot close their block. From the reply only numbers under the known ids
-are read: other keys, non-numbers and non-finite values are ignored, and
-scores are clamped to 0-100. The model has no tools; it cannot add a
-candidate or change one's times, title, text or breakdown. Its only effect
-is on the shortlisted candidates' scores, which then feed the selection.
+delimited data: NFKC-normalised, control and zero-width characters dropped,
+flattened to one line and angle brackets removed, so they cannot close their
+block. From the reply only numbers under the known ids are read: other keys,
+non-numbers and non-finite values are ignored, and scores are rounded half
+up and clamped to 0-100. The model has no tools; it cannot add a candidate or
+change one's times, title, text or breakdown. Its only effect is on the
+shortlisted candidates' scores, which then feed the selection.
 
 Never fatal: a provider other than ``ollama``, Ollama disabled, fewer than two
 shortlisted candidates, a connection or HTTP error, the deadline
-(``ollama_timeout_seconds`` for the whole exchange), or a reply with no usable
-score returns the candidates unchanged, in the heuristic's order.
-Cancellation propagates.
+(``ollama_timeout_seconds`` for the whole exchange), a reply cut off by its
+length limit, or a reply that does not score every shortlisted id returns the
+candidates unchanged, in the heuristic's order. Cancellation propagates.
 """
 
 from __future__ import annotations
@@ -40,13 +44,14 @@ import json
 import logging
 import math
 import time
+import unicodedata
 from collections.abc import Sequence
 from dataclasses import replace
 from typing import Any
 
 import httpx
 
-from app.services.segment_discovery import relative_min_score
+from app.services.segment_discovery import relative_min_score, select_discovered
 from app.services.segment_proposer import ProposedSegment, select_segments
 from app.settings import settings
 
@@ -70,6 +75,17 @@ the heuristic's scores, 1 takes the model's. Heuristic scores ran about 13 to
 38 on real talks (gate G1) while the model uses the whole 0-100 range, so at
 0.5 the model's opinion decides most orderings."""
 
+NUM_CTX = 8192
+"""Context window requested for the call (Ollama's ``num_ctx``). Ten 600-char
+excerpts and the instructions take about 2,000 tokens; Ollama 0.35.1 defaulted
+to 4,096 and shifted the context, dropping the instructions, when a thinking
+model overran it."""
+
+NUM_PREDICT = 256
+"""Most tokens the model may reply with (Ollama's ``num_predict``). Ten scores
+take about 60; a reply cut off by this cap (``done_reason == "length"``) is not
+used."""
+
 _INSTRUCTIONS = (
     "You rate candidate clips cut from one video for a vertical short "
     "(TikTok, Reels, Shorts). Give each candidate an integer score from 0 to "
@@ -81,6 +97,12 @@ _INSTRUCTIONS = (
     "Reply with ONLY a JSON object that maps every candidate id to its score, "
     'for example {{"c1": 72, "c2": 15}}. No other keys and no other text.'
 )
+
+
+class UnusableReply(ValueError):
+    """Ollama answered, but not with a whole reply that can be used."""
+
+
 _REQUEST_CLAUSE = " Also weigh how well it answers the viewer request."
 _TAGS = "<candidate> tags"
 _TAGS_WITH_REQUEST = "<viewer_request> and <candidate> tags"
@@ -101,9 +123,16 @@ def shortlist(candidates: Sequence[ProposedSegment]) -> list[ProposedSegment]:
 
 
 def _as_data(text: str, limit: int) -> str:
-    """``text`` as one line of plain data: angle brackets (which could close
-    its block) become spaces, whitespace collapses, cut to ``limit``."""
-    return " ".join(text.replace("<", " ").replace(">", " ").split())[:limit]
+    """``text`` as one line of plain data, cut to ``limit``.
+
+    NFKC first, so fullwidth and small forms of ``<`` and ``>`` become ASCII;
+    then whitespace becomes a space and other non-printable characters
+    (controls, zero-width and format characters) are dropped; then the angle
+    brackets, which could close the block, become spaces; whitespace collapses.
+    """
+    normal = unicodedata.normalize("NFKC", text)
+    visible = "".join(" " if ch.isspace() else ch for ch in normal if ch.isspace() or ch.isprintable())
+    return " ".join(visible.replace("<", " ").replace(">", " ").split())[:limit]
 
 
 def build_prompt(pool: Sequence[ProposedSegment], request: str | None = None) -> str:
@@ -164,19 +193,21 @@ async def _ask_ollama(
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> str:
     """The model's raw reply text. One ``/api/generate`` call, not streamed,
-    its output held to a JSON object with an integer per id. The whole
-    exchange is bounded by ``ollama_timeout_seconds``; raises on any error."""
+    thinking off, its output held to a JSON object with an integer per id.
+    The whole exchange is bounded by ``ollama_timeout_seconds``; raises on any
+    error, and on a reply cut off by its length limit."""
     timeout = settings.ollama_timeout_seconds
     body: dict[str, Any] = {
         "model": settings.ollama_model,
         "prompt": prompt_text,
         "stream": False,
+        "think": False,
         "format": {
             "type": "object",
             "properties": {cid: {"type": "integer"} for cid in ids},
             "required": list(ids),
         },
-        "options": {"temperature": 0},
+        "options": {"temperature": 0, "num_ctx": NUM_CTX, "num_predict": NUM_PREDICT},
     }
     url = f"{settings.ollama_base_url.rstrip('/')}/api/generate"
     async with asyncio.timeout(timeout):
@@ -184,16 +215,33 @@ async def _ask_ollama(
             response = await client.post(url, json=body)
             response.raise_for_status()
             reply = response.json()
-    text = reply.get("response") if isinstance(reply, dict) else None
+    if not isinstance(reply, dict):
+        raise UnusableReply("the reply is not a JSON object")
+    if reply.get("done_reason") == "length":
+        raise UnusableReply("the reply was cut off (done_reason=length)")
+    text = reply.get("response")
     if not isinstance(text, str):
-        raise ValueError("the reply has no 'response' text")
+        raise UnusableReply("the reply has no 'response' text")
     return text
+
+
+def _failure_cause(error: Exception, timeout: float) -> str:
+    """One line naming why the call failed."""
+    if isinstance(error, TimeoutError):
+        return f"no reply within the {timeout:g} s deadline (YTVIDEO_OLLAMA_TIMEOUT_SECONDS)"
+    if isinstance(error, httpx.HTTPStatusError):
+        return f"HTTP {error.response.status_code} from Ollama"
+    if isinstance(error, UnusableReply):
+        return str(error)
+    lines = str(error).splitlines()
+    return f"{type(error).__name__}: {lines[0]}" if lines else type(error).__name__
 
 
 async def rerank(
     candidates: Sequence[ProposedSegment],
     *,
     prompt: str | None = None,
+    duration: float | None = None,
     job_id: str = "-",
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> list[ProposedSegment]:
@@ -202,7 +250,9 @@ async def rerank(
     Re-ranked: the shortlist with blended scores, best first (ties: earliest
     start), as copies; the proposer's segments are not modified. Otherwise
     the candidates unchanged, in their order. Never raises, except
-    cancellation.
+    cancellation. With the source's ``duration``, the ``Clip re-rank done``
+    log line also lists the clips ``select_discovered`` keeps with the
+    re-rank off and on (gate G1 measures the clip count with it).
     """
     unchanged = list(candidates)
     provider = settings.segment_rerank_provider
@@ -229,30 +279,42 @@ async def rerank(
         scores = parse_scores(raw, ids)
     except Exception as e:  # noqa: BLE001 — the re-rank must never fail discovery
         log.warning(
-            "[%s] Clip re-rank failed (%s: %s); clips keep the heuristic ranking",
+            "[%s] Clip re-rank failed (%s); clips keep the heuristic ranking",
             job_id,
-            type(e).__name__,
-            e,
+            _failure_cause(e, settings.ollama_timeout_seconds),
         )
         return unchanged
-    if not scores:
+    if set(scores) != set(ids):
+        # The schema requires every id, so a partial reply means something
+        # went wrong; blending some ids would mix two score scales.
         log.warning(
-            "[%s] Clip re-rank reply had no usable score; clips keep the heuristic ranking (reply %.200r)",
+            "[%s] Clip re-rank reply scored %d of %d candidates; clips keep the heuristic ranking (reply %.200r)",
             job_id,
+            len(scores),
+            len(ids),
             raw,
         )
         return unchanged
 
-    ranked = [
-        replace(seg, score=blend(seg.score, scores[cid], MODEL_WEIGHT)) if cid in scores else seg
-        for cid, seg in zip(ids, pool)
-    ]
+    ranked = [replace(seg, score=blend(seg.score, scores[cid], MODEL_WEIGHT)) for cid, seg in zip(ids, pool)]
+    kept = ""
+    if duration is not None:
+        label = {id(seg): cid for cid, seg in zip(ids, pool)} | {id(new): cid for cid, new in zip(ids, ranked)}
+        off = select_discovered(candidates, duration)
+        on = select_discovered(ranked, duration)
+
+        def names(segs: Sequence[ProposedSegment]) -> str:
+            # Shortlisted clips by id; any other by its start time.
+            return ", ".join(label.get(id(s), f"@{s.start:g}") for s in segs)
+
+        kept = f"  kept off={len(off)} [{names(off)}] on={len(on)} [{names(on)}]"
     log.info(
-        "[%s] Clip re-rank done (%.2fs)  model=%s  weight=%.2f  (start, end, heuristic, model, blended)=%s",
+        "[%s] Clip re-rank done (%.2fs)  model=%s  weight=%.2f  (start, end, heuristic, model, blended)=%s%s",
         job_id,
         time.perf_counter() - step_t0,
         settings.ollama_model,
         MODEL_WEIGHT,
-        [(seg.start, seg.end, seg.score, scores.get(cid), new.score) for cid, seg, new in zip(ids, pool, ranked)],
+        [(seg.start, seg.end, seg.score, scores[cid], new.score) for cid, seg, new in zip(ids, pool, ranked)],
+        kept,
     )
     return sorted(ranked, key=lambda s: (-s.score, s.start, s.end))

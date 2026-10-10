@@ -442,7 +442,7 @@ async def _discover_segments(
         candidates = await asyncio.to_thread(
             proposer.propose, words, audio_path, [], safe_end, prompt=prompt
         )
-        ranked = await segment_rerank.rerank(candidates, prompt=prompt, job_id=job_id)
+        ranked = await segment_rerank.rerank(candidates, prompt=prompt, duration=safe_end, job_id=job_id)
         kept = segment_discovery.select_discovered(ranked, safe_end)
         chapters = segment_discovery.segments_to_chapters(kept, safe_end)
     except asyncio.CancelledError:
