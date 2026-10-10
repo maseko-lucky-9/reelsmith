@@ -78,8 +78,19 @@ def test_primary_face_of_nothing_is_none():
 
 def test_usable_faces_drop_low_scores_and_tiny_faces():
     min_h = reframe_service.MIN_FACE_HEIGHT * SRC[1]  # 18 px of 360
-    keep = [_face(100, h=min_h), _face(300, score=reframe_service.MIN_FACE_SCORE)]
-    drop = [_face(200, h=min_h - 1), _face(400, score=0.59)]
+    small_h = reframe_service.SMALL_FACE_HEIGHT * SRC[1]  # 9 px of 360
+    sure = reframe_service.SMALL_FACE_SCORE
+    keep = [
+        _face(100, h=min_h),
+        _face(300, score=reframe_service.MIN_FACE_SCORE),
+        _face(500, h=small_h, score=sure),  # small, but a clear face
+        _face(550, h=min_h - 1, score=sure),
+    ]
+    drop = [
+        _face(400, score=0.59),
+        _face(200, h=min_h - 1, score=0.79),  # small and unsure
+        _face(250, h=8.9, score=0.99),  # under the 2.5 % floor (9 px of 360)
+    ]
 
     assert usable_faces([*keep, *drop], SRC[1]) == keep
 
@@ -215,7 +226,7 @@ def test_plan_follows_the_face_within_the_pan_range():
 
 
 def test_plan_holds_the_last_face_through_a_gap():
-    obs = [_obs(0.0, _face(500)), _obs(0.5), _obs(1.0), _obs(1.5)]
+    obs = [_obs(0.0, _face(500)), _obs(0.5, _face(500)), _obs(1.0), _obs(1.5)]
 
     plan = plan_crop_track(obs, SRC)
 
@@ -223,11 +234,11 @@ def test_plan_holds_the_last_face_through_a_gap():
 
 
 def test_plan_starts_on_the_first_face_when_the_clip_opens_without_one():
-    obs = [_obs(0.0), _obs(0.5), _obs(1.0, _face(500))]
+    obs = [_obs(0.0), _obs(0.5), _obs(1.0, _face(500)), _obs(1.5, _face(500))]
 
     plan = plan_crop_track(obs, SRC)
 
-    assert plan.track == [(0.0, 399.0), (1.0, 399.0)]
+    assert plan.track == [(0.0, 399.0), (1.5, 399.0)]
 
 
 def test_plan_caps_keyframes_for_a_long_clip():
@@ -274,6 +285,221 @@ def test_a_source_without_pan_room_is_letterboxed():
     plan = plan_crop_track(obs, (360, 640))
 
     assert plan.track is None and plan.reason == "no horizontal pan room"
+
+
+# ── T041: cutaways, wide shots, slides ────────────────────────────────────────
+
+
+def _x_at(plan, t: float) -> float:
+    """The crop's left edge at clip time ``t`` (the render interpolates)."""
+    return float(np.interp(t, [k for k, _ in plan.track], [x for _, x in plan.track]))
+
+
+def _steady(face: Face, start: float, count: int) -> list[Observation]:
+    return [_obs(start + k * 0.5, face) for k in range(count)]
+
+
+SPEAKER_X = x_left_for(150, SRC[0], WINDOW_W)  # 49
+OTHER_X = x_left_for(500, SRC[0], WINDOW_W)  # 399
+
+
+def test_a_one_second_cutaway_does_not_move_the_crop():
+    """The speaker is gone and an audience face fills the frame for 1 s (its
+    first and last samples 1.0 s apart): the crop stays on the speaker."""
+    speaker, audience = _face(150), _face(500, h=40)
+    obs = [
+        *_steady(speaker, 0.0, 10),  # 0 - 4.5 s
+        *_steady(audience, 5.0, 3),  # 5.0, 5.5, 6.0
+        *_steady(speaker, 6.5, 10),  # back to the speaker
+    ]
+
+    plan = plan_crop_track(obs, SRC)
+
+    assert plan.track is not None
+    assert {x for _t, x in plan.track} == {SPEAKER_X}
+
+
+def test_a_bigger_face_for_a_second_does_not_take_the_crop_from_the_speaker():
+    """Someone walks past the camera: a larger face for 1 s while the speaker
+    is still in the frame. The crop keeps following the speaker."""
+    speaker, passer_by = _face(150), _face(500, h=120)
+    obs = [
+        *_steady(speaker, 0.0, 10),
+        *[_obs(5.0 + k * 0.5, speaker, passer_by) for k in range(3)],
+        *_steady(speaker, 6.5, 10),
+    ]
+
+    plan = plan_crop_track(obs, SRC)
+
+    assert {x for _t, x in plan.track} == {SPEAKER_X}
+
+
+def test_a_cutaway_face_near_the_speakers_spot_is_not_the_speaker():
+    """The G2 Wikimania cutaway, scaled: the audience face is 0.39 window
+    widths from where the speaker was and 0.35 of their height. Close enough
+    to pass for the speaker by position alone; the size tells them apart."""
+    speaker, audience = _face(150, h=60), _face(150 + 0.39 * WINDOW_W, h=21)
+    obs = [
+        *_steady(speaker, 0.0, 10),
+        *_steady(audience, 5.0, 3),
+        *_steady(speaker, 6.5, 10),
+    ]
+
+    plan = plan_crop_track(obs, SRC)
+
+    assert {x for _t, x in plan.track} == {SPEAKER_X}
+
+
+def test_a_walking_speaker_stays_the_subject():
+    """The speaker crosses the frame at 60 px per sample (0.3 window widths,
+    faster than the crop may pan) and a larger face shows for 1 s mid-walk:
+    one subject throughout, so the speaker never leaves the window."""
+    walk = [_face(100 + 60 * k) for k in range(1, 8)]  # 160 → 520, 2.0 - 5.0 s
+    passer_by = _face(600, h=120)
+    obs = [
+        *_steady(_face(100), 0.0, 4),
+        *[
+            _obs(2 + k * 0.5, f, *([passer_by] if 2 <= k <= 4 else []))
+            for k, f in enumerate(walk)
+        ],
+        *_steady(walk[-1], 5.5, 10),
+    ]
+
+    plan = plan_crop_track(obs, SRC)
+
+    for o in obs:
+        speaker_cx = o.faces[0].cx
+        assert _x_at(plan, o.t) <= speaker_cx <= _x_at(plan, o.t) + WINDOW_W, o.t
+
+
+def test_a_face_held_for_switch_seconds_takes_over():
+    """The boundary: a new face that is the frame's main face for exactly
+    1.5 s (4 samples) is a change of speaker, so the crop heads its way,
+    even though the first speaker comes back afterwards."""
+    assert reframe_service.SWITCH_SECONDS == 1.5
+    obs = [
+        *_steady(_face(150), 0.0, 10),
+        *_steady(_face(500), 5.0, 4),  # 5.0, 5.5, 6.0, 6.5
+        *_steady(_face(150), 7.0, 10),
+    ]
+
+    plan = plan_crop_track(obs, SRC)
+
+    assert max(x for _t, x in plan.track) > SPEAKER_X + DEADBAND
+
+
+def test_a_persisting_new_speaker_takes_the_crop_from_the_start_of_their_shot():
+    """A cut to another speaker who stays on screen: the crop moves to them,
+    and the switch is back-dated to their first sample (the clip is known in
+    full), so only the speed cap delays it: 2 s after the cut it has covered
+    90 % of the move. Applied only once confirmed (``SWITCH_SECONDS`` later),
+    it would still be mid-pan."""
+    obs = [*_steady(_face(150), 0.0, 10), *_steady(_face(500), 5.0, 20)]
+
+    plan = plan_crop_track(obs, SRC)
+
+    assert abs(plan.track[-1][1] - OTHER_X) <= DEADBAND + 1.0  # settled on them
+    assert _x_at(plan, 7.0) >= SPEAKER_X + 0.9 * (OTHER_X - SPEAKER_X)
+
+
+def test_two_short_cutaways_do_not_add_up_to_a_switch():
+    """The same audience face for 1 s, slides (no face) for 3 s, then the
+    same face for 1 s again: neither stint lasts ``SWITCH_SECONDS``, so the
+    crop never leaves the speaker."""
+    speaker, audience = _face(150), _face(500, h=40)
+    obs = [
+        *_steady(speaker, 0.0, 10),
+        *_steady(audience, 5.0, 3),
+        *[_obs(6.5 + k * 0.5) for k in range(6)],  # 6.5 - 9.0 s: slides
+        *_steady(audience, 9.5, 3),
+        *_steady(speaker, 11.0, 10),
+    ]
+
+    plan = plan_crop_track(obs, SRC)
+
+    assert {x for _t, x in plan.track} == {SPEAKER_X}
+
+
+def test_a_clip_opening_on_a_cutaway_starts_on_the_speaker():
+    """A cutaway in the first second is not taken for the subject: the
+    lead-in takes the speaker's position."""
+    obs = [*_steady(_face(500, h=40), 0.0, 2), *_steady(_face(150), 1.0, 20)]
+
+    plan = plan_crop_track(obs, SRC)
+
+    assert {x for _t, x in plan.track} == {SPEAKER_X}
+
+
+def test_a_small_speaker_in_a_wide_shot_is_tracked_not_held():
+    """A cut from a close-up to a wide shot where the speaker's face is 12 px
+    of 360 (3.3 %, under ``MIN_FACE_HEIGHT``) and walks right, scoring 0.86
+    (the host crossing the G2 Wikimania stage scored that): the crop follows
+    them instead of holding the close-up's position."""
+    close_up = _face(150, h=60)
+    wide = [_face(300 + 10 * k, h=12, score=0.86) for k in range(20)]  # 300 → 490
+    obs = [
+        *_steady(close_up, 0.0, 10),
+        *[_obs(5.0 + k * 0.5, f) for k, f in enumerate(wide)],
+    ]
+
+    plan = plan_crop_track(obs, SRC)
+
+    assert plan.track is not None and plan.face_samples == 30
+    end_x = x_left_for(490, SRC[0], WINDOW_W)
+    assert abs(plan.track[-1][1] - end_x) <= DEADBAND + 1.0
+
+
+def test_an_unsure_small_face_is_not_followed():
+    """The guard: a small face scoring 0.79, under ``SMALL_FACE_SCORE`` (as
+    most faces that small did on the G2 Wikimania talk: median 0.70, mostly
+    audience), does not count, so the crop holds."""
+    unsure = 0.79
+    obs = [
+        *_steady(_face(150, h=60), 0.0, 20),
+        *[_obs(10 + k * 0.5, _face(300 + 10 * k, h=12, score=unsure)) for k in range(10)],
+    ]
+
+    plan = plan_crop_track(obs, SRC)
+
+    assert plan.face_samples == 20
+    assert {x for _t, x in plan.track} == {SPEAKER_X}
+
+
+def _clip_with_faces(faces: int, samples: int) -> list[Observation]:
+    """A talking head for the first ``faces`` samples, then slides."""
+    return [_obs(k * 0.5, *([_face(150)] if k < faces else [])) for k in range(samples)]
+
+
+@pytest.mark.parametrize(
+    ("faces", "samples", "tracked"),
+    [(10, 20, True), (9, 20, False), (11, 21, True), (10, 21, False)],
+)
+def test_a_clip_mostly_without_a_face_is_letterboxed(faces, samples, tracked):
+    """Slides or credits for most of the clip: with a face in fewer than
+    ``MIN_FACE_SHARE`` of the samples there is no track (the letterbox, as
+    for a split screen). Exactly at the share, the clip is still tracked."""
+    assert reframe_service.MIN_FACE_SHARE == 0.5  # the boundary cases above
+
+    plan = plan_crop_track(_clip_with_faces(faces, samples), SRC)
+
+    assert (plan.track is not None) is tracked
+    assert plan.face_samples == faces
+    if not tracked:
+        assert plan.reason == f"a face in only {faces}/{samples} samples"
+
+
+def test_a_mostly_slides_clip_gets_no_track_from_the_detector(tmp_path):
+    """Through ``get_crop_track``: a fake detector that finds a face in one
+    sample of four (the talking head between slides)."""
+    src = write_block_video(tmp_path / "slides.mp4", block_left=lambda i: 0, frames=96)
+    face = Face(x=470.0, y=150.0, w=60.0, h=60.0, score=0.9)
+    detector = ScriptedDetector([[face], [], [], []])
+
+    plan = reframe_service.get_crop_track(src, 0.0, 4.0, detector=detector)
+
+    assert detector.calls == plan.samples == 9  # 2 fps over 4 s, plus the last frame
+    assert plan.track is None
+    assert plan.reason == f"a face in only 3/{plan.samples} samples"
 
 
 # ── frame sampling (real decode of synthetic sources) ─────────────────────────
