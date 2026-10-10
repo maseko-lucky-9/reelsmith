@@ -32,6 +32,7 @@ from app.services import (
     render_service,
     segment_discovery,
     segment_proposer,
+    segment_rerank,
     thumbnail_service,
     transcription_service,
 )
@@ -389,7 +390,9 @@ async def _discover_segments(
     Transcribes the whole source once (its 16 kHz wav also feeds the
     proposer's loudness features and is deleted afterwards), saves the words
     as the ``<source stem>.words.json`` sidecar, scores candidate windows with
-    ``get_segment_proposer()`` and keeps the best (``select_discovered``).
+    ``get_segment_proposer()``, optionally re-ranks them with a local LLM
+    (``segment_rerank.rerank``: off by default, never raises) and keeps the
+    best (``select_discovered``).
     Emits ``SegmentsProposed`` and one ``SegmentScored`` per kept segment.
 
     Returns the chapters and the full-source words (``None`` when the source
@@ -439,7 +442,8 @@ async def _discover_segments(
         candidates = await asyncio.to_thread(
             proposer.propose, words, audio_path, [], safe_end, prompt=prompt
         )
-        kept = segment_discovery.select_discovered(candidates, safe_end)
+        ranked = await segment_rerank.rerank(candidates, prompt=prompt, job_id=job_id)
+        kept = segment_discovery.select_discovered(ranked, safe_end)
         chapters = segment_discovery.segments_to_chapters(kept, safe_end)
     except asyncio.CancelledError:
         raise
