@@ -165,17 +165,20 @@ async def test_html_navigation_to_a_client_route_gets_the_spa(served, path, acce
     ],
 )
 async def test_api_requests_to_shared_paths_still_get_the_api(served, accept):
-    """``/jobs/{id}``, ``/jobs/new`` and ``/clips/{id}/edit`` are both client
-    routes and API routes: only an HTML navigation gets the SPA."""
+    """``/jobs/{id}``, ``/jobs/new``, ``/clips/{id}`` and ``/clips/{id}/edit``
+    are both client routes and API routes: only an HTML navigation gets the
+    SPA."""
     client, clip_id = served
     headers = {"Accept": accept}
 
     job = await client.get("/jobs/abc", headers=headers)
     new = await client.get("/jobs/new", headers=headers)
     edit = await client.get(f"/clips/{clip_id}/edit", headers=headers)
+    clip = await client.get("/clips/xyz", headers=headers)
 
     assert (job.status_code, job.json()) == (404, {"detail": "job not found: abc"})
     assert (new.status_code, new.json()) == (404, {"detail": "job not found: new"})
+    assert (clip.status_code, clip.json()) == (404, {"detail": "clip not found"})
     assert (edit.status_code, edit.json()) == (
         404,
         {"detail": "no edit state for clip"},
