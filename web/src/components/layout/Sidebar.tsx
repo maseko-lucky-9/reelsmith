@@ -28,7 +28,7 @@ const CREATE_ITEMS: NavItem[] = [
 ]
 
 const POST_ITEMS: NavItem[] = [
-  // hidden: no backend, see specs roadmap (Calendar -> /calendar, Analytics -> /analytics)
+  // hidden: no backend, see specs roadmap (Analytics -> /analytics)
   { label: 'Social accounts', icon: Share2, to: '/settings/social' },
 ]
 
