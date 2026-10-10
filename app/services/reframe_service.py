@@ -23,8 +23,9 @@ source px)``:
    at least ``SAME_FACE_SIZE`` of its height; the frame's main face first).
    Another face takes over only once it has been the frame's main face for
    ``SWITCH_SECONDS`` (``SMALL_SWITCH_FACTOR`` times that if it was only ever
-   a small face), and then from its first sample: a shorter cutaway never
-   moves the crop, and a real change of speaker adds no lag.
+   a small face), and then from its first sample: a shorter cutaway seen on
+   its own never moves the crop (cutaways split by faceless frames can add
+   up, see ADR-006 *Known limits*), and a real change of speaker adds no lag.
 4. **Position.** The window (``render_service.pan_crop``) is centred on the
    primary face and clamped to ``[0, src_w - window]``. A frame without it
    holds the last position; frames before its first sample take that one.
