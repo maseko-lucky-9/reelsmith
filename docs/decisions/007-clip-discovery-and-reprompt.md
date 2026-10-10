@@ -3,7 +3,7 @@
 **Status:** Accepted (opt-in: `YTVIDEO_SEGMENT_PROVIDER` defaults to `chapter` by owner choice; whether the heuristic picks good clips is not signed off, gate G1)
 **Date:** 2026-10-09
 **Author:** Thulani Maseko
-**Implements:** FR-009 (T011), FR-016 (T008); PRs #43, #49, #51
+**Implements:** FR-009 (T011; the optional re-rank, T040), FR-016 (T008); PRs #43, #49, #51, #PRNUM
 
 ## Context
 
@@ -49,6 +49,21 @@
 - **Fallback.** A source shorter than the minimum clip, no kept segment, or any discovery error keeps the single "Full Video" chapter. The short-source and error cases emit `StageSkipped(segment_proposer, reason)`. Discovery never fails the job; cancellation propagates.
 - **Events and fields.** `SegmentsProposed` is emitted, then one `SegmentScored` per kept segment. The clip stores `virality_score`, `score_breakdown` and the proposer's `summary`.
 
+### Re-rank (T040, PR #PRNUM; opt-in)
+
+`YTVIDEO_SEGMENT_RERANK_PROVIDER` (`none` by default, or `ollama`) adds an optional local-LLM pass between the proposer and `select_discovered`: `_discover_segments` calls `segment_rerank.rerank` (`app/services/segment_rerank.py`). With `none` discovery is unchanged.
+
+- **Shortlist.** The heuristic's best non-overlapping candidates at or above the relative bar (`select_segments` with `relative_min_score`), at most `MAX_CANDIDATES = 10`. Overlapping windows are left out, so the model judges distinct passages rather than ten shifts of one window.
+- **One call.** `POST {YTVIDEO_OLLAMA_BASE_URL}/api/generate` to `YTVIDEO_OLLAMA_MODEL`, not streamed, temperature 0, its output held to a JSON object with an integer per id (Ollama's JSON-schema `format`, Ollama 0.5 or later). The candidates go as `c1`..`cN` in start order, each with at most `EXCERPT_CHARS = 600` characters of its transcript. The job's prompt, if any, goes too (at most 200 characters), and the model is asked to weigh it.
+- **Blend.** `(1 - MODEL_WEIGHT) * heuristic + MODEL_WEIGHT * model` with `MODEL_WEIGHT = 0.5`, rounded half up. A shortlisted candidate without a usable model score keeps its heuristic score. The selection rules above then run unchanged on the shortlist alone, so a low model score can drop a clip the heuristic would have kept. Heuristic scores run about 13 to 38 and the model's span 0 to 100, so at 0.5 the model decides most orderings.
+- **Stored.** The clip's existing `virality_score` (and `SegmentScored.score`) holds the blended score; `score_breakdown` keeps the heuristic's features. Nothing new is stored or emitted. The `Clip re-rank done` log line lists each candidate's heuristic, model and blended score.
+- **Trust boundary.** The transcript is untrusted: a speaker, or a crafted upload, can say "ignore previous instructions".
+  - Excerpts and the job prompt enter the request as delimited data (`<candidate id="cN">...</candidate>`, `<viewer_request>...</viewer_request>`), flattened to one line with `<` and `>` removed, so they cannot close their block. The instructions say the tagged text is data, never an instruction.
+  - From the reply only numbers under the known ids are read. Unknown ids and keys, strings, booleans, null, lists, NaN and infinities are ignored; numbers are rounded and clamped to 0 to 100.
+  - The model has no tools, and nothing else in its reply is read: it cannot add a candidate or change one's times, title, text or breakdown. The most a successful injection can do is move the shortlisted candidates' scores, each by at most `MODEL_WEIGHT` x 100 points, and with them which shortlisted windows are kept.
+- **Fallback.** Never fatal. A provider other than `ollama` (an unknown value logs a warning), `YTVIDEO_OLLAMA_ENABLED=false`, fewer than two shortlisted candidates, a connection or HTTP error, the deadline, or a reply with no usable score logs and returns the proposer's candidates unchanged, in the heuristic's order. The deadline is `YTVIDEO_OLLAMA_TIMEOUT_SECONDS` for the whole exchange (`asyncio.timeout`, on top of httpx's own timeouts), so the re-rank adds at most that much to discovery. Cancellation propagates.
+- **Not covered.** A reprompt (`_propose_reprompt_chapters`) is not re-ranked. The re-rank has not been run against a real model; whether it picks better clips is unmeasured, and that is what gate G1 needs.
+
 ### Reprompt (PR #51)
 
 - **Router** (`app/routers/reprompt.py`). It validates the request:
@@ -83,10 +98,11 @@
 - **Cost.** Discovery transcribes the whole source once. The sidecar saves a second transcription on every re-render and reprompt.
 - **Disk.** `retire_clips` deletes no files, so the clips a reprompt replaced stay on disk until the retention janitor's `sweep_retired_files` deletes them, once each file is older than `YTVIDEO_RETIRED_FILES_GRACE_HOURS` (24); a job with a reprompt in flight is skipped. The sidecar lives as long as the source does: `sweep_unused_sources` removes both once the job has no live clip and has been idle for `retention_days` (T033, FR-013).
 - **Concurrency.** The in-flight guard is per process. One API process is assumed.
-- **Quality.** The ranking is heuristic and partly loudness-driven: `audio` is the window's relative RMS, and `hook` averages text cues with the opening's RMS. It is not signed off (G1).
+- **Quality.** The ranking is heuristic and partly loudness-driven: `audio` is the window's relative RMS, and `hook` averages text cues with the opening's RMS. It is not signed off (G1). The optional re-rank (*Re-rank* above) adds a local model's judgement; it is off by default and its effect is unmeasured.
 - **Not exercised.** PostgreSQL was not exercised for reprompt; the tests cover the memory and SQLite stores.
 
 ## Tests
 
 - Discovery: `tests/unit/test_orchestrator_discover.py`, `test_segment_discovery.py`, `test_segment_selection.py`, `test_segment_proposer.py`, `test_segment_proposer_heuristic.py`.
+- Re-rank: `tests/unit/test_segment_rerank.py` (stubbed model: order, blend, parsing, prompt bounds, injection, every fallback, deadline, cancellation) and the re-rank cases in `tests/unit/test_orchestrator_discover.py`.
 - Reprompt: `tests/contract/test_reprompt_router.py`, `tests/unit/test_orchestrator_reprompt.py` (memory and SQL stores), `tests/unit/test_event_bus.py`, `web/src/routes/jobs.$jobId.test.tsx`, `web/src/hooks/useJobSSE.test.ts`.
