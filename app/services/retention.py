@@ -15,22 +15,30 @@
 Shared rules. A row is changed and committed *before* any file is deleted,
 so a failed commit never leaves a row pointing at a missing file. A file a
 live clip still references is kept: rows written before per-job output
-folders (T030) can share one path across jobs. Sweeps 2 and 3 delete only
-below a managed root (``managed_roots``), after resolving symlinks and
-``..``, and remove a folder only when it is empty (``rmdir``). A file or
-folder that cannot be deleted is logged and skipped; a database error
-propagates. ``exports/`` copies and manifests, and ``_tmp`` leftovers, are
-not swept.
+folders (T030) can share one path across jobs. A file or folder that cannot
+be deleted is logged and skipped; a database error propagates. ``exports/``
+copies and manifests, and ``_tmp`` leftovers, are not swept.
+
+Safety of sweeps 2 and 3. Paths read from the database are untrusted: a value
+with a NUL byte, a relative path or a ``..`` component is never used to
+delete anything (``_checked``) and no filesystem call is made for it. The
+others are resolved and must lie below a managed root (``managed_roots``).
+Every delete then goes through ``delete_below_root``, which re-validates at
+the moment of deletion instead of trusting that earlier check: the folder
+chain is re-opened from the root without following symlinks, the entry must
+not be a symlink, and a folder is removed only with ``rmdir`` (empty only).
 """
 
 from __future__ import annotations
 
 import errno
 import logging
+import os
+import stat
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from sqlalchemy import exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -117,7 +125,7 @@ async def sweep_expired_clips(
     return [row[0] for row in rows]
 
 
-# ── Managed roots and path checks ─────────────────────────────────────────────
+# ── Managed roots and untrusted paths ─────────────────────────────────────────
 
 
 def managed_roots() -> tuple[Path, ...]:
@@ -130,15 +138,38 @@ def managed_roots() -> tuple[Path, ...]:
     )
 
 
-def _resolve(raw: str) -> Path | None:
-    """``raw`` with symlinks and ``..`` resolved, or None if it cannot be."""
+def _is_unsafe(raw: str) -> bool:
+    """A database path that must never reach the filesystem: a NUL byte, a
+    relative path or a ``..`` component. A purely lexical test."""
+    return "\x00" in raw or not os.path.isabs(raw) or ".." in PurePath(raw).parts
+
+
+def _checked(raw: str | None) -> Path | None:
+    """The resolved form of a database path, or None when it is unsafe
+    (``_is_unsafe``: rejected without any filesystem call) or cannot be
+    resolved."""
+    if not raw or _is_unsafe(raw):
+        return None
     try:
         return Path(raw).resolve()
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
         log.warning(
             "retention: kept %s: its path cannot be resolved", raw, exc_info=True
         )
         return None
+
+
+def _aliases(raw: str) -> set[str]:
+    """Every spelling of one database path to compare for "the same file":
+    the stored string, its lexical normal form (absolute paths only) and,
+    for a safe path, its resolved form. Used only to *keep* files, so an
+    unsafe path still protects what it names."""
+    names = {raw}
+    if "\x00" not in raw and os.path.isabs(raw):
+        names.add(os.path.normpath(raw))
+    if (resolved := _checked(raw)) is not None:
+        names.add(str(resolved))
+    return names
 
 
 def _is_managed(path: Path, roots: Sequence[Path]) -> bool:
@@ -146,29 +177,151 @@ def _is_managed(path: Path, roots: Sequence[Path]) -> bool:
     return path not in roots and any(path.is_relative_to(root) for root in roots)
 
 
-def _unlink(path: Path, owner: str) -> bool:
-    """Delete one file; a failure is logged and reported as False."""
+# ── Deleting, re-validated at the moment of deletion ──────────────────────────
+
+# With dir_fd support (macOS, Linux) the folder chain is walked from the root
+# with O_NOFOLLOW, one openat() per component, and the entry is lstat'ed and
+# removed relative to the last folder's descriptor: a folder swapped for a
+# symlink at any depth fails the walk (ELOOP/ENOTDIR), and nothing outside
+# the root can be reached. Without it (e.g. Windows) the parent is
+# re-resolved and compared just before an lstat + unlink by path, which
+# narrows the race window but cannot close it.
+_DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+_PINNED = (
+    {os.open, os.stat, os.unlink, os.rmdir} <= os.supports_dir_fd
+    and os.stat in os.supports_follow_symlinks
+    and hasattr(os, "O_DIRECTORY")
+    and hasattr(os, "O_NOFOLLOW")
+)
+
+
+class _Refused(Exception):
+    """The entry changed since the sweep checked it; it is left alone."""
+
+
+def _owning_root(path: Path, roots: Sequence[Path]) -> Path | None:
+    """The deepest root ``path`` lies strictly below; None if there is none,
+    if ``path`` is a root, or if it is not absolute and normalised."""
+    if not path.is_absolute() or ".." in path.parts or path in roots:
+        return None
+    owners = [root for root in roots if path.is_relative_to(root)]
+    return max(owners, key=lambda root: len(root.parts), default=None)
+
+
+def _verify(
+    st: os.stat_result,
+    path: Path,
+    directory: bool,
+    accept: Callable[[os.stat_result], bool] | None,
+) -> bool:
+    """Whether the lstat'ed entry may go. A symlink is refused; a folder
+    where a file is expected raises, so it is logged like a failed unlink."""
+    if stat.S_ISLNK(st.st_mode):
+        raise _Refused("it is a symlink now")
+    if directory and not stat.S_ISDIR(st.st_mode):
+        raise _Refused("it is no longer a folder")
+    if not directory and stat.S_ISDIR(st.st_mode):
+        raise IsADirectoryError(errno.EISDIR, "a folder, not a file", str(path))
+    return accept is None or accept(st)
+
+
+def _open_folder(name: str | Path, dir_fd: int | None = None) -> int:
     try:
-        path.unlink(missing_ok=True)
-    except OSError:
-        log.exception("retention: could not delete %s (%s)", path, owner)
+        return os.open(name, _DIR_FLAGS, dir_fd=dir_fd)
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise _Refused(f"{name} is no longer a real folder") from None
+        raise
+
+
+def _remove_pinned(
+    path: Path,
+    root: Path,
+    directory: bool,
+    accept: Callable[[os.stat_result], bool] | None,
+) -> bool:
+    *folders, name = path.relative_to(root).parts
+    fd = _open_folder(root)
+    try:
+        for folder in folders:
+            child = _open_folder(folder, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        if not _verify(st, path, directory, accept):
+            return False
+        if directory:
+            os.rmdir(name, dir_fd=fd)
+        else:
+            os.unlink(name, dir_fd=fd)
+        return True
+    finally:
+        os.close(fd)
+
+
+def _remove_by_path(
+    path: Path,
+    root: Path,
+    directory: bool,
+    accept: Callable[[os.stat_result], bool] | None,
+) -> bool:
+    parent = path.parent
+    if parent.resolve() != parent or not parent.is_relative_to(root):
+        raise _Refused("its folder moved")
+    if not _verify(os.lstat(path), path, directory, accept):
         return False
+    if directory:
+        os.rmdir(path)
+    else:
+        os.unlink(path)
     return True
 
 
-def _remove_empty_dirs(folders: Iterable[Path]) -> None:
-    """``rmdir`` each folder, deepest first; a folder that still holds
-    anything is kept as it is."""
+def delete_below_root(
+    path: Path,
+    roots: Sequence[Path],
+    *,
+    owner: str,
+    directory: bool = False,
+    accept: Callable[[os.stat_result], bool] | None = None,
+) -> bool:
+    """Delete one file (or, with ``directory``, one empty folder) that lies
+    strictly below one of the resolved ``roots``; True if it was deleted.
+
+    Re-validated now, whatever the caller checked before: the path must be
+    absolute, normalised and not a root; every folder from the root down
+    must be a real folder (no symlink); the entry itself must not be a
+    symlink; ``accept(lstat)``, if given, must agree. A folder is removed
+    with ``rmdir`` only, so one that holds anything stays. Missing entries
+    are not an error; refusals are logged as warnings and failures with
+    their traceback. Never raises ``OSError``.
+    """
+    root = _owning_root(path, roots)
+    if root is None:
+        log.warning(
+            "retention: refused %s (%s): not below a managed folder", path, owner
+        )
+        return False
+    remove = _remove_pinned if _PINNED else _remove_by_path
+    try:
+        return remove(path, root, directory, accept)
+    except FileNotFoundError:
+        return False
+    except _Refused as e:
+        log.warning("retention: refused %s (%s): %s", path, owner, e)
+        return False
+    except OSError as e:
+        if directory and e.errno in (errno.ENOTEMPTY, errno.EEXIST):
+            log.debug("retention: kept folder %s (%s): not empty", path, owner)
+        else:
+            log.exception("retention: could not delete %s (%s)", path, owner)
+        return False
+
+
+def _remove_empty_dirs(folders: Iterable[Path], roots: Sequence[Path]) -> None:
+    """Remove each folder that is empty, deepest first."""
     for folder in sorted(set(folders), key=lambda p: len(p.parts), reverse=True):
-        try:
-            folder.rmdir()
-        except FileNotFoundError:
-            continue
-        except OSError as e:
-            if e.errno in (errno.ENOTEMPTY, errno.EEXIST, errno.ENOTDIR):
-                log.debug("retention: kept folder %s: not empty", folder)
-            else:
-                log.exception("retention: could not remove folder %s", folder)
+        delete_below_root(folder, roots, owner="emptied job folder", directory=True)
 
 
 # ── Unused source videos ──────────────────────────────────────────────────────
@@ -189,9 +342,10 @@ async def sweep_unused_sources(
     clip; its last activity (``updated_at``, else ``created_at``) is older
     than ``retention_days`` and than ``QUIET_PERIOD``; none of its clip rows
     changed within ``QUIET_PERIOD``; ``in_flight(job_id)`` is False; the
-    source resolves below one of ``roots``; and no other job references the
-    same file (by its path or its resolved path). ``jobs.video_path`` is set
-    to NULL and committed before anything is deleted.
+    source is a safe path (``_checked``) that resolves below one of
+    ``roots``; and no other job references the same file (``_aliases``).
+    ``jobs.video_path`` is set to NULL and committed before anything is
+    deleted, through ``delete_below_root``.
 
     Folders removed when empty: the source's own folder and its ``clips``
     (a URL job's ``<slug>-<job8>``), and the folder of each clip file of the
@@ -235,7 +389,7 @@ async def sweep_unused_sources(
         if not candidates:
             return []
         references = [
-            (job_id, raw, _resolve(raw))
+            (job_id, _aliases(raw))
             for job_id, raw in (
                 await session.execute(
                     select(JobRecord.id, JobRecord.video_path).where(
@@ -246,20 +400,20 @@ async def sweep_unused_sources(
         ]
 
         for job_id, raw in candidates:
-            source = _resolve(raw)
-            if source is None:
-                continue
+            source = _checked(raw)
             # Debug, not warning: these are steady states, seen every tick.
-            if not _is_managed(source, roots):
+            if source is None or not _is_managed(source, roots):
                 log.debug(
-                    "retention: kept source %s (job %s): outside the managed folders",
+                    "retention: kept source %r (job %s): unsafe or outside the "
+                    "managed folders",
                     raw,
                     job_id,
                 )
                 continue
+            names = _aliases(raw)
             if any(
-                other_id != job_id and (other_raw == raw or other_source == source)
-                for other_id, other_raw, other_source in references
+                other_id != job_id and names & other_names
+                for other_id, other_names in references
             ):
                 log.debug(
                     "retention: kept source %s (job %s): another job uses it",
@@ -290,7 +444,7 @@ async def sweep_unused_sources(
                 )
             ).all()
             for raw in {raw for pair in clip_paths for raw in pair if raw}:
-                path = _resolve(raw)
+                path = _checked(raw)
                 if path is None:
                     continue
                 folders += [
@@ -302,9 +456,9 @@ async def sweep_unused_sources(
 
     for job_id, source in cleared:
         for path in (source, words_sidecar_path(str(source))):
-            _unlink(path, f"source of job {job_id}")
+            delete_below_root(path, roots, owner=f"source of job {job_id}")
         log.info("retention: removed the unused source %s (job %s)", source, job_id)
-    _remove_empty_dirs(folders)
+    _remove_empty_dirs(folders, roots)
     return [job_id for job_id, _ in cleared]
 
 
@@ -321,12 +475,13 @@ async def sweep_retired_files(
 ) -> list[str]:
     """Delete the leftover files of retired clips; return the deleted paths.
 
-    A retired clip's ``output_path`` or ``thumbnail_path`` is deleted when the
-    file's mtime is more than ``grace_hours`` before ``now``, it resolves
-    below one of ``roots``, and neither a live clip nor any clip of a job
-    with ``in_flight(job_id)`` references it (by path or resolved path): a
-    reprompt's new clips stay retired (hidden) until its swap. Rows are not
-    changed. ``now`` must be timezone-aware.
+    A retired clip's ``output_path`` or ``thumbnail_path`` is deleted when it
+    is a safe path (``_checked``) resolving below one of ``roots``, neither a
+    live clip nor any clip of a job with ``in_flight(job_id)`` references it
+    (``_aliases``; a reprompt's new clips stay retired, i.e. hidden, until
+    its swap), and the file's mtime, read at the moment of deletion, is more
+    than ``grace_hours`` before ``now``. Rows are not changed. ``now`` must
+    be timezone-aware.
     """
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
@@ -363,43 +518,32 @@ async def sweep_retired_files(
         ).all()
 
     # Files no retired clip may take with it: those of live clips, and those
-    # of every clip of a job with a reprompt in flight (its new clips are
-    # retired, i.e. hidden, until the swap).
-    keep_raw = {raw for pair in live for raw in pair if raw} | {
-        raw
-        for _, job_id, *paths in retired
-        if in_flight(job_id)
-        for raw in paths
-        if raw
-    }
-    keep = {path for raw in keep_raw if (path := _resolve(raw)) is not None}
+    # of every clip of a job with a reprompt in flight.
+    keep: set[str] = set()
+    for raw in {raw for pair in live for raw in pair if raw}:
+        keep |= _aliases(raw)
+    for _, job_id, *paths in retired:
+        if in_flight(job_id):
+            for raw in paths:
+                if raw:
+                    keep |= _aliases(raw)
+
     seen: set[Path] = set()
     deleted: list[str] = []
     for clip_id, _, *paths in retired:
         for raw in paths:
-            if not raw or raw in keep_raw:
+            if not raw or _aliases(raw) & keep:
                 continue
-            path = _resolve(raw)
-            if (
-                path is None
-                or path in seen
-                or path in keep
-                or not _is_managed(path, roots)
-            ):
+            path = _checked(raw)
+            if path is None or path in seen or not _is_managed(path, roots):
                 continue
             seen.add(path)
-            try:
-                mtime = path.stat().st_mtime
-            except FileNotFoundError:
-                continue
-            except OSError:
-                log.exception(
-                    "retention: could not stat %s (retired clip %s)", path, clip_id
-                )
-                continue
-            if mtime >= cutoff:
-                continue
-            if _unlink(path, f"retired clip {clip_id}"):
+            if delete_below_root(
+                path,
+                roots,
+                owner=f"retired clip {clip_id}",
+                accept=lambda st: st.st_mtime < cutoff,
+            ):
                 deleted.append(str(path))
     return deleted
 

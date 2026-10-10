@@ -225,11 +225,12 @@ async def test_unused_source_sidecar_and_empty_folder_are_removed(
 
 
 async def test_upload_job_folder_is_removed_but_the_uploads_root_is_kept(
-    factory, root, roots
+    factory, root, roots, caplog
 ):
     """An upload's source is ``uploads/<uuid>.mp4``; its clips live in
     ``uploads/upload_video-<job8>/clips``. Both empty folders go; ``uploads``
-    itself is a managed root and stays even when empty."""
+    itself is a managed root and stays even when empty: the sweep never
+    even asks to remove it (no refusal warning)."""
     upload = _file(root / "uploads" / "1f2e3d4c.mp4", b"source")
     sidecar = _file(root / "uploads" / "1f2e3d4c.words.json", b"[]")
     job_folder = root / "uploads" / "upload_video-abcdef12"
@@ -243,12 +244,14 @@ async def test_upload_job_folder_is_removed_but_the_uploads_root_is_kept(
         thumbnail_path=str(clips / "00_Full Video.jpg"),
     )
 
-    assert await _sweep_sources(factory, roots) == [job_id]
+    with caplog.at_level(logging.WARNING, logger="app.services.retention"):
+        assert await _sweep_sources(factory, roots) == [job_id]
 
     assert not upload.exists()
     assert not sidecar.exists()
     assert not job_folder.exists()
     assert (root / "uploads").is_dir()
+    assert caplog.records == []
 
 
 async def test_source_is_kept_while_a_clip_is_live(factory, root, roots):
@@ -586,16 +589,24 @@ async def test_a_file_an_in_flight_reprompt_uses_is_kept_for_every_job(
     assert mp4.exists()
 
 
-async def test_retired_file_outside_the_managed_roots_is_kept(factory, roots, outside):
+async def test_retired_file_outside_the_managed_roots_is_kept(
+    factory, roots, outside, caplog
+):
+    """Skipped quietly by the sweep's own check (it is seen every tick),
+    never handed to the delete that would refuse it with a warning."""
     mp4 = _file(outside / "00_Talk.mp4", age=timedelta(days=60))
     await _job_with_clip(factory, output_path=str(mp4))
 
-    assert await _sweep_files(factory, roots) == []
+    with caplog.at_level(logging.WARNING, logger="app.services.retention"):
+        assert await _sweep_files(factory, roots) == []
 
     assert mp4.exists()
+    assert caplog.records == []
 
 
-async def test_retired_symlink_escaping_the_root_is_kept(factory, root, roots, outside):
+async def test_retired_symlink_escaping_the_root_is_kept(
+    factory, root, roots, outside, caplog
+):
     secret = _file(outside / "secret.mp4", b"secret", age=timedelta(days=60))
     link = root / "c" / "00_Talk.mp4"
     link.parent.mkdir(parents=True)
@@ -603,10 +614,13 @@ async def test_retired_symlink_escaping_the_root_is_kept(factory, root, roots, o
     _age(link, timedelta(days=60))
     await _job_with_clip(factory, output_path=str(link))
 
-    assert await _sweep_files(factory, roots) == []
+    with caplog.at_level(logging.WARNING, logger="app.services.retention"):
+        assert await _sweep_files(factory, roots) == []
 
     assert secret.read_bytes() == b"secret"
     assert link.is_symlink()
+    # Resolved to its outside target and skipped quietly, not refused late.
+    assert caplog.records == []
 
 
 async def test_retired_file_unlink_failure_is_logged_and_does_not_abort(
