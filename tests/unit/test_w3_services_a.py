@@ -1,11 +1,14 @@
-"""Unit tests for W3.2 + W3.3 + W3.4 services."""
+"""Unit tests for W3.3 + W3.4 services.
+
+The W3.2 ``scheduler_service`` tests went with the service (T045):
+scheduled publishing was dropped (FR-032).
+"""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
 import pytest
 from cryptography.fernet import Fernet
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db.base import Base
@@ -13,13 +16,11 @@ from app.db.models import (
     ClipRecord,
     JobRecord,
     PublishJob,
-    ScheduledPost,
     ShareLink,
     SocialAccount,
 )
 from app.services import (
     analytics_service as anal,
-    scheduler_service as sch,
     share_link_service as sl,
 )
 from app.settings import settings
@@ -49,76 +50,6 @@ async def _seed_publish_job(factory) -> tuple[str, str, str]:
         session.add(pj)
         await session.commit()
         return pj.id, clip.id, acct.id
-
-
-# ── W3.2 scheduler_service ──────────────────────────────────────────────
-
-
-async def test_claim_due_posts_flips_status(factory):
-    pj_id, _, _ = await _seed_publish_job(factory)
-    past = datetime.now(timezone.utc) - timedelta(seconds=30)
-    async with factory() as session:
-        sp = ScheduledPost(publish_job_id=pj_id, scheduled_for=past)
-        session.add(sp)
-        await session.commit()
-
-    async with factory() as session:
-        claimed = await sch.claim_due_posts(session, worker_id="w1")
-    assert len(claimed) == 1
-
-    async with factory() as session:
-        sp = (await session.execute(select(ScheduledPost))).scalar_one()
-        assert sp.status == "posting"
-        assert sp.worker_id == "w1"
-        assert sp.locked_at is not None
-
-
-async def test_claim_due_posts_skips_future(factory):
-    pj_id, _, _ = await _seed_publish_job(factory)
-    future = datetime.now(timezone.utc) + timedelta(minutes=5)
-    async with factory() as session:
-        session.add(ScheduledPost(publish_job_id=pj_id, scheduled_for=future))
-        await session.commit()
-
-    async with factory() as session:
-        claimed = await sch.claim_due_posts(session, worker_id="w1")
-    assert claimed == []
-
-
-async def test_mark_published(factory):
-    pj_id, _, _ = await _seed_publish_job(factory)
-    past = datetime.now(timezone.utc) - timedelta(seconds=30)
-    async with factory() as session:
-        sp = ScheduledPost(publish_job_id=pj_id, scheduled_for=past)
-        session.add(sp)
-        await session.commit()
-        sp_id = sp.id
-
-    async with factory() as session:
-        await sch.mark_published(session, sp_id)
-
-    async with factory() as session:
-        sp = (await session.execute(select(ScheduledPost))).scalar_one()
-        assert sp.status == "published"
-        assert sp.attempts == 1
-
-
-async def test_mark_published_with_error(factory):
-    pj_id, _, _ = await _seed_publish_job(factory)
-    past = datetime.now(timezone.utc) - timedelta(seconds=30)
-    async with factory() as session:
-        sp = ScheduledPost(publish_job_id=pj_id, scheduled_for=past)
-        session.add(sp)
-        await session.commit()
-        sp_id = sp.id
-
-    async with factory() as session:
-        await sch.mark_published(session, sp_id, error="upstream 502")
-
-    async with factory() as session:
-        sp = (await session.execute(select(ScheduledPost))).scalar_one()
-        assert sp.status == "failed"
-        assert sp.last_error == "upstream 502"
 
 
 # ── W3.3 analytics_service ─────────────────────────────────────────────
