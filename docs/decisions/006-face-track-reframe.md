@@ -4,6 +4,7 @@
 **Date:** 2026-10-09
 **Author:** Thulani Maseko
 **Implements:** FR-010 (reframe half of T012)
+**Amended:** 2026-10-10 by T041: primary-face continuity, small faces in wide shots, the face-share fallback; *Known limits* rewritten. G2 is still open.
 **Numbering:** merged as `005-face-track-reframe.md` (PR #52) alongside [ADR-005](005-api-route-prefix.md) (PR #50); renumbered to 006 in the Spec Kit close-out. The content is unchanged.
 
 ## Context
@@ -34,14 +35,15 @@ Sources: a Wikimania 2025 lightning talk (1920x1080 VP9, 236 s, a speaker inset 
   - A download is accepted only if its SHA-256 equals the digest in the repository's Git LFS pointer (`8f2383e4…2552fa4`, 232,589 bytes). Nothing downloads at import or in the default test run.
 - **Track.** `reframe_service` builds the track:
   - **Sampling.** PyAV decodes the chapter at 2 fps, plus its last frame, on the render's `-ss` clock, with display rotation applied.
-  - **Faces.** Faces below a 0.6 score or shorter than 5 % of the frame height are ignored. The primary face is the largest; faces within 10 % of its area go to the one nearest the frame centre.
-  - **Gaps.** A frame without a face holds the last position.
+  - **Faces.** A face counts from 5 % of the frame height at a 0.6 score, or, in a wide shot, from 2.5 % at a 0.8 score (T041). A frame's main face is the largest; faces within 10 % of its area go to the one nearest the frame centre.
+  - **Primary face (T041).** The crop follows one subject: the face nearest the previous primary, within half a window width horizontally and at least half its height, continues it even when another face is larger. Another face takes over only after being the frame's main face for 1.5 s, and the switch is back-dated to its first sample, so a real change of speaker adds no lag. A clip opens without a primary, so an opening cutaway is treated the same way.
+  - **Gaps.** A frame without the primary face holds the last position.
   - **Smoothing.** A zero-phase EMA (forward and backward, padded by reflection, so no lag), then a dead zone of 0.1 window widths, then a speed cap of 0.5 window widths per second. The crop never snaps.
   - **Keyframes.** At most 64, chosen by greedy top-down simplification that keeps both endpoints.
 - **Fallbacks.** The reel keeps the letterbox exactly as before, and `StageSkipped(reframe, reason)` is emitted, when any of these holds:
   - a split screen (`active_speaker_service.detect_split_screen`);
   - several faces of similar size in most face frames;
-  - no face in the clip;
+  - no face in the clip, or a usable face in fewer than half the samples (slides, credits, shots the detector cannot read; T041);
   - a source with no horizontal pan room;
   - any error, including a failed download.
 - **Wiring.** The orchestrator's `_reframe_step` runs only when the job's `reframe` option is on and `YTVIDEO_REFRAME_PROVIDER=face_track`. It runs in `to_thread_cancellable` (a cancel stops the decode within one frame) for renders and re-renders alike. Cancellation propagates.
@@ -51,9 +53,15 @@ Sources: a Wikimania 2025 lightning talk (1920x1080 VP9, 236 s, a speaker inset 
 
 - **Cost.** Measured on the G2 runs: 0.49 to 0.68 s per 40 to 45 s chapter, including the decode, which is about 6 to 8 ms per sample on an M-series Mac. The first call also pays for the 232 KB download: about 0.8 s here, two HTTP requests through GitHub's LFS redirect.
 - **Network.** The first face-tracked render needs network access once. Offline, the reel falls back to the letterbox with the download error as the skip reason.
-- **Known limits (G2).**
+- **Known limits (G2).** T041 (2026-10-10) fixed three of them in `reframe_service` (constants and reasons in the module) without touching the render graph. The G2 sign-off is still open and the default stays `letterbox`.
+  - **Fixed: an audience cutaway pulled the crop.** A cutaway shorter than 1.5 s no longer moves it. Real run (YuNet, the G2 sources, main `952f49d` against T041): in chapter W2 of the Wikimania talk, an 8 s audience cutaway (29 to 37 s) moved the crop up to 112 px (0.18 window widths) and it was still 61 px off at the end of the reel. With T041 it stays at 0 throughout. The cutaway's one face of at least 5 % appears in two samples (29.0 and 29.5 s), and its other faces are smaller and score under 0.8.
+  - **Fixed: small faces in wide shots were ignored.** Faces from 2.5 % of the frame height now count at a 0.8 score instead of the position being held. Covered by synthetic tests; on the two G2 talks it changed no track. Their one real case is the host speaking on the Wikimania stage in the opening wide shot: 3.2 to 4.4 % of the frame height, scores 0.73 to 0.86, at least 0.8 in 4 samples (checked by eye at 2.5 and 7.0 s). A blurred foreground audience head (16 to 17 %, scores 0.64 to 0.75) is the larger face in that shot, so the crop went to it before T041 and still does (see *the largest face wins a frame* below).
+  - **Fixed in part: slides and credits.** A clip with a usable face in fewer than half its samples now falls back to the letterbox as a whole. On the G2 TEDx chapters this letterboxes T1 (29 of 91 samples) and T2 (30 of 81), which were face-tracked before.
+  - **Remains: mixed clips.** Crop-window logic cannot letterbox part of a clip. A clip that mixes a talking head with slides, and shows a face in at least half its samples, is still cropped on the slides. A clip below that share is letterboxed throughout, talking head included.
+  - **Remains: long cutaways.** A cutaway whose main face stays on screen for 1.5 s or more is followed as a change of speaker.
+  - **Remains: the largest face wins a frame.** A large, unsure foreground audience head beats a small, clear speaker (the Wikimania opening above). Weighting the main-face choice by score is not done; it would need its own evidence.
+  - **Remains: faces the detector misses.** YuNet reported no face under 2 % of the frame height in the G2 talks, and none of the performer on the dark TEDx stage in wide shots. Those stretches still hold the last position, or letterbox the clip when they make up more than half of it.
+  - **Remains: a new speaker in a clip's last 1.5 s** is not followed (it cannot be told from a cutaway).
   - A camera cut is followed by a speed-capped pan, not a hard cut: up to about 2 s to cross a 1080p frame.
-  - Wide shots where the face is too small to detect hold the last position, so a small subject can sit at the window's edge.
-  - Slides and credits are cropped like any other content.
   - Two people of similar size, or crowds, fall back to the letterbox for the whole clip.
 - **Not used.** `smooth_cues` from `active_speaker_service`: its count-window average has no speed cap. MediaPipe and OpenCV are not dependencies.
