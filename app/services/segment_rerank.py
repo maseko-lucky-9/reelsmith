@@ -10,12 +10,13 @@ on), ``rerank`` runs between the proposer and
    ``MAX_CANDIDATES``. Overlapping windows are left out, so the model judges
    distinct passages rather than ten shifts of one window.
 2. **One call.** The shortlist goes to the configured Ollama model as ids
-   ``c1``..``cN`` in start order, each with at most ``EXCERPT_CHARS`` of its
-   transcript (and the job's prompt, if any); the reply is a 0-100 integer
-   per id, requested through Ollama's JSON-schema output. Thinking is off and
-   the context and reply length are set (``NUM_CTX``, ``NUM_PREDICT``): a
-   thinking model otherwise spends the deadline thinking and can overflow
-   its context, which discards the instructions.
+   ``c1``..``cN`` in start order, each with at most ``EXCERPT_BYTES`` (UTF-8)
+   of its transcript (and the job's prompt, if any); the reply is a 0-100
+   integer per id, requested through Ollama's JSON-schema output. Thinking is
+   off and the context and reply length are set (``NUM_CTX``,
+   ``NUM_PREDICT``): a thinking model otherwise spends the deadline thinking
+   and can overflow its context, which discards the instructions. The caps
+   are in bytes, not characters, so the prompt fits ``NUM_CTX`` in any script.
 3. **Blend.** ``(1 - MODEL_WEIGHT) * heuristic + MODEL_WEIGHT * model``,
    rounded half up, only when every shortlisted id got a usable score. The
    usual selection then runs on the shortlist alone.
@@ -63,11 +64,14 @@ PROVIDER_OLLAMA = "ollama"
 MAX_CANDIDATES = 10
 """Most candidates sent to the model, in its one call per discovery."""
 
-EXCERPT_CHARS = 600
-"""Most transcript characters sent per candidate."""
+EXCERPT_BYTES = 600
+"""Most UTF-8 bytes of transcript sent per candidate, cut on a character
+boundary: 600 characters of English, about 200 of Burmese or Hindi. Bytes,
+not characters, because tokens follow bytes, not characters (see
+``NUM_CTX``)."""
 
-REQUEST_CHARS = 200
-"""Most characters of the job's prompt sent with them."""
+REQUEST_BYTES = 200
+"""Most UTF-8 bytes of the job's prompt sent with them."""
 
 MODEL_WEIGHT = 0.5
 """The model's share of a blended score; the heuristic keeps the rest. 0 keeps
@@ -75,16 +79,37 @@ the heuristic's scores, 1 takes the model's. Heuristic scores ran about 13 to
 38 on real talks (gate G1) while the model uses the whole 0-100 range, so at
 0.5 the model's opinion decides most orderings."""
 
-NUM_CTX = 8192
-"""Context window requested for the call (Ollama's ``num_ctx``). Ten 600-char
-excerpts and the instructions take about 2,000 tokens; Ollama 0.35.1 defaulted
-to 4,096 and shifted the context, dropping the instructions, when a thinking
-model overran it."""
-
 NUM_PREDICT = 256
 """Most tokens the model may reply with (Ollama's ``num_predict``). Ten scores
-take about 60; a reply cut off by this cap (``done_reason == "length"``) is not
-used."""
+take about 60 to 95; a reply cut off by this cap (``done_reason == "length"``)
+is not used."""
+
+TEMPLATE_TOKENS = 64
+"""Allowance for the model's chat template around the prompt (role markers and
+an empty think block: about 15 tokens on qwen3)."""
+
+PROMPT_BYTES_MAX = 7225
+"""UTF-8 bytes of the largest prompt ``build_prompt`` can make: the
+instructions with the viewer-request clause (634), the job prompt block
+(``REQUEST_BYTES`` + 33), ten candidate blocks (``EXCERPT_BYTES`` + 31, or
++ 32 for ``c10``), the closing line (32) and the line breaks. Pinned by a
+test."""
+
+NUM_CTX = 8192
+"""Context window requested for the call (Ollama's ``num_ctx``).
+
+The budget holds by construction. A byte-level BPE tokeniser (Qwen, Llama 3)
+never makes more than one token of a byte, so the prompt is at most
+``PROMPT_BYTES_MAX`` = 7,225 tokens, whatever the script. Add
+``TEMPLATE_TOKENS`` (64) and ``NUM_PREDICT`` (256): at most 7,545, under
+8,192. Typical prompts are far smaller: ten English excerpts took 1,544
+tokens on qwen3:4b.
+
+History: Ollama 0.35.1 defaulted to 4,096 and shifted the context, dropping
+the instructions, when a thinking model overran it. With 600-*character*
+excerpts, ten Burmese excerpts made 9,441 prompt tokens (English: 1,401);
+Ollama then cut the prompt from the front, instructions included, and the
+model replied by counting 1, 2, 3."""
 
 _INSTRUCTIONS = (
     "You rate candidate clips cut from one video for a vertical short "
@@ -122,30 +147,41 @@ def shortlist(candidates: Sequence[ProposedSegment]) -> list[ProposedSegment]:
     return select_segments(list(candidates), MAX_CANDIDATES, bar)
 
 
-def _as_data(text: str, limit: int) -> str:
-    """``text`` as one line of plain data, cut to ``limit``.
+_PRE_CUT_CHARS_PER_BYTE = 4
+"""``_as_data`` keeps at most ``limit * 4`` characters before normalising.
+A ``limit``-byte result never needs more than ``limit`` characters; the rest
+is room for characters the filter drops. It bounds the work on hostile input
+(NFKC grows U+FDFA 18-fold, and the job prompt has no length limit)."""
 
-    NFKC first, so fullwidth and small forms of ``<`` and ``>`` become ASCII;
-    then whitespace becomes a space and other non-printable characters
-    (controls, zero-width and format characters) are dropped; then the angle
-    brackets, which could close the block, become spaces; whitespace collapses.
+
+def _as_data(text: str, limit: int) -> str:
+    """``text`` as one line of plain data, at most ``limit`` UTF-8 bytes.
+
+    In order: cut to ``limit * _PRE_CUT_CHARS_PER_BYTE`` characters; NFKC, so
+    fullwidth and small forms of ``<`` and ``>`` become ASCII; whitespace
+    becomes a space and other non-printable characters (controls, zero-width
+    and format characters, lone surrogates) are dropped; the angle brackets,
+    which could close the block, become spaces; whitespace collapses; the
+    result is cut to ``limit`` bytes on a character boundary.
     """
-    normal = unicodedata.normalize("NFKC", text)
+    normal = unicodedata.normalize("NFKC", text[: limit * _PRE_CUT_CHARS_PER_BYTE])
     visible = "".join(" " if ch.isspace() else ch for ch in normal if ch.isspace() or ch.isprintable())
-    return " ".join(visible.replace("<", " ").replace(">", " ").split())[:limit]
+    flat = " ".join(visible.replace("<", " ").replace(">", " ").split())
+    # A cut inside a multi-byte character leaves an incomplete tail: drop it.
+    return flat.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
 
 
 def build_prompt(pool: Sequence[ProposedSegment], request: str | None = None) -> str:
     """The one request for ``pool``: instructions, then the job's prompt and
     each candidate as delimited data."""
-    request_text = _as_data(request or "", REQUEST_CHARS)
+    request_text = _as_data(request or "", REQUEST_BYTES)
     if request_text:
         instructions = _INSTRUCTIONS.format(request_clause=_REQUEST_CLAUSE, tags=_TAGS_WITH_REQUEST)
         lines = [instructions, "", f"<viewer_request>{request_text}</viewer_request>", ""]
     else:
         lines = [_INSTRUCTIONS.format(request_clause="", tags=_TAGS), ""]
     for cid, seg in zip(candidate_ids(len(pool)), pool):
-        excerpt = _as_data(seg.text or seg.summary, EXCERPT_CHARS)
+        excerpt = _as_data(seg.text or seg.summary, EXCERPT_BYTES)
         lines.append(f'<candidate id="{cid}">{excerpt}</candidate>')
     lines += ["", _CLOSING]
     return "\n".join(lines)

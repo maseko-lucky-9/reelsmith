@@ -277,10 +277,72 @@ async def test_request_truncates_each_excerpt(ollama_on):
     await _rerank(model, candidates)
 
     excerpt = dict(_blocks(model.prompt))["c1"]
-    assert rr.EXCERPT_CHARS == 600
-    assert len(excerpt) == rr.EXCERPT_CHARS
+    assert rr.EXCERPT_BYTES == 600
+    assert len(excerpt) == rr.EXCERPT_BYTES  # ASCII: one byte a character
     assert excerpt.startswith("word word")
     assert "OVERFLOW" not in model.prompt
+
+
+# A 1-byte "a" first, so the cap (600 or 200 bytes) lands inside a character.
+_WIDE = [
+    pytest.param("က", 3, id="burmese-3-bytes"),
+    pytest.param("\U0001f600", 4, id="emoji-4-bytes"),
+    pytest.param("é", 2, id="latin-2-bytes"),
+]
+
+
+@pytest.mark.parametrize(("unit", "width"), _WIDE)
+async def test_excerpts_are_capped_in_utf8_bytes_on_a_character_boundary(ollama_on, unit, width):
+    candidates = _candidates()
+    candidates[A].text = "a" + unit * 400
+    model = _Model({"c1": 50, "c2": 50, "c3": 50})
+
+    await _rerank(model, candidates)
+
+    excerpt = dict(_blocks(model.prompt))["c1"]
+    encoded = excerpt.encode("utf-8")
+    assert rr.EXCERPT_BYTES - width < len(encoded) <= rr.EXCERPT_BYTES
+    assert encoded.decode("utf-8") == "a" + unit * ((rr.EXCERPT_BYTES - 1) // width)
+    assert "�" not in model.prompt
+
+
+@pytest.mark.parametrize(("unit", "width"), _WIDE)
+async def test_the_job_prompt_is_capped_in_utf8_bytes_on_a_character_boundary(ollama_on, unit, width):
+    model = _Model({"c1": 50, "c2": 50, "c3": 50})
+
+    await _rerank(model, _candidates(), prompt="a" + unit * 400)
+
+    (request_text,) = re.findall(r"<viewer_request>(.*?)</viewer_request>", model.prompt)
+    assert rr.REQUEST_BYTES == 200
+    assert rr.REQUEST_BYTES - width < len(request_text.encode("utf-8")) <= rr.REQUEST_BYTES
+    assert request_text == "a" + unit * ((rr.REQUEST_BYTES - 1) // width)
+
+
+def test_ten_worst_case_candidates_fit_the_context_by_construction():
+    # Every excerpt and the job prompt at their byte caps. A byte-level BPE
+    # tokeniser (Qwen, Llama 3) never makes more than one token of a byte,
+    # so the bytes bound the prompt's tokens; the chat template and the
+    # reply come on top.
+    pool = [_seg(60.0 * i, 30, "x" * 2000) for i in range(rr.MAX_CANDIDATES)]
+    prompt = rr.build_prompt(pool, request="y" * 2000)
+
+    prompt_bytes = len(prompt.encode("utf-8"))
+    assert prompt_bytes == rr.PROMPT_BYTES_MAX
+    assert rr.PROMPT_BYTES_MAX + rr.TEMPLATE_TOKENS + rr.NUM_PREDICT <= rr.NUM_CTX
+
+
+async def test_a_huge_hostile_prompt_is_cut_before_it_is_normalised(ollama_on):
+    # U+FDFA grows 18-fold under NFKC; a lone surrogate cannot be encoded.
+    model = _Model({"c1": 50, "c2": 50, "c3": 50})
+    hostile = "\ud800" + "ﷺ" * 1_000_000
+
+    t0 = time.perf_counter()
+    await _rerank(model, _candidates(), prompt=hostile)
+    elapsed = time.perf_counter() - t0
+
+    (request_text,) = re.findall(r"<viewer_request>(.*?)</viewer_request>", model.prompt)
+    assert 0 < len(request_text.encode("utf-8")) <= rr.REQUEST_BYTES
+    assert elapsed < 0.5
 
 
 async def test_request_carries_the_job_prompt_as_delimited_data(ollama_on):
@@ -289,7 +351,7 @@ async def test_request_carries_the_job_prompt_as_delimited_data(ollama_on):
     await _rerank(model, _candidates(), prompt="pricing <b>tips</b>\n" + "x" * 400)
 
     (request_text,) = re.findall(r"<viewer_request>(.*?)</viewer_request>", model.prompt)
-    assert rr.REQUEST_CHARS == 200
+    assert rr.REQUEST_BYTES == 200
     assert request_text == ("pricing b tips /b " + "x" * 400)[:200]
     assert "<b>" not in model.prompt
     assert "answers the viewer request" in model.prompt
@@ -539,6 +601,34 @@ async def test_done_log_compares_the_kept_clips_with_the_rerank_off_and_on(ollam
 
     (message,) = [m for m in _rerank_messages(caplog, logging.INFO) if "Clip re-rank done" in m]
     assert "kept off=3 [c1, c2, c3] on=2 [c2, c3]" in message
+
+
+async def test_done_log_off_list_is_selected_from_every_candidate(ollama_on, caplog):
+    # B repeats A's words; B2 overlaps B with new words, so the shortlist is
+    # A and B (c1, c2). With the re-rank off the selection skips B as a
+    # near-duplicate and takes B2, which is not shortlisted: it shows by its
+    # start. On, only the shortlist is there, so B2 cannot be picked.
+    caplog.set_level(logging.INFO, logger=rr.__name__)
+    candidates = [
+        _seg(0.0, 30, "pricing plans tiers discount annual"),
+        _seg(100.0, 28, "pricing plans tiers discount annual"),
+        _seg(110.0, 27, "hiring culture remote teams onboarding"),
+    ]
+    model = _Model({"c1": 50, "c2": 50})
+
+    await _rerank(model, candidates, duration=360.0, job_id="job-1")
+
+    (message,) = [m for m in _rerank_messages(caplog, logging.INFO) if "Clip re-rank done" in m]
+    assert message.endswith("  kept off=2 [c1, @110] on=1 [c1]")
+
+
+async def test_a_reply_without_done_reason_is_used(ollama_on):
+    # Older and compatible servers send no done_reason; only "length" is a cut.
+    model = _Model(body=json.dumps({"response": '{"c1": 10, "c2": 90, "c3": 50}', "done": True}).encode())
+
+    result = await _rerank(model, _candidates())
+
+    assert _scores(result) == [(60.0, 57), (120.0, 35), (10.0, 20)]
 
 
 async def test_done_log_without_a_duration_has_no_kept_counts(ollama_on, caplog):
