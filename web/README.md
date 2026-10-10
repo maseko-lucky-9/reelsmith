@@ -1,5 +1,11 @@
 # React + TypeScript + Vite
 
+## API client
+
+The API client, `src/api/client.ts`, is hand-written. There is no generated schema or types file in this repo. The live OpenAPI schema is served by the backend at `/openapi.json` (and `/api/openapi.json`), with Swagger UI at `/docs`.
+
+## Template notes
+
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
 Currently, two official plugins are available:

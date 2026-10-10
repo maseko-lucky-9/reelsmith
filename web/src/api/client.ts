@@ -338,7 +338,6 @@ export const api = {
 
   // ── TikTok — connect account ─────────────────────────────────────────────
   /** POST /api/social/tiktok/connect — connect via cookie-JSON export. */
-  // TODO: gen:api after backend lands
   connectTikTok: (body: { account_handle: string; cookies_json: string; display_name?: string }) =>
     apiFetch<SocialAccount>('/api/social/tiktok/connect', {
       method: 'POST',
@@ -347,7 +346,6 @@ export const api = {
 
   // ── TikTok — capabilities ────────────────────────────────────────────────
   /** GET /api/social/tiktok/capabilities — server feature flags. */
-  // TODO: gen:api after backend lands
   getTikTokCapabilities: () =>
     apiFetch<TikTokCapabilities>('/api/social/tiktok/capabilities'),
 }
@@ -468,7 +466,7 @@ export interface PublishJob {
   created_at: string
 }
 
-/** TikTok server capabilities — TODO: gen:api after backend lands */
+/** TikTok server capabilities. */
 export interface TikTokCapabilities {
   has_stable_key: boolean
   sidecar_configured: boolean
