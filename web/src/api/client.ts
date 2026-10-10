@@ -59,6 +59,27 @@ export interface ClipRecord {
   retired: boolean
   liked: boolean
   disliked: boolean
+  /** B-roll inserted into the rendered reel (`clips.broll_assets`); null or absent without B-roll. */
+  broll_assets?: BrollAsset[] | null
+}
+
+/**
+ * One B-roll insert of a clip, as stored by the orchestrator's B-roll step.
+ * `start`/`duration` are seconds on the clip's clock. `path` is a server-side
+ * file path: never show it in the UI.
+ */
+export interface BrollAsset {
+  query: string
+  start: number
+  duration: number
+  /** `pexels`, `local`, ... */
+  provider: string
+  asset_id: string
+  /** Empty when the provider has no credit (the local library). */
+  author: string
+  /** The asset's page (Pexels); empty for local files. Untrusted: link only http(s). */
+  source_url: string
+  path?: string
 }
 
 export interface BrandTemplate {

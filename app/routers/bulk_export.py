@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import json
 import os
 import tempfile
 import zipfile
@@ -30,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ClipRecord
 from app.db.session import get_session
+from app.services.manifest_service import broll_credits
 from app.settings import settings
 
 router = APIRouter(prefix="/clips", tags=["bulk-export"])
@@ -38,11 +40,15 @@ _STREAM_CHUNK_BYTES = 1024 * 1024
 
 
 def _build_manifest(clips: list[ClipRecord]) -> bytes:
+    """The zip's ``manifest.csv``. ``broll_credits`` is the job manifest's
+    column (``manifest_service.broll_credits``): a JSON list with one
+    ``{provider, author, source_url}`` per distinct B-roll asset, ``[]`` for a
+    clip without B-roll. Asset paths are never written."""
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow([
         "clip_id", "title", "summary", "start", "end", "output_path",
-        "thumbnail_path", "virality_score", "hashtags",
+        "thumbnail_path", "virality_score", "hashtags", "broll_credits",
     ])
     for c in clips:
         w.writerow([
@@ -50,6 +56,7 @@ def _build_manifest(clips: list[ClipRecord]) -> bytes:
             c.output_path or "", c.thumbnail_path or "",
             c.virality_score or 0,
             ",".join(c.hashtags or []),
+            json.dumps(broll_credits(c.broll_assets)),
         ])
     return buf.getvalue().encode("utf-8")
 
