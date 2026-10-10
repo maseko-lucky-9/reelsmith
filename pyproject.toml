@@ -12,3 +12,15 @@ filterwarnings = []
 
 [tool.ruff]
 target-version = "py314"
+line-length = 120
+extend-exclude = ["app/vendor"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.ruff.lint.isort]
+known-third-party = ["alembic"]
+
+[tool.ruff.lint.per-file-ignores]
+# Applied migrations are frozen history: do not reorder their imports.
+"alembic/versions/*" = ["I001"]
