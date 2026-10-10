@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from app.services import ffmpeg_tools, reframe_service
+from app.services import clip_service, ffmpeg_tools, reframe_service, render_service
 from app.services.face_detector import Face
 from app.services.reframe_service import (
     Observation,
@@ -500,6 +500,217 @@ def test_a_mostly_slides_clip_gets_no_track_from_the_detector(tmp_path):
     assert detector.calls == plan.samples == 9  # 2 fps over 4 s, plus the last frame
     assert plan.track is None
     assert plan.reason == f"a face in only 3/{plan.samples} samples"
+
+
+# ── review of PR #67: scenarios on a 1920x1080 source ─────────────────────────
+
+HD = (1920, 1080)
+HD_WINDOW = 608  # pan_crop of a 1920x1080 source on the 9:16 canvas
+HD_DEADBAND = reframe_service.DEADBAND * HD_WINDOW
+
+
+def _hd(cx: float, *, h: float = 150, score: float = 0.9, cy: float = 500) -> Face:
+    return Face(x=cx - h / 2, y=cy - h / 2, w=h, h=h, score=score)
+
+
+def _hd_x(cx: float) -> float:
+    return x_left_for(cx, HD[0], HD_WINDOW)
+
+
+def _largest_face_track(obs: list[Observation], src: tuple[int, int]):
+    """The track without continuity (main before T041): every sample's own
+    main face. With one face in the frame, continuity must not change it."""
+    src_w, src_h = src
+    window_w = render_service.pan_crop(clip_service.reel_geometry(src_w, src_h)).width
+    targets = []
+    for o in obs:
+        face = primary_face(usable_faces(o.faces, src_h), src_w)
+        targets.append(None if face is None else x_left_for(face.cx, src_w, window_w))
+    times = [o.t for o in obs]
+    xs = smooth_positions(
+        times, hold_gaps(targets), window_width=window_w, max_x=float(src_w - window_w)
+    )
+    return decimate(list(zip(times, xs)))
+
+
+def test_the_speaker_walking_past_a_smaller_face_keeps_the_crop():
+    """Review S11: the speaker walks 900 → 1250 px past a static face of 60 %
+    of his height (too small for "several similar faces") at 1000 px. Both
+    are within the continuity radius; the frame's main face, the speaker,
+    stays the primary, so the crop ends on him, not stuck near the static
+    face (635 px before the fix, against 885 px without continuity)."""
+    static = _hd(1000, h=90)
+    obs = [
+        *[_obs(k * 0.5, _hd(900), static) for k in range(6)],
+        *[_obs(3 + k * 0.5, _hd(1010 + 40 * k), static) for k in range(7)],
+        *[_obs(6.5 + k * 0.5, _hd(1250), static) for k in range(20)],
+    ]
+
+    plan = plan_crop_track(obs, HD)
+
+    assert abs(plan.track[-1][1] - _hd_x(1250)) <= HD_DEADBAND + 1.0
+
+
+def _walker_seen_every_other_sample() -> list[Observation]:
+    """Review S3c: 200 px per sample from t = 0, detected every 2nd sample."""
+    return [
+        _obs(k * 0.5, _hd(min(200 + 200 * k, 1700))) if k % 2 == 0 else _obs(k * 0.5)
+        for k in range(30)
+    ]
+
+
+def _speaker_stands_then_walks_seen_every_other_sample() -> list[Observation]:
+    """Review S3d: stands 5 s, then walks 200 px per sample, detected every
+    2nd sample (400 px between sightings: more than the radius), stops."""
+    obs = [_obs(k * 0.5, _hd(200)) for k in range(10)]
+    for k in range(1, 21):
+        cx = min(200 + 200 * k, 1700)
+        obs.append(_obs(4.5 + k * 0.5, _hd(cx)) if k % 2 == 0 else _obs(4.5 + k * 0.5))
+    return [*obs, *[_obs(15.0 + k * 0.5, _hd(1700)) for k in range(4)]]
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [_walker_seen_every_other_sample, _speaker_stands_then_walks_seen_every_other_sample],
+    ids=["S3c", "S3d"],
+)
+def test_a_walker_seen_every_other_sample_is_followed(scenario):
+    """A lone face moving 400 px between sightings 1 s apart: a stint's
+    reach grows with the time since its last sighting, so the walker is one
+    subject and the track is exactly the one without continuity."""
+    obs = scenario()
+
+    plan = plan_crop_track(obs, HD)
+
+    assert plan.track == _largest_face_track(obs, HD)
+
+
+def test_a_small_face_does_not_make_a_split_screen():
+    """Review S10, first half: a 3.2 % poster face (score 0.85) on the far
+    side of the frame in every sample. Small faces are not counted by the
+    split-screen test, so the clip is tracked on the speaker."""
+    obs = [_obs(k * 0.5, _hd(700), _hd(1650, h=35, score=0.85, cy=200)) for k in range(40)]
+
+    plan = plan_crop_track(obs, HD)
+
+    assert plan.track is not None, plan.reason
+    assert {x for _t, x in plan.track} == {_hd_x(700)}
+
+
+def test_a_small_face_does_not_make_the_clip_crowded():
+    """A 4.8 % audience face (score 0.85) beside a 5.6 % speaker would be a
+    "similar" second face (area ratio 0.75); small faces are not counted by
+    that test either, so the clip is tracked on the speaker."""
+    obs = [_obs(k * 0.5, _hd(900, h=60), _hd(1100, h=52, score=0.85)) for k in range(40)]
+
+    plan = plan_crop_track(obs, HD)
+
+    assert plan.track is not None, plan.reason
+    assert {x for _t, x in plan.track} == {_hd_x(900)}
+
+
+def test_an_opening_wide_shot_keeps_its_small_speaker():
+    """The 2 x wait applies only once there is a primary: a clip that opens
+    on a wide shot (the speaker's face 3.3 %, score 0.86, for 2 s) takes that
+    speaker after ``SWITCH_SECONDS`` like any face, so the reel opens on them
+    before a cut to someone else."""
+    obs = [
+        *_steady(_face(150, h=12, score=0.86), 0.0, 5),  # 0 - 2.0 s
+        *_steady(_face(500), 2.5, 20),
+    ]
+
+    plan = plan_crop_track(obs, SRC)
+
+    assert plan.track[0][0] == 0.0 and abs(plan.track[0][1] - SPEAKER_X) <= DEADBAND
+
+
+@pytest.mark.parametrize(("missing", "moves"), [(6, False), (7, True)])
+def test_a_small_face_needs_twice_as_long_to_take_the_crop(missing, moves):
+    """Review S10b: the speaker turns to the slides (undetected) while a 3.2 %
+    audience face (score 0.86, 500 px away: no split screen) stays in view.
+    A competitor made only of small faces needs 2 x ``SWITCH_SECONDS`` while
+    there is a primary: 2.5 s (6 samples) holds the crop, 3.0 s (7) moves it."""
+    assert reframe_service.SWITCH_SECONDS == 1.5
+    audience = _hd(1250, h=35, score=0.86, cy=900)
+    obs = [
+        _obs(k * 0.5, *([] if 10 <= k < 10 + missing else [_hd(750)]), audience)
+        for k in range(40)
+    ]
+
+    plan = plan_crop_track(obs, HD)
+
+    assert (max(x for _t, x in plan.track) > _hd_x(750) + HD_DEADBAND) is moves
+
+
+def test_a_competitor_seen_large_once_waits_only_switch_seconds():
+    """The 2 x wait is for faces only ever seen small. A new speaker on the
+    edge of the size floor (5.6 % and 4.4 % of the frame height in turns)
+    for 2 s takes the crop after ``SWITCH_SECONDS``."""
+    edge = [_face(500, h=20), _face(500, h=16, score=0.86)]  # 18 px is the floor
+    obs = [
+        *_steady(_face(150), 0.0, 10),
+        *[_obs(5.0 + k * 0.5, edge[k % 2]) for k in range(5)],  # 5.0 - 7.0 s
+        *_steady(_face(150), 7.5, 10),
+    ]
+
+    plan = plan_crop_track(obs, SRC)
+
+    assert max(x for _t, x in plan.track) > SPEAKER_X + DEADBAND
+
+
+def test_the_speaker_coming_back_between_two_cutaways_resets_the_competitor():
+    """Review R4: cutaway 1 s, the speaker for one sample, the same cutaway
+    1 s again. The speaker's return ends the cutaway's stint, so the two
+    halves do not add up to ``SWITCH_SECONDS``."""
+    speaker, audience = _face(150), _face(500, h=40)
+    obs = [
+        *_steady(speaker, 0.0, 10),
+        *_steady(audience, 5.0, 2),
+        _obs(6.0, speaker),
+        *_steady(audience, 6.5, 2),
+        *_steady(speaker, 7.5, 10),
+    ]
+
+    plan = plan_crop_track(obs, SRC)
+
+    assert {x for _t, x in plan.track} == {SPEAKER_X}
+
+
+@pytest.mark.parametrize(("gap", "moves"), [(1.5, True), (2.0, False)])
+def test_a_stint_survives_a_faceless_gap_up_to_switch_seconds(gap, moves):
+    """Review R6: the gap is measured from the stint's last sighting. A
+    cutaway seen at 5.0 and 5.5 s, then no face at all, then again ``gap``
+    later: unseen for 1.5 s it is the same stint (2.0 s long: it takes
+    over); unseen for 2.0 s ("longer than SWITCH_SECONDS") it starts over."""
+    speaker, audience = _face(150), _face(500, h=40)
+    back = 5.5 + gap
+    obs = [
+        *_steady(speaker, 0.0, 10),
+        *_steady(audience, 5.0, 2),
+        *[_obs(6.0 + k * 0.5) for k in range(int(round((back - 6.0) / 0.5)))],
+        _obs(back, audience),
+        *_steady(speaker, back + 0.5, 10),
+    ]
+
+    plan = plan_crop_track(obs, SRC)
+
+    assert (max(x for _t, x in plan.track) > SPEAKER_X + DEADBAND) is moves
+
+
+@pytest.mark.parametrize(("shot", "moves"), [(3, False), (4, True)])
+def test_switch_seconds_allows_for_frame_time_jitter(shot, moves):
+    """Sample times are frame times: at 2 fps they fall at 0.02 and 0.50 s
+    offsets, so a 4-sample shot spans 1.48 s, not 1.5 s. It still takes
+    over; a 3-sample (1 s) cutaway still does not."""
+    times = [k * 0.5 + (0.02 if k % 2 == 0 else 0.0) for k in range(30)]
+    obs = [
+        _obs(t, _face(500) if 10 <= k < 10 + shot else _face(150))
+        for k, t in enumerate(times)
+    ]
+
+    plan = plan_crop_track(obs, SRC)
+
+    assert (max(x for _t, x in plan.track) > SPEAKER_X + DEADBAND) is moves
 
 
 # ── frame sampling (real decode of synthetic sources) ─────────────────────────

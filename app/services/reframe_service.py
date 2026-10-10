@@ -15,14 +15,16 @@ source px)``:
    in the whole clip, a usable face in fewer than ``MIN_FACE_SHARE`` of the
    samples (slides, credits), a split screen (``active_speaker_service
    .detect_split_screen``), several faces of similar size in most face frames
-   (``EQUAL_FACE_AREA``), or a source with no horizontal pan room.
+   (``EQUAL_FACE_AREA``), or a source with no horizontal pan room. The split
+   screen and similar-size tests count only faces of ``MIN_FACE_HEIGHT``.
 3. **Primary face** (``follow_primary``). The crop follows one subject: in
    each frame, the face that continues the previous primary
    (``same_subject``: within ``SAME_FACE_RADIUS`` window widths horizontally,
-   at least ``SAME_FACE_SIZE`` of its height). Another face takes over only
-   once it has been the frame's main face for ``SWITCH_SECONDS``, and then
-   from its first sample: a shorter cutaway never moves the crop, and a real
-   change of speaker adds no lag.
+   at least ``SAME_FACE_SIZE`` of its height; the frame's main face first).
+   Another face takes over only once it has been the frame's main face for
+   ``SWITCH_SECONDS`` (``SMALL_SWITCH_FACTOR`` times that if it was only ever
+   a small face), and then from its first sample: a shorter cutaway never
+   moves the crop, and a real change of speaker adds no lag.
 4. **Position.** The window (``render_service.pan_crop``) is centred on the
    primary face and clamped to ``[0, src_w - window]``. A frame without it
    holds the last position; frames before its first sample take that one.
@@ -80,15 +82,23 @@ SMALL_FACE_SCORE = 0.8
 SAME_FACE_RADIUS = 0.5  # window widths, horizontal
 SAME_FACE_SIZE = 0.5  # smaller / larger face height
 # Another face takes over once it has been the frame's main face this long
-# (4 samples at 2 fps). A 1 s cutaway spans at most 1.0 s of samples, so it
-# never does, with one sample of margin; the switch is back-dated to the new
-# face's first sample, so the wait adds no lag. A stint unseen this long ends.
+# (4 samples at 2 fps, so a face must be on screen 1.5 to 2.0 s depending on
+# where its shot falls between samples). A 1 s cutaway spans at most about
+# 1.03 s of samples, under the 1.375 s this needs with _TIME_SLACK, so it never
+# does; the switch is back-dated to the new face's first sample, so the wait
+# adds no lag. A stint unseen for longer than this ends. A face only ever seen
+# small must last twice as long while there is a primary: the small faces of
+# the G2 talks were mostly audience and crowd.
 SWITCH_SECONDS = 1.5
+SMALL_SWITCH_FACTOR = 2.0
 # Fewer samples than this share with a usable face (slides, credits, shots the
 # detector cannot read) → letterbox: the crop would be placed blind for most
 # of the reel.
 MIN_FACE_SHARE = 0.5
-_EPS = 1e-6  # seconds: sample times are frame times, not exact multiples
+# Sample times are frame times: at 2 fps they fall at about 0.02 and 0.50 s
+# offsets, so a 4-sample span is 1.48 or 1.52 s. Durations get a quarter of a
+# sample interval of slack.
+_TIME_SLACK = 0.25 / SAMPLE_FPS  # 0.125 s
 _NEAR_EQUAL_AREA = 0.9  # primary-face tie: prefer the most central
 EQUAL_FACE_AREA = 0.6  # second face this large → "several faces" frame
 CROWDED_SHARE = 0.5  # of the frames with a face
@@ -167,23 +177,30 @@ class _Sighting:
 
 
 def follow_primary(
-    observations: Sequence[Observation], src_w: int, window_w: float
+    observations: Sequence[Observation], src_w: int, window_w: float, *, src_h: int
 ) -> list[Face | None]:
     """The primary face of each sample; ``None`` where it is not seen.
 
-    * The primary continues as the ``same_subject`` face nearest it (within
-      ``SAME_FACE_RADIUS`` window widths), even when another face is larger.
-    * Any other main face (``primary_face``) starts a stint. A stint that
-      lasts ``SWITCH_SECONDS`` makes its face the primary, back-dated to the
-      stint's first sample. A stint ends when another face becomes the main
-      face, when the primary is the main face again, or when its face goes
-      unseen for longer than ``SWITCH_SECONDS`` (samples without any face do
-      not end it).
+    * The primary continues as the frame's main face (``primary_face``) when
+      that is a ``same_subject`` face (within ``SAME_FACE_RADIUS`` window
+      widths), otherwise as the ``same_subject`` face nearest it, even when
+      another face is larger.
+    * Any other main face starts a stint. A stint that lasts
+      ``SWITCH_SECONDS`` makes its face the primary, back-dated to the
+      stint's first sample; a stint seen only as faces under
+      ``MIN_FACE_HEIGHT`` of ``src_h`` needs ``SMALL_SWITCH_FACTOR`` times
+      that while there is a primary.
+    * A stint ends when another face becomes the main face, when the primary
+      is the main face again, or when its face goes unseen for longer than
+      ``SWITCH_SECONDS`` (samples without any face do not end it). Its reach
+      grows with the time since its last sighting (one radius per sample
+      interval), so a moving face detected only now and then stays one stint.
     * The clip opens without a primary, so an opening cutaway is a stint
       like any other. If no stint lasts long enough in the whole clip, the
       last one is the primary (a clip too short to tell).
     """
     radius = SAME_FACE_RADIUS * window_w
+    min_h = MIN_FACE_HEIGHT * src_h
     chosen: list[Face | None] = [None] * len(observations)
     primary: Face | None = None
     stint: list[_Sighting] = []
@@ -196,19 +213,25 @@ def follow_primary(
             previous = primary
             near = [f for f in o.faces if same_subject(previous, f, radius)]
             if near:
-                primary = min(near, key=lambda f: abs(f.cx - previous.cx))
+                primary = (
+                    main if main in near else min(near, key=lambda f: abs(f.cx - previous.cx))
+                )
                 chosen[i] = primary
             if main in near:
                 stint = []
                 continue
+        gap = o.t - stint[-1].t if stint else 0.0
         if not (
             stint
-            and o.t - stint[-1].t <= SWITCH_SECONDS + _EPS
-            and same_subject(stint[-1].face, main, radius)
+            and gap <= SWITCH_SECONDS + _TIME_SLACK
+            and same_subject(stint[-1].face, main, radius * max(1.0, gap * SAMPLE_FPS))
         ):
             stint = []
         stint.append(_Sighting(i, o.t, main))
-        if o.t - stint[0].t >= SWITCH_SECONDS - _EPS:
+        need = SWITCH_SECONDS
+        if primary is not None and all(s.face.h < min_h for s in stint):
+            need *= SMALL_SWITCH_FACTOR
+        if o.t - stint[0].t >= need - _TIME_SLACK:
             for s in stint:
                 chosen[s.index] = s.face
             primary, stint = main, []
@@ -368,16 +391,21 @@ def plan_crop_track(
             samples,
             len(with_faces),
         )
-    if _split_screen(usable, src_size):
+    # The layout tests count only large faces, as before small faces were
+    # usable: a poster or an audience face must not letterbox a tracked clip.
+    min_h = MIN_FACE_HEIGHT * src_h
+    large = [Observation(o.t, tuple(f for f in o.faces if f.h >= min_h)) for o in usable]
+    if _split_screen(large, src_size):
         return CropTrackPlan(None, "split screen", samples, len(with_faces))
-    crowded = sum(1 for o in with_faces if _several_similar(o.faces))
-    if crowded > CROWDED_SHARE * len(with_faces):
+    with_large = [o for o in large if o.faces]
+    crowded = sum(1 for o in with_large if _several_similar(o.faces))
+    if crowded > CROWDED_SHARE * len(with_large):
         return CropTrackPlan(
             None, "several faces of similar size", samples, len(with_faces)
         )
     targets = [
         None if face is None else x_left_for(face.cx, src_w, window.width)
-        for face in follow_primary(usable, src_w, window.width)
+        for face in follow_primary(usable, src_w, window.width, src_h=src_h)
     ]
     xs = hold_gaps(targets)
     assert xs is not None  # with_faces is not empty, so some sample has a primary
