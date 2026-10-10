@@ -78,7 +78,7 @@ From T017.
   - `app/auth.py` `current_user_id` already resolves a bearer token through it when `YTVIDEO_AUTH_ENABLED=true`. Only `POST /social/tiktok/connect` depends on it.
   - `web/src/routes/settings.api.tsx` shows a Python one-liner instead of a form.
 - **Missing.** Routes and UI to issue, list and revoke tokens. There is also no single auth model: `YTVIDEO_REQUIRE_AUTH` (one key on every route) and `YTVIDEO_AUTH_ENABLED` (tokens, one route) are independent switches.
-- **Prerequisite.** Decide the auth model first, including whether `/docs`, `/redoc` and `/openapi.json` stay open (FR-060, task T043). Tokens carry a `workspace_id`, so this spec depends on 007 or must fix the workspace to `local`.
+- **Prerequisite.** Decide the auth model first. `/docs`, `/redoc` and `/openapi.json` are switched off while `YTVIDEO_REQUIRE_AUTH` is on (FR-060, T043); a token model must keep them off or decide how they are reached. Tokens carry a `workspace_id`, so this spec depends on 007 or must fix the workspace to `local`.
 
 ### 007-workspaces
 

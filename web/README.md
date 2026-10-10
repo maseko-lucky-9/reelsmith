@@ -2,7 +2,7 @@
 
 ## API client
 
-The API client, `src/api/client.ts`, is hand-written. There is no generated schema or types file in this repo. The live OpenAPI schema is served by the backend at `/openapi.json` (and `/api/openapi.json`), with Swagger UI at `/docs`.
+The API client, `src/api/client.ts`, is hand-written. There is no generated schema or types file in this repo. The live OpenAPI schema is served by the backend at `/openapi.json` (and `/api/openapi.json`), with Swagger UI at `/docs`, while `YTVIDEO_REQUIRE_AUTH` is off; with auth on these docs routes answer 404 (T043).
 
 ## Template notes
 
