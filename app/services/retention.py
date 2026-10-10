@@ -383,7 +383,12 @@ async def sweep_unused_sources(
     (``_source_references``; jobs cleared in the same sweep do not count).
     ``jobs.video_path`` is set to NULL (put back, with ``updated_at``, when
     a late check fails) and committed before anything is deleted, through
-    ``delete_below_root``.
+    ``delete_below_root``. The clear is a compare-and-set: one conditional
+    UPDATE per job (``video_path`` unchanged plus every condition above),
+    and only a job whose UPDATE matched can lose its file. The registry
+    is read once more after the commit, right before the delete; a
+    reprompt that started in between keeps the file and gets
+    ``video_path`` back.
 
     Folders removed when empty: the source's own folder and its ``clips``
     (a URL job's ``<slug>-<job8>``), and the folder of each clip file of the
@@ -415,8 +420,8 @@ async def sweep_unused_sources(
     )
 
     tentative: list[tuple[str, str, datetime, Path]] = []
-    cleared: list[tuple[str, Path]] = []
-    folders: list[Path] = []
+    cleared: list[tuple[str, str, datetime, Path]] = []
+    folders: dict[str, list[Path]] = {}
     async with factory() as session:
         candidates = (
             await session.execute(
@@ -475,15 +480,15 @@ async def sweep_unused_sources(
                     "a reprompt is in flight" if busy else "another job uses it",
                 )
                 continue
-            cleared.append((job_id, source))
+            cleared.append((job_id, raw, updated_at, source))
             if _is_managed(source.parent, roots):
-                folders += [source.parent / "clips", source.parent]
+                folders[job_id] = [source.parent / "clips", source.parent]
 
-        if cleared:
+        for job_id, *_ in cleared:
             clip_paths = (
                 await session.execute(
                     select(ClipRecord.output_path, ClipRecord.thumbnail_path).where(
-                        ClipRecord.job_id.in_([job_id for job_id, _ in cleared])
+                        ClipRecord.job_id == job_id
                     )
                 )
             ).all()
@@ -491,19 +496,49 @@ async def sweep_unused_sources(
                 path = _checked(raw)
                 if path is None:
                     continue
-                folders += [
+                folders.setdefault(job_id, []).extend(
                     folder
                     for folder in (path.parent, path.parent.parent)
                     if _is_managed(folder, roots)
-                ]
+                )
         await session.commit()
 
-    for job_id, source in cleared:
+    # Only claims that won (their UPDATE matched and was committed) get here.
+    # The registry is read once more, with no await between this check and
+    # the deletes. A reprompt that started since then must have read the job
+    # before the commit (after it, video_path is NULL and the reprompt router
+    # answers 409); its source is kept and video_path put back below, so the
+    # file is never deleted under it. A re-render has no registry: it needs
+    # a live clip, which a won claim proves there was none of.
+    removed: list[str] = []
+    restore: list[tuple[str, str, datetime]] = []
+    emptied: list[Path] = []
+    for job_id, raw, updated_at, source in cleared:
+        if in_flight(job_id):
+            restore.append((job_id, raw, updated_at))
+            continue
         for path in (source, words_sidecar_path(str(source))):
             delete_below_root(path, roots, owner=f"source of job {job_id}")
         log.info("retention: removed the unused source %s (job %s)", source, job_id)
-    _remove_empty_dirs(folders, roots)
-    return [job_id for job_id, _ in cleared]
+        removed.append(job_id)
+        emptied += folders.get(job_id, [])
+    _remove_empty_dirs(emptied, roots)
+
+    for job_id, raw, updated_at in restore:
+        log.warning(
+            "retention: kept source %s (job %s): a reprompt started while it was "
+            "being removed",
+            raw,
+            job_id,
+        )
+        async with factory() as session:
+            await session.execute(
+                update(JobRecord)
+                .where(JobRecord.id == job_id, JobRecord.video_path.is_(None))
+                .values(video_path=raw, updated_at=updated_at)
+            )
+            await session.commit()
+    return removed
 
 
 # ── Files of retired clips ────────────────────────────────────────────────────
@@ -524,7 +559,9 @@ async def sweep_retired_files(
     live clip nor any clip of a job with ``in_flight(job_id)`` references it
     (``_aliases``; a reprompt's new clips stay retired, i.e. hidden, until
     its swap), and the file's mtime, read at the moment of deletion, is more
-    than ``grace_hours`` before ``now``. Rows are not changed. ``now`` must
+    than ``grace_hours`` before ``now``. Right before each delete the clip
+    row is read again: it must still be retired and no live clip may
+    reference the file. Rows are not changed. ``now`` must
     be timezone-aware.
     """
     if now.tzinfo is None:
@@ -561,35 +598,63 @@ async def sweep_retired_files(
             )
         ).all()
 
-    # Files no retired clip may take with it: those of live clips, and those
-    # of every clip of a job with a reprompt in flight.
-    keep: set[str] = set()
-    for raw in {raw for pair in live for raw in pair if raw}:
-        keep |= _aliases(raw)
-    for _, job_id, *paths in retired:
-        if in_flight(job_id):
-            for raw in paths:
-                if raw:
-                    keep |= _aliases(raw)
+        # Files no retired clip may take with it: those of live clips, and
+        # those of every clip of a job with a reprompt in flight.
+        keep: set[str] = set()
+        for raw in {raw for pair in live for raw in pair if raw}:
+            keep |= _aliases(raw)
+        for _, job_id, *paths in retired:
+            if in_flight(job_id):
+                for raw in paths:
+                    if raw:
+                        keep |= _aliases(raw)
 
-    seen: set[Path] = set()
-    deleted: list[str] = []
-    for clip_id, _, *paths in retired:
-        for raw in paths:
-            if not raw or _aliases(raw) & keep:
-                continue
-            path = _checked(raw)
-            if path is None or path in seen or not _is_managed(path, roots):
-                continue
-            seen.add(path)
-            if delete_below_root(
-                path,
-                roots,
-                owner=f"retired clip {clip_id}",
-                accept=lambda st: st.st_mtime < cutoff,
-            ):
-                deleted.append(str(path))
+        seen: set[Path] = set()
+        deleted: list[str] = []
+        for clip_id, _, *paths in retired:
+            for raw in paths:
+                names = _aliases(raw) if raw else set()
+                if not raw or names & keep:
+                    continue
+                path = _checked(raw)
+                if path is None or path in seen or not _is_managed(path, roots):
+                    continue
+                seen.add(path)
+                if not os.path.lexists(path):
+                    continue
+                # Re-read right before the delete (no await between this
+                # read and the delete): the clip must still be retired and
+                # no live clip may use the file now.
+                if not await _still_retired_and_unused(
+                    session, clip_id, names | {str(path)}
+                ):
+                    log.debug(
+                        "retention: kept %s (clip %s): back in use", path, clip_id
+                    )
+                    continue
+                if delete_below_root(
+                    path,
+                    roots,
+                    owner=f"retired clip {clip_id}",
+                    accept=lambda st: st.st_mtime < cutoff,
+                ):
+                    deleted.append(str(path))
     return deleted
+
+
+async def _still_retired_and_unused(
+    session: AsyncSession, clip_id: str, names: set[str]
+) -> bool:
+    """One read: ``clip_id`` is still retired and no live clip references
+    any of ``names`` (spellings of one file) as its video or thumbnail."""
+    still_retired = exists().where(
+        ClipRecord.id == clip_id, ClipRecord.retired.is_(True)
+    )
+    used_live = exists().where(
+        ClipRecord.retired.is_(False),
+        or_(ClipRecord.output_path.in_(names), ClipRecord.thumbnail_path.in_(names)),
+    )
+    return bool(await session.scalar(select(still_retired & ~used_live)))
 
 
 # ── The janitor tick ──────────────────────────────────────────────────────────
