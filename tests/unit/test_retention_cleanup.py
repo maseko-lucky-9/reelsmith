@@ -29,6 +29,7 @@ from app.bus.job_store import INTERRUPTIBLE_STATUSES
 from app.db.base import Base
 from app.db.models import ClipRecord, JobRecord
 from app.domain.models import JobStatus
+from app.services import retention
 from app.services.platforms import upload as upload_adapter
 from app.services.retention import (
     LEGACY_UPLOAD_ROOT,
@@ -116,10 +117,11 @@ async def _add_job(
     status: str = "completed",
     created_at: datetime = OLD,
     updated_at: datetime | None = OLD,
+    youtube_url: str = "https://x.test",
 ) -> str:
     async with factory() as session:
         job = JobRecord(
-            youtube_url="https://x.test",
+            youtube_url=youtube_url,
             status=status,
             video_path=video_path,
             created_at=created_at,
@@ -165,6 +167,13 @@ async def _video_path(factory, job_id: str) -> str | None:
         job = await session.get(JobRecord, job_id)
     assert job is not None
     return job.video_path
+
+
+async def _updated_at(factory, job_id: str) -> datetime:
+    async with factory() as session:
+        job = await session.get(JobRecord, job_id)
+    assert job is not None
+    return job.updated_at
 
 
 async def _sweep_sources(factory, roots, **kwargs) -> list[str]:
@@ -377,6 +386,8 @@ async def test_source_shared_with_another_job_is_kept(
     _assert_source_kept(tree)
     assert await _video_path(factory, job_id) == str(tree["video"])
     assert await _video_path(factory, other_id) == other_path
+    # Undoing the clear restores the row's last activity too: no churn.
+    assert await _updated_at(factory, job_id) == OLD.replace(tzinfo=None)
 
 
 async def test_source_is_kept_while_a_reprompt_is_in_flight(factory, root, roots):
@@ -439,8 +450,34 @@ async def test_second_source_sweep_is_a_no_op(factory, root, roots):
     assert await _sweep_sources(factory, roots) == []
 
 
+def _write(db: Path, sql: str, *params: str) -> None:
+    """One committed write from another connection, as another request would."""
+    other = sqlite3.connect(db)
+    try:
+        with other:
+            other.execute(sql, params)
+    finally:
+        other.close()
+
+
+def _before_the_clear(monkeypatch, source: Path, action) -> None:
+    """Run ``action`` once, when the sweep checks ``source`` against the
+    managed roots: after its candidate scan, before its clearing UPDATE."""
+    real = retention._is_managed
+    done = False
+
+    def _check_then_act(path, roots):
+        nonlocal done
+        if path == source and not done:
+            done = True
+            action()
+        return real(path, roots)
+
+    monkeypatch.setattr(retention, "_is_managed", _check_then_act)
+
+
 async def test_a_clip_that_goes_live_during_the_sweep_keeps_the_source(
-    tmp_path, root, roots
+    tmp_path, root, roots, monkeypatch
 ):
     """The clearing UPDATE re-checks every condition: a clip made live
     between the scan and the clear (here, from another connection) wins."""
@@ -452,19 +489,14 @@ async def test_a_clip_that_goes_live_during_the_sweep_keeps_the_source(
     tree = _url_job_tree(root)
     job_id = await _eligible_job(file_factory, tree)
 
-    def _revive_its_clip(candidate: str) -> bool:
-        other = sqlite3.connect(db)
-        try:
-            with other:
-                other.execute(
-                    "UPDATE clips SET retired = 0 WHERE job_id = ?", (candidate,)
-                )
-        finally:
-            other.close()
-        return False
+    _before_the_clear(
+        monkeypatch,
+        tree["video"],
+        lambda: _write(db, "UPDATE clips SET retired = 0 WHERE job_id = ?", job_id),
+    )
 
     try:
-        cleaned = await _sweep_sources(file_factory, roots, in_flight=_revive_its_clip)
+        cleaned = await _sweep_sources(file_factory, roots)
         video_path = await _video_path(file_factory, job_id)
     finally:
         await engine.dispose()
@@ -472,6 +504,78 @@ async def test_a_clip_that_goes_live_during_the_sweep_keeps_the_source(
     assert cleaned == []
     _assert_source_kept(tree)
     assert video_path == str(tree["video"])
+
+
+@pytest.mark.parametrize("status", ["pending", "running"])
+async def test_an_upload_a_queued_job_still_needs_is_kept(factory, root, roots, status):
+    """A queued or running ``upload://`` job has no ``video_path`` until its
+    download step, but its URL already names the file (e.g. a retry of an
+    old failed upload job)."""
+    upload = _file(root / "uploads" / "1f2e3d4c.mp4", b"source")
+    job_id = await _add_job(factory, video_path=str(upload), status="failed")
+    await _add_job(
+        factory,
+        video_path=None,
+        status=status,
+        youtube_url=f"upload://{upload}",
+        updated_at=NOW,
+    )
+
+    assert await _sweep_sources(factory, roots) == []
+
+    assert upload.read_bytes() == b"source"
+    assert await _video_path(factory, job_id) == str(upload)
+
+
+async def test_an_upload_job_queued_during_the_sweep_keeps_the_source(
+    tmp_path, root, roots, monkeypatch
+):
+    """Other jobs' references are read after the clearing UPDATE (on SQLite
+    the sweep then holds the write lock), so a job queued after the scan is
+    still seen, and the clear is undone."""
+    db = tmp_path / "race.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    file_factory = async_sessionmaker(engine, expire_on_commit=False)
+    upload = _file(root / "uploads" / "1f2e3d4c.mp4", b"source")
+    job_id = await _add_job(file_factory, video_path=str(upload), status="failed")
+    _before_the_clear(
+        monkeypatch,
+        upload,
+        lambda: _write(
+            db,
+            "INSERT INTO jobs (id, youtube_url, status, created_at, updated_at) "
+            "VALUES ('retry', ?, 'pending', '2026-10-09 11:59:00', "
+            "'2026-10-09 11:59:00')",
+            f"upload://{upload}",
+        ),
+    )
+
+    try:
+        cleaned = await _sweep_sources(file_factory, roots)
+        video_path = await _video_path(file_factory, job_id)
+        updated_at = await _updated_at(file_factory, job_id)
+    finally:
+        await engine.dispose()
+
+    assert cleaned == []
+    assert upload.read_bytes() == b"source"
+    assert video_path == str(upload)
+    assert updated_at == OLD.replace(tzinfo=None)
+
+
+async def test_idle_jobs_that_share_a_source_are_cleaned_together(factory, root, roots):
+    """Two eligible jobs that share one file do not keep it for each other."""
+    tree = _url_job_tree(root)
+    first = await _eligible_job(factory, tree)
+    second = await _eligible_job(factory, tree)
+
+    assert sorted(await _sweep_sources(factory, roots)) == sorted([first, second])
+
+    assert not tree["video"].exists()
+    assert await _video_path(factory, first) is None
+    assert await _video_path(factory, second) is None
 
 
 class _CommitFails:

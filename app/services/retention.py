@@ -39,8 +39,9 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePath
+from urllib.parse import urlparse
 
-from sqlalchemy import exists, func, or_, select, update
+from sqlalchemy import and_, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.models import ClipRecord, JobRecord
@@ -63,6 +64,8 @@ QUIET_PERIOD = timedelta(hours=1)
 # Where uploads were stored before T031; must match
 # app/services/platforms/upload.py::_LEGACY_UPLOAD_ROOT.
 LEGACY_UPLOAD_ROOT = Path("/tmp/yt/uploads")
+# URL scheme of a job made from an uploaded file (app/routers/uploads.py).
+_UPLOAD_SCHEME = "upload://"
 
 InFlight = Callable[[str], bool]
 
@@ -327,6 +330,38 @@ def _remove_empty_dirs(folders: Iterable[Path], roots: Sequence[Path]) -> None:
 # ── Unused source videos ──────────────────────────────────────────────────────
 
 
+async def _source_references(session: AsyncSession) -> list[tuple[str, set[str]]]:
+    """Each job's claim on a source file, as ``_aliases`` names: its
+    ``video_path`` and, for a job that can still run, the file its
+    ``upload://`` URL names (``video_path`` is only set at the download
+    step, e.g. for a queued retry of an old upload job)."""
+    rows = (
+        await session.execute(
+            select(
+                JobRecord.id,
+                JobRecord.video_path,
+                JobRecord.youtube_url,
+                JobRecord.status,
+            ).where(
+                or_(
+                    JobRecord.video_path.is_not(None),
+                    and_(
+                        JobRecord.status.not_in(TERMINAL_JOB_STATUSES),
+                        JobRecord.youtube_url.startswith(_UPLOAD_SCHEME),
+                    ),
+                )
+            )
+        )
+    ).all()
+    references: list[tuple[str, set[str]]] = []
+    for job_id, raw, url, status in rows:
+        names = _aliases(raw) if raw else set()
+        if status not in TERMINAL_JOB_STATUSES and url.startswith(_UPLOAD_SCHEME):
+            names |= _aliases(urlparse(url).path)
+        references.append((job_id, names))
+    return references
+
+
 async def sweep_unused_sources(
     factory: async_sessionmaker[AsyncSession],
     *,
@@ -341,11 +376,14 @@ async def sweep_unused_sources(
     hold: the job's status is in ``TERMINAL_JOB_STATUSES``; it has no live
     clip; its last activity (``updated_at``, else ``created_at``) is older
     than ``retention_days`` and than ``QUIET_PERIOD``; none of its clip rows
-    changed within ``QUIET_PERIOD``; ``in_flight(job_id)`` is False; the
-    source is a safe path (``_checked``) that resolves below one of
-    ``roots``; and no other job references the same file (``_aliases``).
-    ``jobs.video_path`` is set to NULL and committed before anything is
-    deleted, through ``delete_below_root``.
+    changed within ``QUIET_PERIOD``; the source is a safe path
+    (``_checked``) that resolves below one of ``roots``; and, checked after
+    the clearing UPDATE and just before the commit, ``in_flight(job_id)``
+    is False and no other job references the same file
+    (``_source_references``; jobs cleared in the same sweep do not count).
+    ``jobs.video_path`` is set to NULL (put back, with ``updated_at``, when
+    a late check fails) and committed before anything is deleted, through
+    ``delete_below_root``.
 
     Folders removed when empty: the source's own folder and its ``clips``
     (a URL job's ``<slug>-<job8>``), and the folder of each clip file of the
@@ -376,30 +414,21 @@ async def sweep_unused_sources(
         ~has_recent_clip,
     )
 
+    tentative: list[tuple[str, str, datetime, Path]] = []
     cleared: list[tuple[str, Path]] = []
     folders: list[Path] = []
     async with factory() as session:
         candidates = (
             await session.execute(
-                select(JobRecord.id, JobRecord.video_path)
+                select(JobRecord.id, JobRecord.video_path, JobRecord.updated_at)
                 .where(*unused)
                 .order_by(JobRecord.created_at, JobRecord.id)
             )
         ).all()
         if not candidates:
             return []
-        references = [
-            (job_id, _aliases(raw))
-            for job_id, raw in (
-                await session.execute(
-                    select(JobRecord.id, JobRecord.video_path).where(
-                        JobRecord.video_path.is_not(None)
-                    )
-                )
-            ).all()
-        ]
 
-        for job_id, raw in candidates:
+        for job_id, raw, updated_at in candidates:
             source = _checked(raw)
             # Debug, not warning: these are steady states, seen every tick.
             if source is None or not _is_managed(source, roots):
@@ -410,26 +439,41 @@ async def sweep_unused_sources(
                     job_id,
                 )
                 continue
-            names = _aliases(raw)
-            if any(
-                other_id != job_id and names & other_names
-                for other_id, other_names in references
-            ):
-                log.debug(
-                    "retention: kept source %s (job %s): another job uses it",
-                    raw,
-                    job_id,
-                )
-                continue
-            if in_flight(job_id):
-                continue
             result = await session.execute(
                 update(JobRecord)
                 .where(JobRecord.id == job_id, JobRecord.video_path == raw, *unused)
                 .values(video_path=None)
                 .returning(JobRecord.id)
             )
-            if result.first() is None:
+            if result.first() is not None:
+                tentative.append((job_id, raw, updated_at, source))
+
+        # Read after the clearing UPDATEs, just before the commit: on SQLite
+        # this transaction now holds the write lock, so no job can be queued
+        # or changed until it commits. Jobs cleared above no longer count, so
+        # idle jobs that share one source are cleaned together.
+        references = await _source_references(session) if tentative else []
+        for job_id, raw, updated_at, source in tentative:
+            names = _aliases(raw)
+            busy = in_flight(job_id)
+            shared = any(
+                other_id != job_id and names & other_names
+                for other_id, other_names in references
+            )
+            if busy or shared:
+                # Undo the clear, last activity included, so the job is not
+                # treated as freshly active.
+                await session.execute(
+                    update(JobRecord)
+                    .where(JobRecord.id == job_id)
+                    .values(video_path=raw, updated_at=updated_at)
+                )
+                log.debug(
+                    "retention: kept source %s (job %s): %s",
+                    raw,
+                    job_id,
+                    "a reprompt is in flight" if busy else "another job uses it",
+                )
                 continue
             cleared.append((job_id, source))
             if _is_managed(source.parent, roots):
