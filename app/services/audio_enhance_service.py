@@ -16,10 +16,9 @@ call happens through ``_invoke`` which is patched out in unit tests.
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable, Sequence
+from typing import TYPE_CHECKING, Sequence
 
 from app.domain.events import EventType, emit_from_sync
 from app.services import ffmpeg_tools

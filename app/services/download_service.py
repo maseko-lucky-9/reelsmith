@@ -14,7 +14,6 @@ from dataclasses import asdict
 
 import app.logging_config  # noqa: F401
 from app.services.platforms import (
-    UnsupportedPlatformError,
     YouTubeAdapter,
     detect_platform_id,
 )

@@ -16,7 +16,6 @@ from app.db.models import (
     ClipRecord,
     JobRecord,
     PublishJob,
-    ShareLink,
     SocialAccount,
 )
 from app.services import (

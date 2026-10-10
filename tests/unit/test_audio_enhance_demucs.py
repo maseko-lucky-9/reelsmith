@@ -1,9 +1,7 @@
 """Unit tests for the W2.4 demucs provider in audio_enhance_service."""
 from __future__ import annotations
 
-from pathlib import Path
 
-import pytest
 
 from app.services import audio_enhance_service as svc
 

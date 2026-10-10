@@ -218,7 +218,6 @@ class SqlJobStore:
         self._factory = get_session_factory()
 
     async def create(self, state: JobState) -> JobState:
-        from sqlalchemy import select
 
         from app.db.models import JobRecord
 
@@ -295,7 +294,7 @@ class SqlJobStore:
     ) -> ChapterArtifacts:
         from sqlalchemy import select
 
-        from app.db.models import ChapterRecord, JobRecord
+        from app.db.models import ChapterRecord
 
         async with self._factory() as session:
             result = await session.execute(

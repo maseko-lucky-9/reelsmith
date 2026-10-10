@@ -22,5 +22,5 @@ select = ["E", "F", "I"]
 known-third-party = ["alembic"]
 
 [tool.ruff.lint.per-file-ignores]
-# Applied migrations are frozen history: do not reorder their imports.
-"alembic/versions/*" = ["I001"]
+# Applied migrations are frozen history: do not reorder or prune their imports.
+"alembic/versions/*" = ["I001", "F401"]

@@ -7,7 +7,6 @@ default postgresql+asyncpg://reelsmith:reelsmith@localhost:5432/reelsmith
 from __future__ import annotations
 
 import pytest
-import pytest_asyncio
 
 from app.bus.job_store import SqlJobStore
 from app.domain.models import JobState
