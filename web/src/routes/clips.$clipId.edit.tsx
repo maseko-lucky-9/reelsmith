@@ -24,6 +24,7 @@ import { apiErrorDetail } from '@/lib/apiErrorDetail'
 import { toast } from 'sonner'
 import { useTimelineEditor } from '@/hooks/useTimelineEditor'
 import { MultiTrackTimeline } from '@/components/editor/MultiTrackTimeline'
+import { BrollCredits } from '@/components/broll-credits'
 
 export const clipEditRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -259,6 +260,8 @@ export function ClipEditorPage() {
           >
             {rerenderMutation.isPending ? 'Queuing…' : '+ Regenerate captions'}
           </button>
+
+          <BrollCredits assets={clip.broll_assets} className="pt-4 border-t border-border" />
         </div>
 
         {/* Center video */}

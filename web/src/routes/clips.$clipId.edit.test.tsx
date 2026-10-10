@@ -72,6 +72,50 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
+describe('ClipEditorPage — B-roll credits', () => {
+  it("shows the clip's B-roll credits and the Pexels link", async () => {
+    vi.mocked(api.listClips).mockResolvedValue([
+      {
+        clip_id: 'clip-1',
+        job_id: 'job-1',
+        title: 'Intro',
+        output_path: null,
+        broll_assets: [
+          {
+            query: 'ocean',
+            start: 3,
+            duration: 3,
+            provider: 'pexels',
+            asset_id: '1234',
+            author: 'Jane Doe',
+            source_url: 'https://www.pexels.com/video/ocean-1234/',
+            path: '/var/cache/1234.mp4',
+          },
+        ],
+      } as never,
+    ])
+    vi.spyOn(clipEditRoute, 'useParams').mockReturnValue({ clipId: 'clip-1' } as never)
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const Page = clipEditRoute.options.component as ComponentType
+    render(createElement(QueryClientProvider, { client: qc }, createElement(Page)))
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50)
+    })
+
+    expect(screen.getByRole('heading', { name: 'B-roll credits' })).toBeTruthy()
+    expect(screen.getByRole('link', { name: /Jane Doe/ }).getAttribute('href')).toBe(
+      'https://www.pexels.com/video/ocean-1234/',
+    )
+    expect(screen.getByRole('link', { name: /Videos provided by Pexels/ })).toBeTruthy()
+  })
+
+  it('shows no credits for a clip without B-roll', async () => {
+    await renderPage()
+
+    expect(screen.queryByRole('heading', { name: 'B-roll credits' })).toBeNull()
+  })
+})
+
 describe('ClipEditorPage — re-render copy option', () => {
   it('shows the checkbox ticked by default and sends regenerate_copy: true', async () => {
     await renderPage()
