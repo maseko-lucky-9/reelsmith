@@ -89,6 +89,11 @@ class Settings(BaseSettings):
     score_weights: str = (
         '{"hook":0.30,"value":0.25,"emotion":0.15,"audio":0.15,"trend":0.15}'
     )
+    # Optional re-rank of the discovered candidates by a local LLM
+    # (app/services/segment_rerank.py): "none" (default: the heuristic's
+    # order) | "ollama" (the ollama_* settings below; needs ollama_enabled).
+    # Any failure keeps the heuristic's order.
+    segment_rerank_provider: str = "none"
 
     # ── Reframe ───────────────────────────────────────────────────────────
     # "letterbox" (default: scaled inset over the blurred background) |

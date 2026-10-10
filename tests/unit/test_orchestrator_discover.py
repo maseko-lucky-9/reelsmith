@@ -12,10 +12,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import re
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -26,6 +29,7 @@ from app.db import models as _models  # noqa: F401 — registers tables on Base
 from app.db.base import Base
 from app.domain.events import Event, EventType
 from app.domain.models import JobState, PipelineOptions
+from app.services import segment_rerank
 from app.services.platforms.base import Chapter, DownloadResult
 from app.services.segment_proposer import ProposedSegment
 from app.services.segment_proposer import (
@@ -702,6 +706,104 @@ async def test_real_proposer_keeps_one_of_two_repeated_dialogue_scenes(
     ]
     assert len(clips) >= 2
     assert len(scenes) == 1, [(c["start"], c["end"]) for c in clips]
+
+
+# ── optional local-LLM re-rank (T040) ─────────────────────────────────────────
+
+
+class _FakeOllama:
+    """Stands in for ``segment_rerank._ask_ollama``: no network."""
+
+    def __init__(self, reply: str | Exception) -> None:
+        self.reply = reply
+        self.prompts: list[str] = []
+
+    async def __call__(self, prompt_text: str, ids: list[str], *, transport: Any = None) -> str:
+        self.prompts.append(prompt_text)
+        if isinstance(self.reply, Exception):
+            raise self.reply
+        return self.reply
+
+
+def _use_ollama(harness: _Harness, reply: str | Exception, *, provider: str = "ollama") -> _FakeOllama:
+    fake = _FakeOllama(reply)
+    harness.monkeypatch.setattr(segment_rerank, "_ask_ollama", fake)
+    harness.monkeypatch.setattr(orch.settings, "ollama_enabled", True)
+    harness.monkeypatch.setattr(orch.settings, "segment_rerank_provider", provider)
+    # Ollama is on for the re-rank; keep the per-clip social step offline.
+    harness.monkeypatch.setattr(
+        orch.ollama_service, "generate_social_content", lambda *args, **kwargs: ("", [])
+    )
+    return fake
+
+
+def _candidate_blocks(prompt: str) -> list[tuple[str, str]]:
+    return re.findall(r'<candidate id="(c\d+)">(.*?)</candidate>', prompt)
+
+
+async def test_discover_stores_the_blended_score(harness, store, caplog):
+    caplog.set_level(logging.INFO, logger=segment_rerank.__name__)
+    fake = _use_ollama(harness, '{"c1": 40, "c2": 60}')
+
+    recorder = await harness.run(store)
+
+    # The shortlist is Alpha and Beta, in start order ("Overlap" overlaps
+    # Alpha, "Weak" is under the bar); the job's prompt rides along as data.
+    (prompt,) = fake.prompts
+    assert _candidate_blocks(prompt) == [("c1", "alpha summary"), ("c2", "beta summary")]
+    assert "<viewer_request>pricing</viewer_request>" in prompt
+    # 0.5 * heuristic + 0.5 * model: Alpha 0.5*30 + 0.5*40 = 35, Beta 40.
+    clips = sorted(await store.list_clips(job_id=JOB_ID), key=lambda c: c["start"])
+    assert [(c["title"], c["virality_score"], c["score_breakdown"], c["summary"]) for c in clips] == [
+        ("Alpha", 35, {"hook": 0.6, "value": 0.2}, "alpha summary"),
+        ("Beta", 40, {"hook": 0.1, "value": 0.4}, "beta summary"),
+    ]
+    assert [e.payload["score"] for e in recorder.of(EventType.SEGMENT_SCORED)] == [35, 40]
+    (proposed,) = recorder.of(EventType.SEGMENTS_PROPOSED)
+    assert proposed.payload == {"count": 2, "candidates": 4}
+    # The source's length reaches the re-rank, which logs the kept clips with
+    # the re-rank off and on (gate G1 measures the clip count with it).
+    (done,) = [r.getMessage() for r in caplog.records if "Clip re-rank done" in r.getMessage()]
+    assert "kept off=2 [c1, c2] on=2 [c1, c2]" in done
+
+
+async def test_discover_selection_runs_on_the_blended_scores(harness, memory_store):
+    # Alpha 0.5*30 + 0 = 15, Beta 0.5*20 + 0.5*100 = 60: Alpha is now under
+    # the relative bar (ceil(0.6 * 60) = 36) and only Beta is kept.
+    _use_ollama(harness, '{"c1": 0, "c2": 100}')
+
+    recorder = await harness.run(memory_store)
+
+    assert _chapters(recorder) == [("Beta", 50.0, 80.0)]
+    assert [c["virality_score"] for c in await memory_store.list_clips(job_id=JOB_ID)] == [60]
+
+
+async def test_discover_rerank_off_never_asks_the_model(harness, memory_store):
+    fake = _use_ollama(harness, '{"c1": 0, "c2": 100}', provider="none")
+
+    recorder = await harness.run(memory_store)
+
+    assert fake.prompts == []
+    assert _chapters(recorder) == [("Alpha", 10.3, 39.3), ("Beta", 50.0, 80.0)]
+    clips = sorted(await memory_store.list_clips(job_id=JOB_ID), key=lambda c: c["start"])
+    assert [c["virality_score"] for c in clips] == [30, 20]
+
+
+async def test_discover_rerank_failure_keeps_the_heuristic_clips(harness, memory_store):
+    fake = _use_ollama(harness, httpx.ConnectError("connection refused"))
+
+    recorder = await harness.run(memory_store)
+
+    assert len(fake.prompts) == 1
+    assert (await memory_store.get(JOB_ID)).status == "completed"
+    assert _chapters(recorder) == [("Alpha", 10.3, 39.3), ("Beta", 50.0, 80.0)]
+    clips = sorted(await memory_store.list_clips(job_id=JOB_ID), key=lambda c: c["start"])
+    assert [c["virality_score"] for c in clips] == [30, 20]
+    # A failed re-rank is not a failed discovery.
+    skipped = [
+        e for e in recorder.of(EventType.STAGE_SKIPPED) if e.payload.get("stage_id") == "segment_proposer"
+    ]
+    assert skipped == []
 
 
 # ── single-clip re-render reuses the sidecar ──────────────────────────────────

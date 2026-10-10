@@ -34,6 +34,7 @@ Speech enhancement cleans only the audio used for transcription. AI hook text an
 | Feature | Turn on with | Default |
 |---|---|---|
 | Clip discovery in sources without chapters, and reprompt by prompt or length range ([ADR-007](docs/decisions/007-clip-discovery-and-reprompt.md)) | `YTVIDEO_SEGMENT_PROVIDER=local_heuristic` | `chapter`: one "Full Video" clip; a reprompt works only with an explicit time range |
+| Re-rank of the discovered clips by a local LLM, blended with the heuristic score (ADR-007, *Re-rank*; needs clip discovery on) | `YTVIDEO_SEGMENT_RERANK_PROVIDER=ollama` (uses `YTVIDEO_OLLAMA_*`; Ollama down or a bad reply keeps the heuristic ranking) | `none`: the heuristic ranking only |
 | Face-tracked 9:16 crop instead of the letterbox ([ADR-006](docs/decisions/006-face-track-reframe.md)) | `YTVIDEO_REFRAME_PROVIDER=face_track` | `letterbox` |
 | B-roll inserts (up to two 3 s windows per reel) | `YTVIDEO_BROLL_PROVIDER=local` (keyword-named mp4s in `YTVIDEO_BROLL_LIBRARY_DIR`) or `pexels` (needs `YTVIDEO_PEXELS_API_KEY`) | `none` |
 
