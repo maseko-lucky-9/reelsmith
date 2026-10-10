@@ -23,7 +23,7 @@ Every route answers at both `/x` and `/api/x`, with one scheme in every mode:
 
 ## Consequences
 
-- The OpenAPI schema lists each route once, unprefixed. `/api/docs`, `/api/redoc` and `/api/openapi.json` also answer.
+- The OpenAPI schema lists each route once, unprefixed. `/api/docs`, `/api/redoc` and `/api/openapi.json` also answer (with `YTVIDEO_REQUIRE_AUTH` off; since T043 auth on switches the docs off at both addresses).
 - The app-level API-key dependency (`YTVIDEO_REQUIRE_AUTH`) applies the same way at both addresses, because the rewrite happens before routing. The static mount stays outside it, as before.
 - With `serve_frontend`, an `/api/...` path that matches no route falls through to the static mount and returns its 404.
 - `scripts/deploy.sh`'s `/api/health` smoke test now resolves without a change.
