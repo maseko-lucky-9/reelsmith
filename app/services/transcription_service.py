@@ -57,7 +57,7 @@ GREEDY_TEMPERATURE = 0.0
 # A decode loop: one phrase of up to LOOP_MAX_PHRASE_WORDS words, at least
 # LOOP_MIN_COPIES times back to back, over at least LOOP_MIN_WORDS words (a
 # third of a 30 s window of speech). Greedy loops measured on noisy talks
-# covered 168-549 words; the longest repeat in a greedy decode of a clean
+# covered 314-549 words; the longest repeat in a greedy decode of a clean
 # talk was a 15-word stutter ("I don't know." x5). A false alarm only costs
 # repeatability: the fallback result is used.
 LOOP_MIN_COPIES = 3
