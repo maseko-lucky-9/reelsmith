@@ -125,14 +125,13 @@ def test_decode_settings_reach_whisper(
 ) -> None:
     monkeypatch.setattr(ts.settings, "whisper_model", "tiny")
     monkeypatch.setattr(ts.settings, "whisper_cpu_threads", 6)
+    monkeypatch.setattr(ts.settings, "whisper_device", "cpu")
     monkeypatch.setattr(ts.settings, "whisper_beam_size", 3)
     monkeypatch.setattr(ts.settings, "whisper_vad_filter", vad_filter)
 
     ts.transcribe_to_words("a.wav", language="en")
 
-    assert factory.constructed == [
-        (("tiny",), {"compute_type": "int8", "cpu_threads": 6})
-    ]
+    assert factory.constructed == [(("tiny",), {"device": "cpu", "compute_type": "int8", "cpu_threads": 6})]
     call = factory.model.transcribe_calls[-1]
     assert call["beam_size"] == 3
     assert call["vad_filter"] is vad_filter
