@@ -155,6 +155,117 @@ def test_warm_up_is_a_noop_for_the_stub_provider(
     assert factory.constructed == []
 
 
+# ── Repeatable decoding (T047) ───────────────────────────────────────────────
+
+PHRASE = ["I", "had", "no", "idea."]
+# A greedy decode stuck in a loop: the phrase back to back over LOOP_MIN_WORDS words.
+LOOP = PHRASE * -(-ts.LOOP_MIN_WORDS // len(PHRASE))
+
+
+def test_default_decoding_keeps_whispers_temperature_fallback(
+    factory: FakeModelFactory,
+) -> None:
+    ts.transcribe_to_words("a.wav", language="en")
+
+    (call,) = factory.model.transcribe_calls
+    assert "temperature" not in call  # faster-whisper's default 0.0..1.0 fallback
+
+
+def test_repeatable_decoding_is_greedy_with_the_usual_settings(
+    factory: FakeModelFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ts.settings, "whisper_beam_size", 3)
+    monkeypatch.setattr(ts.settings, "whisper_vad_filter", True)
+
+    words = ts.transcribe_to_words("a.wav", language="en-US", repeatable=True)
+
+    assert [w.word for w in words] == ["w0", "w1"]
+    (call,) = factory.model.transcribe_calls
+    assert call == {
+        "word_timestamps": True,
+        "language": "en",
+        "beam_size": 3,
+        "vad_filter": True,
+        "temperature": 0.0,  # one temperature: no sampled fallback
+    }
+
+
+def test_two_repeatable_transcriptions_send_the_same_greedy_request(
+    factory: FakeModelFactory,
+) -> None:
+    first = ts.transcribe_to_words("a.wav", language="en", repeatable=True)
+    second = ts.transcribe_to_words("a.wav", language="en", repeatable=True)
+
+    assert first == second
+    assert [c["temperature"] for c in factory.model.transcribe_calls] == [0.0, 0.0]
+
+
+def test_a_greedy_decode_that_loops_is_redone_with_the_fallback(
+    factory: FakeModelFactory, caplog: pytest.LogCaptureFixture
+) -> None:
+    factory.model.outputs = [["Hi."] + LOOP, ["Hi.", "I", "had", "no", "idea."]]
+
+    with caplog.at_level("WARNING", logger=ts.__name__):
+        words = ts.transcribe_to_words("a.wav", language="en", repeatable=True)
+
+    assert [w.word for w in words] == ["Hi.", "I", "had", "no", "idea."]
+    greedy, fallback = factory.model.transcribe_calls
+    assert greedy["temperature"] == 0.0
+    assert "temperature" not in fallback
+    assert {k: v for k, v in greedy.items() if k != "temperature"} == fallback
+    assert "repeats a phrase" in caplog.text
+
+
+def test_a_greedy_decode_with_a_short_repeat_is_kept(factory: FakeModelFactory) -> None:
+    short = LOOP[: -len(PHRASE)]  # one copy fewer: under LOOP_MIN_WORDS
+    factory.model.outputs = [["Hi."] + short, ["unused"]]
+
+    words = ts.transcribe_to_words("a.wav", language="en", repeatable=True)
+
+    assert [w.word for w in words] == ["Hi."] + short
+    assert len(factory.model.transcribe_calls) == 1
+
+
+# Seven spellings of one word: as written no phrase repeats back to back.
+IDEA_FORMS = ("idea.", "idea,", "IDEA", "idea?", "Idea!", "idea...", "idea;")
+
+
+@pytest.mark.parametrize(
+    ("words", "loops"),
+    [
+        ([], False),
+        (["no"] * (ts.LOOP_MIN_WORDS - 1), False),
+        (["no"] * ts.LOOP_MIN_WORDS, True),
+        # Clean TEDx talk, greedy: a short stutter, not a stuck decoder.
+        (["I", "don't", "know."] * 5, False),
+        # Case and punctuation are ignored: "idea." == "IDEA" == "idea,".
+        ([w for end in IDEA_FORMS for w in ("I", "had", "no", end)], True),
+        # Anaphora is not a loop: the sentences differ after "This is him".
+        ("This is him up close. This is him facing back. This is him lying down. This is him".split(), False),
+        # Two copies of a long sentence are not a loop, three are.
+        ([f"t{i}" for i in range(ts.LOOP_MAX_PHRASE_WORDS)] * (ts.LOOP_MIN_COPIES - 1), False),
+        ([f"t{i}" for i in range(ts.LOOP_MAX_PHRASE_WORDS)] * ts.LOOP_MIN_COPIES, True),
+        # A phrase one word longer than the longest checked is not seen.
+        ([f"t{i}" for i in range(ts.LOOP_MAX_PHRASE_WORDS + 1)] * ts.LOOP_MIN_COPIES, False),
+        # Copies separated by other words are not back to back.
+        (["a", "b", "x", "a", "b", "y", "a", "b", "z", "a", "b"], False),
+    ],
+)
+def test_decode_loop_detection(words: list[str], loops: bool) -> None:
+    assert ts.has_decode_loop(words) is loops
+
+
+async def test_async_transcription_passes_repeatable_through(
+    factory: FakeModelFactory,
+) -> None:
+    await ts.transcribe_words_async("a.wav", language="en", audio_duration_s=1.0, repeatable=True)
+    await ts.transcribe_words_async("a.wav", language="en", audio_duration_s=1.0)
+
+    greedy, default = factory.model.transcribe_calls
+    assert greedy["temperature"] == 0.0
+    assert "temperature" not in default
+
+
 # ── Decode-time budget, cancellation ─────────────────────────────────────────
 
 

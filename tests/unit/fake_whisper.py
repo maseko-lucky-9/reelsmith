@@ -41,13 +41,18 @@ class FakeSegment:
 
 
 class FakeWhisperModel:
-    """Yields ``segments`` one-word segments, sleeping ``delay`` s before each."""
+    """Yields ``segments`` one-word segments, sleeping ``delay`` s before each.
+
+    ``outputs``, when set, scripts the words of successive ``transcribe``
+    calls instead (call *n* yields ``outputs[n]``, the last entry repeating).
+    """
 
     supported_languages = list(SUPPORTED_LANGUAGES)
 
     def __init__(self, *, segments: int = 2, delay: float = 0.0) -> None:
         self.segments = segments
         self.delay = delay
+        self.outputs: list[list[str]] | None = None
         self.transcribe_calls: list[dict[str, Any]] = []
         self.consumed = 0
         self.closed = threading.Event()
@@ -59,14 +64,18 @@ class FakeWhisperModel:
         language = kwargs.get("language")
         if language is not None and language not in self.supported_languages:
             raise ValueError(f"'{language}' is not a valid language code")
-        return self._generate(), object()
+        if self.outputs is not None:
+            words = self.outputs[min(len(self.transcribe_calls), len(self.outputs)) - 1]
+        else:
+            words = [f"w{i}" for i in range(self.segments)]
+        return self._generate(words), object()
 
-    def _generate(self) -> Iterator[FakeSegment]:
+    def _generate(self, words: list[str]) -> Iterator[FakeSegment]:
         try:
-            for i in range(self.segments):
+            for i, word in enumerate(words):
                 time.sleep(self.delay)
                 self.consumed += 1
-                yield FakeSegment((FakeWord(f" w{i}", i * 0.5, i * 0.5 + 0.4),))
+                yield FakeSegment((FakeWord(f" {word}", i * 0.5, i * 0.5 + 0.4),))
         finally:
             self.closed.set()
 

@@ -168,6 +168,7 @@ class _Harness:
         self.adapter = _FakeAdapter()
         self.extract_calls: list[tuple[str, float, float]] = []
         self.transcribe_calls: list[str] = []
+        self.transcribe_kwargs: list[dict[str, Any]] = []
         self.transcribe_errors: list[BaseException] = []
         self.renders: list[dict[str, Any]] = []
         self.proposer = _FakeProposer(_segments())
@@ -183,8 +184,9 @@ class _Harness:
             Path(wav_path).write_bytes(b"\x00")
             return wav_path
 
-        def _transcribe(audio_path, **_):
+        def _transcribe(audio_path, **kwargs):
             self.transcribe_calls.append(audio_path)
+            self.transcribe_kwargs.append({k: v for k, v in kwargs.items() if k != "on_start"})
             if self.transcribe_errors:
                 raise self.transcribe_errors.pop(0)
             return list(SOURCE_WORDS)
@@ -339,6 +341,14 @@ async def test_discover_transcribes_the_source_once(harness, memory_store):
     # chapters ran (not just with the job's temp dir at the end).
     assert call["audio_existed"] is True
     assert [r["discover_wav_alive"] for r in harness.renders] == [False, False]
+
+
+async def test_discover_asks_for_a_repeatable_transcription(harness, memory_store):
+    """One source must give the same words, so the same clips, every run (T047)."""
+    await harness.run(memory_store)
+
+    # The kept clips reuse the source words, so no chapter transcribes again.
+    assert harness.transcribe_kwargs == [{"language": "en-US", "repeatable": True}]
 
 
 async def test_discover_writes_the_words_sidecar_next_to_the_source(
@@ -885,6 +895,8 @@ async def test_rerender_without_sidecar_transcribes_the_window(harness, store):
 
     assert harness.extract_calls == [(str(harness.source), 50.0, 30.0)]
     assert len(harness.transcribe_calls) == 1
+    # A window's captions keep the default decoding; only discovery pins it.
+    assert harness.transcribe_kwargs == [{"language": "en-US", "repeatable": False}]
 
 
 async def test_rerender_overwrites_the_clip_file_after_a_title_edit(harness, store):

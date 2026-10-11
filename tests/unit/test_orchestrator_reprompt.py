@@ -147,6 +147,7 @@ class _Harness:
         self.base = tmp_path / "out" / "Talk-job"
         self.clips = self.base / "clips"
         self.transcribe_calls: list[str] = []
+        self.transcribe_kwargs: list[dict[str, Any]] = []
         self.renders: list[str] = []
         self.fail_on: set[str] = set()
         # (file name, started, release): that render waits until released.
@@ -167,8 +168,9 @@ class _Harness:
             Path(wav_path).write_bytes(b"\x00")
             return wav_path
 
-        def _transcribe(audio_path, **_):
+        def _transcribe(audio_path, **kwargs):
             self.transcribe_calls.append(audio_path)
+            self.transcribe_kwargs.append({k: v for k, v in kwargs.items() if k != "on_start"})
             return list(SOURCE_WORDS)
 
         def _render(video_path, output_path, start, end, *args, **kwargs):
@@ -393,6 +395,8 @@ async def test_reprompt_transcribes_once_and_saves_the_sidecar_when_missing(
     await harness.reprompt(memory_store)
 
     assert len(harness.transcribe_calls) == 2
+    # Like discovery, the source is transcribed repeatably (T047).
+    assert harness.transcribe_kwargs[-1] == {"language": "en-US", "repeatable": True}
     assert segment_discovery.read_words_sidecar(str(harness.source)) == SOURCE_WORDS
     assert _names(await _live(memory_store)) == ["02_Alpha.mp4", "03_Gamma.mp4"]
 
