@@ -1092,7 +1092,7 @@ async def _reframe_step(
     then the render is exactly as before). Detection decodes the chapter in a
     worker thread via ``to_thread_cancellable``, so a cancel stops the decode
     and waits for it. Never fails the chapter: an error, a split screen,
-    several similar faces, no face or a face in fewer than half the samples
+    a crowd, several similar faces, no face or a face in fewer than half the samples
     emits ``StageSkipped(reframe, reason)`` and the reel is letterboxed.
     Cancellation propagates.
     """

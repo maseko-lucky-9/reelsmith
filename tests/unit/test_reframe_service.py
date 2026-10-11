@@ -76,6 +76,45 @@ def test_primary_face_of_nothing_is_none():
     assert primary_face([], SRC[0]) is None
 
 
+# T049: the score does not pick the main face. On real footage the sizes and
+# scores of real speakers and false positives overlap (a lone performer's face
+# at 10-11 % scoring 0.61-0.68, the back of a head at 16-17 % scoring
+# 0.64-0.75); the two tests below pin each side: a dim speaker (11 %, 0.62)
+# keeps the crop, and the back of a head (17 %, 0.68) still wins over a small
+# clear host (a known limit). ADR-006 *Known limits* has the real-footage check.
+_DIM_SPEAKER = {"h": 40, "score": 0.62}  # 11 %: the lone TEDx performer, 0.61-0.68
+_SMALL_CLEAR = {"h": 13, "score": 0.86}  # 3.6 %
+
+
+def test_a_large_dim_speaker_keeps_the_crop_over_a_small_clear_face():
+    """A speaker in profile or dim light (11 % of the frame, score 0.62, as
+    the lone TEDx performer scored 0.61-0.68) beside a small, clear audience
+    face: the crop stays on the speaker. Ranking faces above 0.9 x the
+    frame's best score would hand the clip to the audience face."""
+    obs = [
+        _obs(k * 0.5, _face(450, **_DIM_SPEAKER), _face(100, cy=300, **_SMALL_CLEAR))
+        for k in range(20)
+    ]
+
+    plan = plan_crop_track(obs, SRC)
+
+    assert {x for _t, x in plan.track} == {x_left_for(450, SRC[0], WINDOW_W)}
+
+
+def test_known_limit_a_large_unsure_face_beats_a_small_clear_speaker():
+    """A DOCUMENTED LIMIT (ADR-006 *Known limits*, T049 needs the owner), pinned
+    so that changing it is deliberate. The G2 Wikimania opening (W0): the
+    back of a foreground head (17 %, score 0.64-0.75, a detector false
+    positive) is the larger face, so the crop holds on it and the host on
+    stage (4 %, 0.86) stays outside the window."""
+    head = _face(100, h=60, score=0.68, cy=300)
+    obs = [_obs(k * 0.5, head, _face(330, cy=120, **_SMALL_CLEAR)) for k in range(20)]
+
+    plan = plan_crop_track(obs, SRC)
+
+    assert {x for _t, x in plan.track} == {0.0}
+
+
 def test_usable_faces_drop_low_scores_and_tiny_faces():
     min_h = reframe_service.MIN_FACE_HEIGHT * SRC[1]  # 18 px of 360
     small_h = reframe_service.SMALL_FACE_HEIGHT * SRC[1]  # 9 px of 360
@@ -263,6 +302,79 @@ def test_split_screen_means_letterbox():
     plan = plan_crop_track(obs, SRC)
 
     assert plan.track is None and plan.reason == "split screen"
+
+
+def _row(t: float, count: int, *, src_w: float, h: float) -> Observation:
+    """``count`` faces of height ``h`` evenly spread over 8 % - 90 % of the width."""
+    xs = [src_w * (0.08 + 0.82 * i / max(count - 1, 1)) for i in range(count)]
+    return _obs(t, *(_face(x, h=h, score=0.85) for x in xs))
+
+
+def test_a_crowd_is_not_called_a_split_screen():
+    """T048: seven faces of similar size spread across the frame are a crowd.
+    It still falls back to the letterbox, under its own reason."""
+    obs = [_row(k * 0.5, 7, src_w=SRC[0], h=40) for k in range(10)]
+
+    plan = plan_crop_track(obs, SRC)
+
+    assert plan.track is None and plan.reason == reframe_service.CROWD_REASON
+    assert plan.reason != "split screen"
+
+
+# T3 of the 2026-10-11 evidence packet (TEDxSydney 455-500 s, 854x480): the
+# number of faces of at least 5 % of the frame height YuNet found in each of
+# its 91 samples (an audience of 6-13 faces about 11 % tall, 17.5 s without a
+# face, then 17-26 faces about 6 % tall). Main called it a split screen.
+T3_LARGE_FACES = [
+    11, 11, 12, 11, 11, 11, 11, 12, 12, 11, 12, 13, 13, 13, 12, 11, 11, 10, 11, 9, 7,
+    7, 6, 6, 9, 7, 10, 9, 12, 9, 10, 8, 7, 7, 7, 7, 8, 9, 8, 8, 7, 8, *[0] * 35,
+    17, 26, 22, 22, 23, 25, 25, 26, 24, 24, 25, 24, 23, 26,
+]  # fmt: skip
+
+
+def test_the_t3_crowd_pattern_is_reported_as_a_crowd():
+    tedx = (854, 480)
+    obs = [
+        _row(k * 0.5, n, src_w=tedx[0], h=(0.109 if k < 42 else 0.058) * tedx[1])
+        for k, n in enumerate(T3_LARGE_FACES)
+    ]
+
+    plan = plan_crop_track(obs, tedx)
+
+    assert plan.track is None and plan.reason == reframe_service.CROWD_REASON
+    assert plan.face_samples == 56
+
+
+@pytest.mark.parametrize(("crowded", "reason"), [(5, "split screen"), (6, "a crowd")])
+def test_two_panes_with_an_occasional_third_face_stay_a_split_screen(crowded, reason):
+    """Two panes, one face each; a third face (someone passing behind) shows
+    in ``crowded`` of the 10 split frames. A crowd needs more than half of
+    them to hold ``CROWD_FACES`` faces, so up to half is still a split screen."""
+    assert reframe_service.CROWD_FACES == 3
+    obs = [
+        _obs(k * 0.5, _face(100), _face(540), *([_face(320, h=50)] if k < crowded else []))
+        for k in range(10)
+    ]
+
+    plan = plan_crop_track(obs, SRC)
+
+    assert plan.track is None and plan.reason == reason
+
+
+def test_the_crowd_share_counts_only_the_frames_with_faces_far_apart():
+    """T048 review: the crowd majority is over the frames the split test
+    counts, not over all frames. 20 samples: 11 with faces far apart (7 of
+    them with a third face), 9 with one face. 7 of 11 is a crowd; 7 of 20
+    would not be."""
+    obs = [
+        _obs(k * 0.5, _face(100), _face(540), *([_face(320, h=50)] if k < 7 else []))
+        for k in range(11)
+    ]
+    obs += [_obs(5.5 + k * 0.5, _face(320)) for k in range(9)]
+
+    plan = plan_crop_track(obs, SRC)
+
+    assert plan.track is None and plan.reason == reframe_service.CROWD_REASON
 
 
 def test_several_similar_faces_mean_letterbox():

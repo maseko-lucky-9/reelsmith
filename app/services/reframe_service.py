@@ -13,10 +13,12 @@ source px)``:
    faces within 10 % of its area go to the one nearest the frame centre.
 2. **Fallbacks** (no track: the reel is letterboxed as before): no usable face
    in the whole clip, a usable face in fewer than ``MIN_FACE_SHARE`` of the
-   samples (slides, credits), a split screen (``active_speaker_service
-   .detect_split_screen``), several faces of similar size in most face frames
-   (``EQUAL_FACE_AREA``), or a source with no horizontal pan room. The split
-   screen and similar-size tests count only faces of ``MIN_FACE_HEIGHT``.
+   samples (slides, credits), faces far apart in most frames
+   (``active_speaker_service.detect_split_screen``: a split screen, or a
+   crowd when most of those frames hold ``CROWD_FACES`` faces), several faces
+   of similar size in most face frames (``EQUAL_FACE_AREA``), or a source with
+   no horizontal pan room. The split-screen, crowd and similar-size tests
+   count only faces of ``MIN_FACE_HEIGHT``.
 3. **Primary face** (``follow_primary``). The crop follows one subject: in
    each frame, the face that continues the previous primary
    (``same_subject``: within ``SAME_FACE_RADIUS`` window widths horizontally,
@@ -103,6 +105,12 @@ _TIME_SLACK = 0.25 / SAMPLE_FPS  # 0.125 s
 _NEAR_EQUAL_AREA = 0.9  # primary-face tie: prefer the most central
 EQUAL_FACE_AREA = 0.6  # second face this large → "several faces" frame
 CROWDED_SHARE = 0.5  # of the frames with a face
+# A frame the split-screen test counts (two faces more than 0.4 widths apart)
+# is a crowd when it holds this many faces: two panes show one face each (a
+# third passes behind now and then); the G2 TEDx crowd (T3) had 6 to 26 in
+# every such frame. More than half of those frames → CROWD_REASON.
+CROWD_FACES = 3
+CROWD_REASON = "a crowd"
 EMA_ALPHA = 0.5
 _EMA_PAD = 6  # samples of reflection padding (0.5**6 < 2 %)
 MAX_SPEED = 0.5  # window widths per second
@@ -249,16 +257,22 @@ def _several_similar(faces: Sequence[Face]) -> bool:
     return second >= EQUAL_FACE_AREA * first
 
 
-def _split_screen(
+def _spread_layout(
     observations: Sequence[Observation], src_size: tuple[int, int]
-) -> bool:
+) -> str | None:
+    """``"split screen"`` or ``CROWD_REASON`` when ``detect_split_screen``
+    finds faces far apart in most frames, else ``None``. It is a crowd when
+    more than half of the frames it counts hold ``CROWD_FACES`` faces."""
     src_w, src_h = src_size
-    return detect_split_screen(
-        [
-            [FaceObservation(o.t, f.cx / src_w, f.cy / src_h, f.score) for f in o.faces]
-            for o in observations
-        ]
-    )
+    frames = [
+        [FaceObservation(o.t, f.cx / src_w, f.cy / src_h, f.score) for f in o.faces]
+        for o in observations
+    ]
+    if not detect_split_screen(frames):
+        return None
+    spread = [faces for faces in frames if detect_split_screen([faces])]
+    crowds = sum(1 for faces in spread if len(faces) >= CROWD_FACES)
+    return CROWD_REASON if crowds > len(spread) / 2 else "split screen"
 
 
 # ── positions ─────────────────────────────────────────────────────────────────
@@ -396,8 +410,9 @@ def plan_crop_track(
     # usable: a poster or an audience face must not letterbox a tracked clip.
     min_h = MIN_FACE_HEIGHT * src_h
     large = [Observation(o.t, tuple(f for f in o.faces if f.h >= min_h)) for o in usable]
-    if _split_screen(large, src_size):
-        return CropTrackPlan(None, "split screen", samples, len(with_faces))
+    layout = _spread_layout(large, src_size)
+    if layout is not None:
+        return CropTrackPlan(None, layout, samples, len(with_faces))
     with_large = [o for o in large if o.faces]
     crowded = sum(1 for o in with_large if _several_similar(o.faces))
     if crowded > CROWDED_SHARE * len(with_large):
