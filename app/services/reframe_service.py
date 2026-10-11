@@ -28,6 +28,9 @@ source px)``:
    a small face), and then from its first sample: a shorter cutaway seen on
    its own never moves the crop (cutaways split by faceless frames can add
    up, see ADR-006 *Known limits*), and a real change of speaker adds no lag.
+   A crowd frame (``CROWD_FACES`` large faces far apart, as the crowd
+   fallback counts them) chooses no primary: the crop holds through it
+   (T049); a clip whose face frames are all crowd frames is letterboxed.
 4. **Position.** The window (``render_service.pan_crop``) is centred on the
    primary face and clamped to ``[0, src_w - window]``. A frame without it
    holds the last position; frames before its first sample take that one.
@@ -444,7 +447,7 @@ def plan_crop_track(
         for face in follow_primary(voting, src_w, window.width, src_h=src_h)
     ]
     xs = hold_gaps(targets)
-    assert xs is not None  # with_faces is not empty, so some sample has a primary
+    assert xs is not None  # a sample outside the crowd frames has a face, so a primary
     times = [o.t for o in usable]
     smoothed = smooth_positions(
         times, xs, window_width=window.width, max_x=float(src_w - window.width)
