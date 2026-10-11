@@ -23,10 +23,10 @@ Provider (``YTVIDEO_TRANSCRIPTION_PROVIDER``): ``whisper`` or ``stub``.
   1006, 1008 and 1002 words and two different kept-clip sets). A repeatable
   call decodes greedily (``temperature=0.0`` only): the same audio gives the
   same words on one install. Greedy decoding alone can loop on noisy audio
-  (one phrase copied window after window), so when the greedy result repeats
-  a phrase ``LOOP_REPEATS`` times back to back (``has_decode_loop``) the audio
-  is decoded again with the default fallback and that result, which is not
-  repeatable, is used. Measurements: ADR-007 *Repeatable transcription*.
+  (one phrase copied window after window), so when the greedy result has
+  such a loop (``has_decode_loop``) the audio is decoded again with the
+  default fallback and that result, which is not repeatable, is used.
+  Measurements: ADR-007 *Repeatable transcription*.
 """
 
 from __future__ import annotations
@@ -54,11 +54,14 @@ _LOCK_POLL_SECONDS = 0.1
 
 # Repeatable decoding (T047): one temperature, so no sampled fallback.
 GREEDY_TEMPERATURE = 0.0
-# A greedy result with one phrase of up to LOOP_MAX_PHRASE_WORDS words this
-# many times back to back is a decode loop. Measured greedy loops ran 42-81
-# copies; clean talks never went past 2. A false alarm only costs
-# repeatability (the fallback result is used).
-LOOP_REPEATS = 4
+# A decode loop: one phrase of up to LOOP_MAX_PHRASE_WORDS words, at least
+# LOOP_MIN_COPIES times back to back, over at least LOOP_MIN_WORDS words (a
+# third of a 30 s window of speech). Greedy loops measured on noisy talks
+# covered 168-549 words; the longest repeat in a greedy decode of a clean
+# talk was a 15-word stutter ("I don't know." x5). A false alarm only costs
+# repeatability: the fallback result is used.
+LOOP_MIN_COPIES = 3
+LOOP_MIN_WORDS = 25
 LOOP_MAX_PHRASE_WORDS = 20
 
 _model: WhisperModel | None = None
@@ -179,20 +182,22 @@ def _phrase_token(word: str) -> str:
 
 
 def has_decode_loop(words: Sequence[str]) -> bool:
-    """Whether one phrase occurs ``LOOP_REPEATS`` times back to back.
+    """Whether one phrase repeats back to back long enough to be a decode loop.
 
-    A phrase is 1 to ``LOOP_MAX_PHRASE_WORDS`` words; case and punctuation
-    are ignored (``"Yeah."`` matches ``"yeah,"``). Sentences that only share
-    an opening ("This is him ... This is him ...") do not count.
+    That is a phrase of 1 to ``LOOP_MAX_PHRASE_WORDS`` words, at least
+    ``LOOP_MIN_COPIES`` times in a row, over at least ``LOOP_MIN_WORDS``
+    words. Case and punctuation are ignored (``"Yeah."`` matches
+    ``"yeah,"``). Sentences that only share an opening ("This is him ...
+    This is him ...") do not count.
     """
     tokens = [t for t in map(_phrase_token, words) if t]
     for size in range(1, LOOP_MAX_PHRASE_WORDS + 1):
-        # N back-to-back copies of a ``size``-word phrase are a stretch of
-        # (N - 1) * size tokens each equal to the token ``size`` places on.
+        # ``run`` tokens in a row, each equal to the token ``size`` places on,
+        # make a stretch of ``run + size`` words: (run + size) / size copies.
         run = 0
         for i in range(len(tokens) - size):
             run = run + 1 if tokens[i] == tokens[i + size] else 0
-            if run >= size * (LOOP_REPEATS - 1):
+            if run >= size * (LOOP_MIN_COPIES - 1) and run + size >= LOOP_MIN_WORDS:
                 return True
     return False
 
@@ -273,9 +278,8 @@ def transcribe_to_words(
             words = _decode(model, audio_path, code, cancel, temperature=GREEDY_TEMPERATURE)
             if has_decode_loop([w.word for w in words]):
                 log.warning(
-                    "Greedy transcription repeats a phrase %d+ times back to back; decoding again "
-                    "with the temperature fallback (not repeatable)  path=%s",
-                    LOOP_REPEATS,
+                    "Greedy transcription repeats a phrase back to back (a decode loop); decoding "
+                    "again with the temperature fallback (not repeatable)  path=%s",
                     audio_path,
                 )
                 words = _decode(model, audio_path, code, cancel)

@@ -157,7 +157,9 @@ def test_warm_up_is_a_noop_for_the_stub_provider(
 
 # ── Repeatable decoding (T047) ───────────────────────────────────────────────
 
-LOOP = ["I", "had", "no", "idea."] * ts.LOOP_REPEATS  # a greedy decode stuck in a loop
+PHRASE = ["I", "had", "no", "idea."]
+# A greedy decode stuck in a loop: the phrase back to back over LOOP_MIN_WORDS words.
+LOOP = PHRASE * -(-ts.LOOP_MIN_WORDS // len(PHRASE))
 
 
 def test_default_decoding_keeps_whispers_temperature_fallback(
@@ -215,28 +217,36 @@ def test_a_greedy_decode_that_loops_is_redone_with_the_fallback(
 
 
 def test_a_greedy_decode_with_a_short_repeat_is_kept(factory: FakeModelFactory) -> None:
-    factory.model.outputs = [["Hi."] + LOOP[:-4], ["unused"]]
+    short = LOOP[: -len(PHRASE)]  # one copy fewer: under LOOP_MIN_WORDS
+    factory.model.outputs = [["Hi."] + short, ["unused"]]
 
     words = ts.transcribe_to_words("a.wav", language="en", repeatable=True)
 
-    assert len(words) == 1 + 4 * (ts.LOOP_REPEATS - 1)
+    assert [w.word for w in words] == ["Hi."] + short
     assert len(factory.model.transcribe_calls) == 1
+
+
+# Seven spellings of one word: as written no phrase repeats back to back.
+IDEA_FORMS = ("idea.", "idea,", "IDEA", "idea?", "Idea!", "idea...", "idea;")
 
 
 @pytest.mark.parametrize(
     ("words", "loops"),
     [
         ([], False),
-        (["no"] * (ts.LOOP_REPEATS - 1), False),
-        (["no"] * ts.LOOP_REPEATS, True),
-        # Case and punctuation are ignored: "Yeah." == "yeah,".
-        (["Yeah.", "yeah,", "YEAH", "yeah?"], True),
+        (["no"] * (ts.LOOP_MIN_WORDS - 1), False),
+        (["no"] * ts.LOOP_MIN_WORDS, True),
+        # Clean TEDx talk, greedy: a short stutter, not a stuck decoder.
+        (["I", "don't", "know."] * 5, False),
+        # Case and punctuation are ignored: "idea." == "IDEA" == "idea,".
+        ([w for end in IDEA_FORMS for w in ("I", "had", "no", end)], True),
         # Anaphora is not a loop: the sentences differ after "This is him".
         ("This is him up close. This is him facing back. This is him lying down. This is him".split(), False),
-        # The longest phrase checked, repeated back to back.
-        ([f"t{i}" for i in range(ts.LOOP_MAX_PHRASE_WORDS)] * ts.LOOP_REPEATS, True),
-        # One word longer than that is not checked.
-        ([f"t{i}" for i in range(ts.LOOP_MAX_PHRASE_WORDS + 1)] * ts.LOOP_REPEATS, False),
+        # Two copies of a long sentence are not a loop, three are.
+        ([f"t{i}" for i in range(ts.LOOP_MAX_PHRASE_WORDS)] * (ts.LOOP_MIN_COPIES - 1), False),
+        ([f"t{i}" for i in range(ts.LOOP_MAX_PHRASE_WORDS)] * ts.LOOP_MIN_COPIES, True),
+        # A phrase one word longer than the longest checked is not seen.
+        ([f"t{i}" for i in range(ts.LOOP_MAX_PHRASE_WORDS + 1)] * ts.LOOP_MIN_COPIES, False),
         # Copies separated by other words are not back to back.
         (["a", "b", "x", "a", "b", "y", "a", "b", "z", "a", "b"], False),
     ],
