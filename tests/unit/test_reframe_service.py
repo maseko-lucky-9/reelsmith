@@ -76,6 +76,43 @@ def test_primary_face_of_nothing_is_none():
     assert primary_face([], SRC[0]) is None
 
 
+# T049: the score does not pick the main face. The two tests below hold the
+# same sizes and scores (a large face scoring 0.62-0.68 beside a small one
+# scoring 0.86) with the roles swapped, so no rule on box size and score
+# passes both; ADR-006 *Known limits* has the real-footage check.
+_DIM_SPEAKER = {"h": 40, "score": 0.62}  # 11 %: the lone TEDx performer, 0.61-0.68
+_SMALL_CLEAR = {"h": 13, "score": 0.86}  # 3.6 %
+
+
+def test_a_large_dim_speaker_keeps_the_crop_over_a_small_clear_face():
+    """A speaker in profile or dim light (11 % of the frame, score 0.62, as
+    the lone TEDx performer scored 0.61-0.68) beside a small, clear audience
+    face: the crop stays on the speaker. Ranking faces above 0.9 x the
+    frame's best score would hand the clip to the audience face."""
+    obs = [
+        _obs(k * 0.5, _face(450, **_DIM_SPEAKER), _face(100, cy=300, **_SMALL_CLEAR))
+        for k in range(20)
+    ]
+
+    plan = plan_crop_track(obs, SRC)
+
+    assert {x for _t, x in plan.track} == {x_left_for(450, SRC[0], WINDOW_W)}
+
+
+def test_known_limit_a_large_unsure_face_beats_a_small_clear_speaker():
+    """A DOCUMENTED LIMIT (ADR-006 *Known limits*, T049 needs the owner), pinned
+    so that changing it is deliberate. The G2 Wikimania opening (W0): the
+    back of a foreground head (17 %, score 0.64-0.75, a detector false
+    positive) is the larger face, so the crop holds on it and the host on
+    stage (4 %, 0.86) stays outside the window."""
+    head = _face(100, h=60, score=0.68, cy=300)
+    obs = [_obs(k * 0.5, head, _face(330, cy=120, **_SMALL_CLEAR)) for k in range(20)]
+
+    plan = plan_crop_track(obs, SRC)
+
+    assert {x for _t, x in plan.track} == {0.0}
+
+
 def test_usable_faces_drop_low_scores_and_tiny_faces():
     min_h = reframe_service.MIN_FACE_HEIGHT * SRC[1]  # 18 px of 360
     small_h = reframe_service.SMALL_FACE_HEIGHT * SRC[1]  # 9 px of 360
