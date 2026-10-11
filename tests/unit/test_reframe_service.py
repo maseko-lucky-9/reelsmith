@@ -259,6 +259,57 @@ def test_a_jump_across_samples_without_the_primary_is_not_a_cut():
     assert _cuts([10.0] * 4 + [None], [10.0 + WINDOW_W] * 4) == []
 
 
+def test_a_four_sample_shot_at_real_frame_times_is_a_shot():
+    """Sample times are frame times (0.02 / 0.50 s offsets at 2 fps): four
+    samples span 1.48 s, not 1.5 s. The quarter-sample slack keeps them a
+    shot on each side of the cut."""
+    times = [k * 0.5 + (0.02 if k % 2 == 0 else 0.0) for k in range(8)]
+    targets = [10.0] * 4 + [10.0 + WINDOW_W] * 4
+
+    assert reframe_service.find_cuts(times, targets, WINDOW_W) == [4]
+
+
+def test_a_shot_is_measured_in_seconds_not_samples():
+    """Four samples after the jump, the last one the window's last frame
+    0.03 s after the one before: 1.03 s on screen, under ``SWITCH_SECONDS``,
+    so no cut."""
+    times = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.03]
+    targets = [10.0] * 4 + [10.0 + WINDOW_W] * 4
+
+    assert reframe_service.find_cuts(times, targets, WINDOW_W) == []
+
+
+def test_the_cut_cap_keeps_the_largest_jumps_and_ties_go_to_the_later():
+    """Five cuts (jumps of 500, 500, 300, 300, 500 px) and room for two: the
+    two kept are 500 px jumps, the later two of the three."""
+    shots = [0.0, 500.0, 0.0, 300.0, 0.0, 500.0]
+    targets = [x for x in shots for _ in range(4)]
+    times = [k * 0.5 for k in range(len(targets))]
+
+    assert reframe_service.find_cuts(times, targets, WINDOW_W) == [4, 8, 12, 16, 20]
+    assert reframe_service.find_cuts(times, targets, WINDOW_W, max_cuts=2) == [8, 20]
+
+
+def test_cut_points_hold_the_old_position_up_to_each_cut():
+    """Both keyframes of a cut (the old position at the cut time, then the
+    new one) are marked to be kept by the decimation."""
+    points, keep = reframe_service._cut_points([0.0, 0.5, 1.0], [10.0, 10.0, 300.0], [2])
+
+    assert points == [(0.0, 10.0), (0.5, 10.0), (1.0, 10.0), (1.0, 300.0)]
+    assert keep == [2, 3]
+
+
+def test_each_stretch_stays_in_the_pan_range():
+    """The clamp to ``[0, max_x]`` applies to every stretch between cuts
+    (the reflection padding can overshoot an edge by a fraction of a pixel)."""
+    times = [k * 0.5 for k in range(14)]
+    xs = [0.0, 0.0, 0.0, 438.0, 438.0, 438.0, 0.0, 0.0, 0.0, 0.0, 438.0, 438.0, 438.0, 438.0]
+
+    smoothed = smooth_positions(times, xs, window_width=WINDOW_W, max_x=MAX_X, cuts=[10])
+
+    assert all(0.0 <= s <= MAX_X for s in smoothed)
+
+
 # ── keyframe decimation ───────────────────────────────────────────────────────
 
 
@@ -586,16 +637,20 @@ def _w0_opening() -> list[Observation]:
     """The G2 Wikimania opening (W0), its primary faces at their real sample
     times and positions: the back of a foreground head (cx 263-276, 16 % of
     the frame), a cut to the host's close-up at 3.52 s (cx 896-992), a cut
-    back to the head at 6.0 s, slides (no face) from 8.52 s."""
+    back to the head at 6.0 s, slides (no face) from 8.52 s. In the wide
+    shots an audience face (cx about 990, 9 %) sits where the host's
+    close-up is: near enough to pass for the host but about half its
+    height, so the cuts are still cuts (``STILL_SAME_SIZE``)."""
     head = [272.5, 270.6, 268.7, 272.0, 271.8, 273.2, 276.1]
     host = [895.6, 977.4, 919.1, 929.0, 991.6]
     back = [270.8, 266.9, 267.4, 263.3, 274.6]
     times = [0.0, 0.52, 1.0, 1.52, 2.0, 2.52, 3.0, 3.52, 4.0, 4.52, 5.0, 5.52]
     times += [6.0, 6.52, 7.0, 7.52, 8.0, 8.52, 9.0, 9.52, 10.0, 10.52, 11.0]
-    faces = [_hd(cx, h=178, score=0.68) for cx in head]
-    faces += [_hd(cx, h=185, score=0.91) for cx in host]
-    faces += [_hd(cx, h=176, score=0.73) for cx in back]
-    return [_obs(t, *([faces[k]] if k < len(faces) else [])) for k, t in enumerate(times)]
+    audience = _hd(991, h=98, score=0.72)
+    faces = [(_hd(cx, h=178, score=0.68), audience) for cx in head]
+    faces += [(_hd(cx, h=185, score=0.91),) for cx in host]
+    faces += [(_hd(cx, h=176, score=0.73), audience) for cx in back]
+    return [_obs(t, *(faces[k] if k < len(faces) else ())) for k, t in enumerate(times)]
 
 
 def test_the_w0_opening_does_not_pan_before_the_cuts():
@@ -630,6 +685,50 @@ def test_many_cuts_stay_within_the_keyframe_cap():
     cuts = sum(1 for a, b in zip(times, times[1:]) if a == b)
     assert cuts == reframe_service.MAX_CUTS
     assert render_service.crop_x_expr(plan.track, *HD[:1], HD_WINDOW)
+
+
+def _tedx_two_shot() -> list[Observation]:
+    """The TEDx two-shot at 301.5-309 s (854x480): a man at cx 657 and a
+    woman at cx 183, both about 7 % of the frame, in one continuous shot.
+    The man is the main face, then the woman grows a little and becomes it.
+    Box heights wobble from sample to sample as YuNet's did (6.7-7.9 %).
+    The man is alone first, so the two-shot is under half the clip (no
+    "several faces" fallback)."""
+    man = [Face(x=657 - h / 2, y=200, w=h, h=h, score=0.8) for h in (36, 34)]
+    woman = [Face(x=183 - h / 2, y=200, w=h, h=h, score=0.67) for h in (35, 40)]
+    obs = [_obs(k * 0.5, man[k % 2]) for k in range(16)]
+    obs += [_obs(8.0 + k * 0.5, man[k % 2], woman[k >= 6]) for k in range(12)]
+    return obs
+
+
+def test_a_main_face_flip_inside_one_shot_is_panned_not_cut():
+    """T050 review: the primary jumps 1.8 windows when the woman becomes the
+    main face, but the man is still in the frame at that sample (and she was
+    in it the sample before): one shot, so the crop pans as before T050."""
+    obs = _tedx_two_shot()
+
+    plan = plan_crop_track(obs, (854, 480))
+
+    assert plan.track is not None
+    assert len({t for t, _x in plan.track}) == len(plan.track)  # no cut
+    assert plan.track == _largest_face_track(obs, (854, 480))
+
+
+def test_a_face_that_was_already_in_the_frame_does_not_make_a_cut():
+    """The speaker goes undetected (turns away) while a smaller face beside
+    them stays in view and becomes the primary: the new primary was in the
+    frame the sample before, so there is no cut, out or back."""
+    speaker, other = _face(150), _face(400, h=40)
+    obs = [
+        *[_obs(k * 0.5, speaker, other) for k in range(10)],
+        *_steady(other, 5.0, 8),
+        *[_obs(9.0 + k * 0.5, speaker, other) for k in range(12)],
+    ]
+
+    plan = plan_crop_track(obs, SRC)
+
+    assert len({t for t, _x in plan.track}) == len(plan.track)  # no cut
+    assert plan.track == _largest_face_track(obs, SRC)
 
 
 def test_a_quick_step_aside_is_panned_not_cut():

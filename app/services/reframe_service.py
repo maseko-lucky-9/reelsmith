@@ -34,7 +34,9 @@ source px)``:
 5. **Cuts** (``find_cuts``). The primary's position jumping more than
    ``CUT_JUMP`` window widths between consecutive samples is a shot change
    when the primary is seen in every sample for ``SWITCH_SECONDS`` on both
-   sides (at most ``MAX_CUTS``, the largest jumps).
+   sides and the switch is not inside one shot (``_same_shot``: the old
+   primary still seen at the jump, or the new one already seen before it);
+   at most ``MAX_CUTS``, the largest jumps.
 6. **Smoothing**, between cuts: a zero-phase EMA (``EMA_ALPHA`` per sample,
    forward then backward: no lag), then a dead zone of ``DEADBAND`` window
    widths (the crop stays put while the speaker sways) and a cap of
@@ -136,6 +138,14 @@ CUT_JUMP = 0.75  # window widths
 # from it). At most this many, the largest jumps, so that cuts use at most half
 # of the keyframes; the others are panned.
 MAX_CUTS = (render_service.MAX_CROP_KEYFRAMES - 2) // 4  # 15
+# No cut where the primary changes inside one shot (``_same_shot``): the old
+# primary still in the frame at the jump sample, or the new one already in
+# it the sample before. "In the frame": a face within SAME_FACE_RADIUS and
+# at least this share of its height. A face keeps its size from one sample
+# to the next (the TEDx two-shot at 307.5 s: 7.1 % and 7.1 %, 7.3 % and
+# 7.6 %); the audience faces near the W0 host's close-up position on either
+# side of its cuts are 0.53-0.54 of its height.
+STILL_SAME_SIZE = 0.8
 _SIMPLIFY_TOLERANCE_PX = 0.5
 
 
@@ -318,11 +328,42 @@ def hold_gaps(xs: Sequence[float | None]) -> list[float] | None:
     return filled
 
 
+def _seen(face: Face, faces: Sequence[Face], radius: float) -> bool:
+    """Whether a face in ``faces`` is ``face`` one sample apart in the same
+    shot: at most ``radius`` px away horizontally and of nearly the same
+    height (``STILL_SAME_SIZE``)."""
+    return any(
+        abs(f.cx - face.cx) <= radius and min(f.h, face.h) >= STILL_SAME_SIZE * max(f.h, face.h)
+        for f in faces
+    )
+
+
+def _same_shot(
+    observations: Sequence[Observation], primaries: Sequence[Face | None], window_w: float
+) -> list[int]:
+    """Indices ``k`` where the primary changes inside one shot: the previous
+    primary is still seen at ``k``, or the new one was already seen at
+    ``k - 1``. A camera cut replaces the picture, so neither holds there."""
+    radius = SAME_FACE_RADIUS * window_w
+    same = []
+    for k in range(1, len(observations)):
+        before, after = primaries[k - 1], primaries[k]
+        if before is None or after is None:
+            continue
+        if _seen(before, observations[k].faces, radius) or _seen(
+            after, observations[k - 1].faces, radius
+        ):
+            same.append(k)
+    return same
+
+
 def find_cuts(
     times: Sequence[float],
     targets: Sequence[float | None],
     window_w: float,
     max_cuts: int = MAX_CUTS,
+    *,
+    same_shot: Iterable[int] = (),
 ) -> list[int]:
     """Indices ``k`` where ``targets`` jumps more than ``CUT_JUMP`` window
     widths from ``k - 1`` between two shots: on each side, a known target
@@ -330,9 +371,12 @@ def find_cuts(
     ``SWITCH_SECONDS``, without such a jump. The ``max_cuts`` largest, in
     order. A jump to or from a shorter glimpse is panned, so a cutaway that
     takes the crop by mistake (short stints chained across faceless frames,
-    ADR-006 *Known limits*) moves it no further than before."""
+    ADR-006 *Known limits*) moves it no further than before. Nor is a jump
+    at an index in ``same_shot`` (``_same_shot``: a switch of primary inside
+    one shot, which is panned as before)."""
     jump = CUT_JUMP * window_w
     n = len(targets)
+    same = set(same_shot)
 
     def steady(k: int) -> bool:  # k - 1 → k continues a shot
         a, b = targets[k - 1], targets[k]
@@ -351,7 +395,8 @@ def find_cuts(
     for k in range(1, n):
         a, b = targets[k - 1], targets[k]
         if (
-            a is not None
+            k not in same
+            and a is not None
             and b is not None
             and abs(b - a) > jump
             and times[k - 1] - times[first[k - 1]] >= need
@@ -527,14 +572,17 @@ def plan_crop_track(
         return CropTrackPlan(
             None, "several faces of similar size", samples, len(with_faces)
         )
+    primaries = follow_primary(usable, src_w, window.width, src_h=src_h)
     targets = [
         None if face is None else x_left_for(face.cx, src_w, window.width)
-        for face in follow_primary(usable, src_w, window.width, src_h=src_h)
+        for face in primaries
     ]
     xs = hold_gaps(targets)
     assert xs is not None  # with_faces is not empty, so some sample has a primary
     times = [o.t for o in usable]
-    cuts = find_cuts(times, targets, window.width)
+    cuts = find_cuts(
+        times, targets, window.width, same_shot=_same_shot(usable, primaries, window.width)
+    )
     smoothed = smooth_positions(
         times, xs, window_width=window.width, max_x=float(src_w - window.width), cuts=cuts
     )
