@@ -31,14 +31,25 @@ source px)``:
 4. **Position.** The window (``render_service.pan_crop``) is centred on the
    primary face and clamped to ``[0, src_w - window]``. A frame without it
    holds the last position; frames before its first sample take that one.
-5. **Smoothing.** A zero-phase EMA (``EMA_ALPHA`` per sample, forward then
-   backward: no lag), then a dead zone of ``DEADBAND`` window widths (the
-   crop stays put while the speaker sways) and a cap of ``MAX_SPEED`` window
-   widths per second, so the crop never snaps across the frame.
-6. **Keyframes.** At most ``render_service.MAX_CROP_KEYFRAMES``: the greedy
-   top-down simplification keeps both endpoints and adds the point that
-   deviates most from the piecewise-linear track until the cap is reached or
-   every point is within half a pixel.
+5. **Cuts** (``find_cuts``). The primary's position jumping more than
+   ``CUT_JUMP`` window widths between consecutive samples is a shot change
+   when the primary is seen in every sample for ``SWITCH_SECONDS`` on both
+   sides and the switch is not inside one shot (``_same_shot``: the old
+   primary still seen at the jump, or the new one already seen before it);
+   at most ``MAX_CUTS``, the largest jumps.
+6. **Smoothing**, between cuts: a zero-phase EMA (``EMA_ALPHA`` per sample,
+   forward then backward: no lag), then a dead zone of ``DEADBAND`` window
+   widths (the crop stays put while the speaker sways) and a cap of
+   ``MAX_SPEED`` window widths per second, so the crop never pans faster.
+   Each stretch between cuts is smoothed on its own, so a cut neither pulls
+   the crop before it (the EMA runs backwards too) nor is followed by a
+   pan: the crop holds its position up to the cut sample and starts there
+   on the new target.
+7. **Keyframes.** At most ``render_service.MAX_CROP_KEYFRAMES``: two at each
+   cut's time (the render cuts between them), then the greedy top-down
+   simplification keeps both endpoints and adds the point that deviates
+   most from the piecewise-linear track until the cap is reached or every
+   point is within half a pixel.
 
 ``face_track`` is the orchestrator's entry point: it gets the detector from
 ``face_detector.get_face_detector()`` (downloading the model on first use)
@@ -52,7 +63,7 @@ import logging
 import math
 import threading
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -115,6 +126,26 @@ EMA_ALPHA = 0.5
 _EMA_PAD = 6  # samples of reflection padding (0.5**6 < 2 %)
 MAX_SPEED = 0.5  # window widths per second
 DEADBAND = 0.1  # window widths
+# A cut (T050): the primary's position jumping more than this between
+# consecutive samples that both show it, each side a shot of SWITCH_SECONDS
+# (``find_cuts``). A subject continues only within
+# SAME_FACE_RADIUS (0.5 windows) per sample, so such a jump is always a switch
+# of primary; a walker seen every other sample (400 px between sightings on
+# 1080p, 0.66 windows) is not one, as no sample shows it jump. The G2
+# Wikimania cuts (W0) jumped 0.97 and 1.13 windows.
+CUT_JUMP = 0.75  # window widths
+# Each cut takes two keyframes (the old position held to the cut, the new one
+# from it). At most this many, the largest jumps, so that cuts use at most half
+# of the keyframes; the others are panned.
+MAX_CUTS = (render_service.MAX_CROP_KEYFRAMES - 2) // 4  # 15
+# No cut where the primary changes inside one shot (``_same_shot``): the old
+# primary still in the frame at the jump sample, or the new one already in
+# it the sample before. "In the frame": a face within SAME_FACE_RADIUS and
+# at least this share of its height. A face keeps its size from one sample
+# to the next (the TEDx two-shot at 307.5 s: 7.1 % and 7.1 %, 7.3 % and
+# 7.6 %); the audience faces near the W0 host's close-up position on either
+# side of its cuts are 0.53-0.54 of its height.
+STILL_SAME_SIZE = 0.8
 _SIMPLIFY_TOLERANCE_PX = 0.5
 
 
@@ -297,6 +328,84 @@ def hold_gaps(xs: Sequence[float | None]) -> list[float] | None:
     return filled
 
 
+def _seen(face: Face, faces: Sequence[Face], radius: float) -> bool:
+    """Whether a face in ``faces`` is ``face`` one sample apart in the same
+    shot: at most ``radius`` px away horizontally and of nearly the same
+    height (``STILL_SAME_SIZE``)."""
+    return any(
+        abs(f.cx - face.cx) <= radius and min(f.h, face.h) >= STILL_SAME_SIZE * max(f.h, face.h)
+        for f in faces
+    )
+
+
+def _same_shot(
+    observations: Sequence[Observation], primaries: Sequence[Face | None], window_w: float
+) -> list[int]:
+    """Indices ``k`` where the primary changes inside one shot: the previous
+    primary is still seen at ``k``, or the new one was already seen at
+    ``k - 1``. A camera cut replaces the picture, so neither holds there."""
+    radius = SAME_FACE_RADIUS * window_w
+    same = []
+    for k in range(1, len(observations)):
+        before, after = primaries[k - 1], primaries[k]
+        if before is None or after is None:
+            continue
+        if _seen(before, observations[k].faces, radius) or _seen(
+            after, observations[k - 1].faces, radius
+        ):
+            same.append(k)
+    return same
+
+
+def find_cuts(
+    times: Sequence[float],
+    targets: Sequence[float | None],
+    window_w: float,
+    max_cuts: int = MAX_CUTS,
+    *,
+    same_shot: Iterable[int] = (),
+) -> list[int]:
+    """Indices ``k`` where ``targets`` jumps more than ``CUT_JUMP`` window
+    widths from ``k - 1`` between two shots: on each side, a known target
+    (``None`` is a sample without the primary) in every sample for
+    ``SWITCH_SECONDS``, without such a jump. The ``max_cuts`` largest, in
+    order. A jump to or from a shorter glimpse is panned, so a cutaway that
+    takes the crop by mistake (short stints chained across faceless frames,
+    ADR-006 *Known limits*) moves it no further than before. Nor is a jump
+    at an index in ``same_shot`` (``_same_shot``: a switch of primary inside
+    one shot, which is panned as before)."""
+    jump = CUT_JUMP * window_w
+    n = len(targets)
+    same = set(same_shot)
+
+    def steady(k: int) -> bool:  # k - 1 → k continues a shot
+        a, b = targets[k - 1], targets[k]
+        return a is not None and b is not None and abs(b - a) <= jump
+
+    first = list(range(n))  # first sample of the shot through k
+    for k in range(1, n):
+        if steady(k):
+            first[k] = first[k - 1]
+    last = list(range(n))  # last sample of the shot from k
+    for k in range(n - 2, -1, -1):
+        if steady(k + 1):
+            last[k] = last[k + 1]
+    need = SWITCH_SECONDS - _TIME_SLACK
+    jumps = []
+    for k in range(1, n):
+        a, b = targets[k - 1], targets[k]
+        if (
+            k not in same
+            and a is not None
+            and b is not None
+            and abs(b - a) > jump
+            and times[k - 1] - times[first[k - 1]] >= need
+            and times[last[k]] - times[k] >= need
+        ):
+            jumps.append((abs(b - a), k))
+    return sorted(k for _jump, k in sorted(jumps, reverse=True)[:max_cuts])
+
+
 def _zero_phase_ema(xs: Sequence[float], alpha: float) -> list[float]:
     """EMA forward, then backward over the result, on a copy of ``xs`` padded
     at both ends by odd reflection (as ``scipy.signal.filtfilt`` does): a
@@ -322,8 +431,12 @@ def smooth_positions(
     alpha: float = EMA_ALPHA,
     max_speed: float = MAX_SPEED,
     deadband: float = DEADBAND,
+    cuts: Sequence[int] = (),
 ) -> list[float]:
     """Crop positions for per-sample targets ``xs`` (see the module docstring).
+
+    The samples between ``cuts`` (indices of the first sample after each
+    cut) are smoothed separately, each starting on its own first target:
 
     1. Zero-phase EMA: the whole clip is known, so smoothing adds no lag
        behind a moving speaker. Clamped to ``[0, max_x]`` when given.
@@ -331,6 +444,24 @@ def smooth_positions(
        ``deadband`` window widths from it, so swaying never moves it.
     3. Speed cap: at most ``max_speed`` window widths per second.
     """
+    bounds = [0, *sorted({k for k in cuts if 0 < k < len(xs)}), len(xs)]
+    out: list[float] = []
+    for lo, hi in zip(bounds, bounds[1:]):
+        out += _smooth_shot(
+            times[lo:hi], xs[lo:hi], window_width, max_x, alpha, max_speed, deadband
+        )
+    return out
+
+
+def _smooth_shot(
+    times: Sequence[float],
+    xs: Sequence[float],
+    window_width: float,
+    max_x: float | None,
+    alpha: float,
+    max_speed: float,
+    deadband: float,
+) -> list[float]:
     if not xs:
         return []
     target = _zero_phase_ema(xs, alpha)
@@ -351,16 +482,21 @@ def decimate(
     track: Sequence[render_service.CropKeyframe],
     max_keyframes: int = render_service.MAX_CROP_KEYFRAMES,
     tolerance: float = _SIMPLIFY_TOLERANCE_PX,
+    *,
+    keep: Iterable[int] = (),
 ) -> list[render_service.CropKeyframe]:
-    """At most ``max_keyframes`` of ``track``'s points, endpoints included,
-    chosen greedily by largest deviation from the current piecewise-linear
-    approximation; points within ``tolerance`` px are never added."""
+    """At most ``max_keyframes`` of ``track``'s points: the endpoints and the
+    indices in ``keep``, then the points chosen greedily by largest deviation
+    from the current piecewise-linear approximation; points within
+    ``tolerance`` px are never added."""
     if max_keyframes < 2:
         raise ValueError("max_keyframes must be at least 2")
     points = list(track)
     if len(points) <= 2:
         return points
-    keep = {0, len(points) - 1}
+    keep = {0, len(points) - 1, *keep}
+    if len(keep) > max_keyframes:
+        raise ValueError(f"{len(keep)} keyframes to keep, more than {max_keyframes}")
     while len(keep) < max_keyframes:
         kept = sorted(keep)
         worst, worst_err = None, tolerance
@@ -375,6 +511,23 @@ def decimate(
             break
         keep.add(worst)
     return [points[i] for i in sorted(keep)]
+
+
+def _cut_points(
+    times: Sequence[float], xs: Sequence[float], cuts: Sequence[int]
+) -> tuple[list[render_service.CropKeyframe], list[int]]:
+    """``(t, x)`` per sample plus, at each cut, the previous position at the
+    cut's time (a zero-length segment: the render cuts). Also the indices of
+    both keyframes of each cut."""
+    points: list[render_service.CropKeyframe] = []
+    at_cuts: list[int] = []
+    cut = set(cuts)
+    for k, (t, x) in enumerate(zip(times, xs)):
+        if k in cut:
+            at_cuts += [len(points), len(points) + 1]
+            points.append((t, xs[k - 1]))
+        points.append((t, x))
+    return points, at_cuts
 
 
 # ── planning ──────────────────────────────────────────────────────────────────
@@ -419,17 +572,22 @@ def plan_crop_track(
         return CropTrackPlan(
             None, "several faces of similar size", samples, len(with_faces)
         )
+    primaries = follow_primary(usable, src_w, window.width, src_h=src_h)
     targets = [
         None if face is None else x_left_for(face.cx, src_w, window.width)
-        for face in follow_primary(usable, src_w, window.width, src_h=src_h)
+        for face in primaries
     ]
     xs = hold_gaps(targets)
     assert xs is not None  # with_faces is not empty, so some sample has a primary
     times = [o.t for o in usable]
-    smoothed = smooth_positions(
-        times, xs, window_width=window.width, max_x=float(src_w - window.width)
+    cuts = find_cuts(
+        times, targets, window.width, same_shot=_same_shot(usable, primaries, window.width)
     )
-    track = decimate(list(zip(times, smoothed)))
+    smoothed = smooth_positions(
+        times, xs, window_width=window.width, max_x=float(src_w - window.width), cuts=cuts
+    )
+    points, at_cuts = _cut_points(times, smoothed, cuts)
+    track = decimate(points, keep=at_cuts)
     return CropTrackPlan(
         track,
         f"{len(with_faces)}/{samples} samples with a face",
