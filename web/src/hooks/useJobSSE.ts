@@ -123,7 +123,8 @@ export function useJobSSE(jobId: string | undefined, { enabled = true }: UseJobS
         void queryClient.invalidateQueries({ queryKey: ['jobs'] })
         return
       }
-      if (isNew) scheduleInvalidate()
+      // DownloadProgress carries all the bar needs; a job refetch per tick adds nothing.
+      if (isNew && type !== 'DownloadProgress') scheduleInvalidate()
     }
 
     const onNamedEvent = (e: Event) => {
@@ -140,6 +141,11 @@ export function useJobSSE(jobId: string | undefined, { enabled = true }: UseJobS
       es = source
       for (const type of KNOWN_EVENT_TYPES) source.addEventListener(type, onNamedEvent)
       source.onmessage = (e) => handleEvent(e)
+      // A restart emits no event, so a (re)opened but silent stream would leave the job stale.
+      source.onopen = () => {
+        failedConnects = 0
+        invalidateJobQueries()
+      }
       source.onerror = () => {
         source.close()
         if (closed) return

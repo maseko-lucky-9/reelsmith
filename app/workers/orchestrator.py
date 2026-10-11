@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import contextlib
 import logging
 import re
 import shutil
+import threading
 import time
 import uuid
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +40,7 @@ from app.services import (
     transcription_service,
 )
 from app.services.platforms import resolve as resolve_adapter
+from app.services.platforms._yt_dlp_base import download_progress
 from app.settings import settings
 
 log = logging.getLogger(__name__)
@@ -89,6 +93,46 @@ async def run_orchestrator(bus: AsyncEventBus, store: JobStore) -> None:
 
 async def _emit(bus: AsyncEventBus, type_: EventType, job_id: str, **payload: Any) -> None:
     await bus.publish(Event(type=type_, job_id=job_id, payload=payload))
+
+
+@contextlib.asynccontextmanager
+async def _download_progress_events(bus: AsyncEventBus, job_id: str) -> AsyncIterator[None]:
+    """Emit ``DownloadProgress`` for the download run inside the block.
+
+    Sets the ``download_progress`` callback, which the download thread calls
+    and which hops to the loop to publish. On exit no further percent is
+    published, even by a download thread that outlived a timeout, and every
+    one already scheduled has been published, so they all precede the
+    events that follow the block.
+    """
+    loop = asyncio.get_running_loop()
+    lock = threading.Lock()
+    pending: list[concurrent.futures.Future[None]] = []
+    closed = False
+    # The scheduled publishes start in call order; this FIFO lock keeps a
+    # slow publish from letting a later, higher percent overtake it.
+    in_order = asyncio.Lock()
+
+    async def _publish(percent: int) -> None:
+        async with in_order:
+            await _emit(bus, EventType.DOWNLOAD_PROGRESS, job_id, percent=percent)
+
+    def _report(percent: int) -> None:
+        with lock:
+            if closed:
+                return
+            pending.append(asyncio.run_coroutine_threadsafe(_publish(percent), loop))
+
+    token = download_progress.set(_report)
+    try:
+        yield
+    finally:
+        download_progress.reset(token)
+        with lock:
+            closed = True
+        await asyncio.gather(
+            *(asyncio.wrap_future(f) for f in pending), return_exceptions=True
+        )
 
 
 async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
@@ -157,10 +201,11 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
         step_t0 = time.perf_counter()
         await store.update(job_id, lambda s: setattr(s, "current_step", "download"))
         try:
-            result = await asyncio.wait_for(
-                asyncio.to_thread(adapter.download, url, destination),
-                timeout=settings.download_timeout_seconds,
-            )
+            async with _download_progress_events(bus, job_id):
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(adapter.download, url, destination),
+                    timeout=settings.download_timeout_seconds,
+                )
         except asyncio.TimeoutError:
             raise
         except Exception as e:
@@ -259,6 +304,8 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
 
         log.info("[%s] %d chapter(s) detected: %s", job_id, len(chapters),
                  [c["title"] for c in chapters])
+        # Stored before ChaptersDetected: the UI refetches the job on it.
+        await store.update(job_id, lambda s: setattr(s, "chapters_total", len(chapters)))
         await _emit(bus, EventType.CHAPTERS_DETECTED, job_id, chapters=chapters)
 
         # ── Per-chapter fan-out ───────────────────────────────────────────────
@@ -266,7 +313,7 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
 
         async def _bound(chapter: dict[str, Any]) -> str | None:
             async with semaphore:
-                return await _process_chapter(
+                output_path = await _process_chapter(
                     chapter=chapter,
                     job_id=job_id,
                     video_path=video_path,
@@ -280,6 +327,15 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
                     language=language,
                     source_words=source_words,
                 )
+                # Counted here, not in _process_chapter: a re-render or a
+                # reprompt is not job progress. Stored before the event, on
+                # which the UI refetches the job.
+                await store.increment_chapters_done(job_id)
+                await _emit(
+                    bus, EventType.CHAPTER_COMPLETED, job_id,
+                    chapter_index=int(chapter["index"]),
+                )
+                return output_path
 
         # Structured fan-out: the first failing chapter cancels its siblings
         # and the group waits for them to unwind before the job is marked

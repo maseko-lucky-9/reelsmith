@@ -15,6 +15,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -47,6 +48,14 @@ class JobRecord(Base):
     # Downloaded source video; kept so a single clip can be re-rendered.
     # NULL for jobs created before this column existed.
     video_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Job progress (T052). chapters_done is only ever incremented in SQL
+    # (SqlJobStore.increment_chapters_done), never written from a JobState.
+    chapters_total: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    chapters_done: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_now
     )

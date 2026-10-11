@@ -75,6 +75,10 @@ class JobState(BaseModel):
     title: str | None = None
     duration: float | None = None
     chapters: dict[int, ChapterArtifacts] = Field(default_factory=dict)
+    # Job progress: chapters detected, and chapters that finished every
+    # stage. Only the initial run counts; a re-render or reprompt does not.
+    chapters_total: int = 0
+    chapters_done: int = 0
     output_paths: list[str] = Field(default_factory=list)
     error: str | None = None
     clips: dict[str, Any] = Field(default_factory=dict)

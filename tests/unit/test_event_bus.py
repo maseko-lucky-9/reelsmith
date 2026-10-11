@@ -134,3 +134,28 @@ async def test_forget_keeps_live_subscribers_and_later_events():
 
     assert received[1] is later
     assert await _replayed(bus, "j1") == [later]
+
+
+async def test_download_progress_reaches_live_subscribers_but_is_not_replayed():
+    """Up to 100 DownloadProgress events a job would evict useful history."""
+    bus = AsyncEventBus()
+    received: list[Event] = []
+
+    async def consume():
+        async for event in bus.subscribe(job_id="j1"):
+            received.append(event)
+            if event.type is EventType.VIDEO_DOWNLOADED:
+                return
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0)
+    progress = Event(
+        type=EventType.DOWNLOAD_PROGRESS, job_id="j1", payload={"percent": 42}
+    )
+    downloaded = Event(type=EventType.VIDEO_DOWNLOADED, job_id="j1")
+    await bus.publish(progress)
+    await bus.publish(downloaded)
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert received == [progress, downloaded]
+    assert await _replayed(bus, "j1") == [downloaded]

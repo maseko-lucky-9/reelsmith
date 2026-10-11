@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable, Sequence
+from contextvars import ContextVar
 from typing import Any
 
 from yt_dlp import YoutubeDL
+from yt_dlp.postprocessor import PostProcessor
 
 import app.logging_config  # noqa: F401
 from app.services import ffmpeg_tools
@@ -15,6 +18,106 @@ log = logging.getLogger(__name__)
 
 
 _DEFAULT_FORMAT = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+
+# Called with the overall download percent (0-100) each time it rises. Set by
+# the caller around the download; ``asyncio.to_thread`` copies the context,
+# so adapters pass it through without a parameter.
+download_progress: ContextVar[Callable[[int], None] | None] = ContextVar(
+    "download_progress", default=None
+)
+
+
+class DownloadTracker:
+    """Overall percent of one download, fed yt-dlp progress-hook dicts.
+
+    ``bestvideo+bestaudio`` downloads two files one after the other and each
+    hook reports one file. Parts are told apart by file name, in the order
+    they start, and weighted by the sizes given to ``set_part_sizes``, or
+    equally when any size is unknown. The percent never decreases and stays
+    within 0-100; ``on_percent`` is called each time its integer value
+    changes. Nothing is raised: a raising progress hook aborts the download.
+    """
+
+    def __init__(self, on_percent: Callable[[int], None]) -> None:
+        self._on_percent = on_percent
+        self._sizes: list[int | None] = []
+        # File name → fraction downloaded, in the order the parts started.
+        self._fractions: dict[str, float] = {}
+        self._percent = 0.0
+        self._reported = 0
+
+    @property
+    def percent(self) -> int:
+        return int(self._percent)
+
+    def set_part_sizes(self, sizes: Sequence[int | None]) -> None:
+        self._sizes = list(sizes)
+
+    def progress_hook(self, status: dict[str, Any]) -> None:
+        try:
+            self._update(status)
+        except Exception:  # noqa: BLE001 — progress is cosmetic; keep downloading
+            log.debug("download progress hook failed", exc_info=True)
+
+    def finish(self) -> None:
+        """The download returned: it is complete even if not every part was reported
+        (yt-dlp downloads both formats in one call when ffmpeg is the downloader)."""
+        try:
+            self._raise_to(100.0)
+        except Exception:  # noqa: BLE001 — as progress_hook: never fail a finished download
+            log.debug("download progress finish failed", exc_info=True)
+
+    def _raise_to(self, percent: float) -> None:
+        self._percent = max(self._percent, min(100.0, percent))
+        if self.percent != self._reported:
+            self._reported = self.percent
+            self._on_percent(self._reported)
+
+    def _update(self, status: dict[str, Any]) -> None:
+        filename = status.get("filename")
+        if not filename:
+            return
+        if status.get("status") == "finished":
+            fraction = 1.0
+        elif status.get("status") == "downloading":
+            total = status.get("total_bytes") or status.get("total_bytes_estimate")
+            if not total:
+                return
+            fraction = (status.get("downloaded_bytes") or 0) / total
+        else:
+            return
+        self._fractions[filename] = min(max(fraction, 0.0), 1.0)
+        self._raise_to(100.0 * self._overall())
+
+    def _overall(self) -> float:
+        fractions = list(self._fractions.values())
+        parts = max(len(self._sizes), len(fractions), 1)
+        sizes = self._sizes
+        if len(sizes) == parts and all(sizes):
+            grand_total = sum(s for s in sizes if s)
+            weights = [(s or 0) / grand_total for s in sizes]
+        else:
+            weights = [1.0 / parts] * parts
+        return sum(w * f for w, f in zip(weights, fractions))
+
+
+class _FormatSizesPP(PostProcessor):
+    """Gives the tracker the requested formats' sizes before the download.
+
+    Runs ``before_dl``: yt-dlp drops ``requested_formats`` from the info it
+    hands the progress hooks, so they cannot see the other part's size.
+    """
+
+    def __init__(self, tracker: DownloadTracker) -> None:
+        super().__init__()
+        self._tracker = tracker
+
+    def run(self, info: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
+        formats = info.get("requested_formats") or [info]
+        self._tracker.set_part_sizes(
+            [f.get("filesize") or f.get("filesize_approx") for f in formats]
+        )
+        return [], info
 
 
 def build_ydl_opts(
@@ -48,15 +151,26 @@ def yt_dlp_download(
     format_string: str = _DEFAULT_FORMAT,
     extra_opts: dict[str, Any] | None = None,
 ) -> DownloadResult:
-    """Download `url` into `destination_folder` via yt-dlp."""
+    """Download `url` into `destination_folder` via yt-dlp.
+
+    Reports the overall percent to the ``download_progress`` callback, if one
+    is set.
+    """
     ydl_opts = build_ydl_opts(
         destination_folder, format_string=format_string, extra_opts=extra_opts
     )
+    on_percent = download_progress.get()
 
     log.info("[%s] yt-dlp download  url=%s  dest=%s", source, url, destination_folder)
     with YoutubeDL(ydl_opts) as ydl:
+        if on_percent is not None:
+            tracker = DownloadTracker(on_percent)
+            ydl.add_progress_hook(tracker.progress_hook)
+            ydl.add_post_processor(_FormatSizesPP(tracker), when="before_dl")
         info = ydl.extract_info(url, download=True)
         filename = ydl.prepare_filename(info)
+        if on_percent is not None:
+            tracker.finish()
 
     title = info.get("title") or ""
     duration = float(info.get("duration") or 0.0)
