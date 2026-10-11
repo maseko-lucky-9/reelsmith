@@ -3,7 +3,7 @@
 **Status:** Accepted (opt-in: `YTVIDEO_SEGMENT_PROVIDER` defaults to `chapter` by owner choice; whether the heuristic picks good clips is not signed off, gate G1)
 **Date:** 2026-10-09
 **Author:** Thulani Maseko
-**Implements:** FR-009 (T011; the optional re-rank, T040), FR-016 (T008); PRs #43, #49, #51, #66
+**Implements:** FR-009 (T011; the optional re-rank, T040; repeatable transcription, T047), FR-016 (T008); PRs #43, #49, #51, #66
 
 ## Context
 
@@ -127,6 +127,64 @@
   - No full pipeline has run with the re-rank on a real source: no download, transcription or render, and no G1 comparison of kept clips on real talks. Whether the re-rank picks better clips on real sources is unmeasured, and that is what gate G1 needs.
   - Excerpts in scripts that take several bytes a character carry less text (about 200 characters of Burmese or Hindi). How well a small model rates them is not measured.
 
+### Repeatable transcription (T047)
+
+- **Problem.** faster-whisper decodes each 30 s window greedily and, when the text compresses too well (gzip ratio above 2.4) or scores too low, decodes it again by *sampling* at temperatures 0.2 to 1.0. Sampling is random, and the window it picks moves where the next window starts and resets the text prompt, so every later window can differ. The same TEDx talk gave 1006, 1008 and 1002 words and two different kept-clip sets in three runs. Reseeding CTranslate2 (`set_random_seed`) before each run does not help (1007/1010/1002 words): its sampler's generator is per thread and seeded once.
+- **Decision.** Discovery's full-source transcription, and a reprompt's when the sidecar is missing, call `transcribe_words_async(..., repeatable=True)` (`app/services/transcription_service.py`):
+  1. decode greedily: `temperature=0.0` only, every other option as before (beam size, VAD, word timings, conditioning on the previous text);
+  2. if the greedy words contain a decode loop (`has_decode_loop`: one phrase of up to `LOOP_MAX_PHRASE_WORDS = 20` words, `LOOP_MIN_COPIES = 3` or more times back to back, over `LOOP_MIN_WORDS = 25` or more words; case and punctuation ignored), decode again with the default fallback and use that result, which is not repeatable. A warning is logged.
+
+  Both passes run under the one decode-time budget. Chapter captions (`_process_chapter`), a re-render that has no sidecar and `POST /transcriptions` keep the default decoding: they never pass `repeatable`. No setting; it applies whenever discovery runs.
+- **Why greedy plus a loop check.** Measured with whisper `base` (int8, 8 threads, beam 1, VAD), `HF_HUB_OFFLINE=1`, on the two local chapterless talks, each option three times through the real `_discover_segments` path (heuristic proposer, re-rank off, the owner's 20-60 s clip range):
+
+  | Source / decoding | Words r1/r2/r3 | Same words and timings | Transcribe s | Kept clips (r1 / r2 / r3) |
+  |---|---|---|---|---|
+  | TEDx 585 s, default fallback (before) | 1006/1008/1002 | no | 12.2/11.1/12.0 | 461.68-499.00 / 50.73-92.69, 442.13-482.54 / 50.73-92.69, 442.13-482.54 |
+  | TEDx, greedy (`temperature=0`) | 1016/1016/1016 | yes | 7.8/7.9/7.8 | 50.73-92.69, 404.68-444.63 (all three) |
+  | TEDx, greedy, no conditioning | 1001/1001/1001 | yes | 7.1/13.9/13.9 | 50.73-92.69, 404.66-444.97, 461.66-499.00 (all three) |
+  | TEDx, greedy, beam 5 | 1007/1007/1007 | yes | 15.1/14.6/31.3 | 461.62-499.00 (all three) |
+  | TEDx, greedy, repetition penalty 1.1 | 981/981/981 | yes | 7.7/7.5/7.4 | 50.59-92.71, 404.58-444.97 (all three) |
+  | TEDx, **this decision** | 1016/1016/1016 | yes | 7.4/7.4/7.4 | 50.73-92.69, 404.68-444.63 (all three) |
+  | Wikimania 236 s, default fallback (before) | 403/403/403 | yes | 3.4/6.7/6.2 | 85.27-125.21, 160.11-199.29 (all three) |
+  | Wikimania, **this decision** | 403/403/403 | yes | 6.7/6.7/6.4 | 85.27-125.21, 160.11-199.29 (all three) |
+
+  The fallback fired in one TEDx window (82.6 s; gzip ratio above 2.4 at every temperature) and in no Wikimania window. Where it never fires, greedy decoding *is* the default's first attempt: Wikimania's words are identical, word for word, before and after. In the TEDx window the speech itself repeats ("This is him ... This is him ..."); all three fallback runs kept the same text there and diverged after it, for example "This is him telling us what he had for breakfast. Two poached dogs. I should toast." (run 2) or the first breakfast line missing (run 3), where greedy decoding reads "... what he had for breakfast. Two poached eggs and a slice of toast. This is him telling us what he had for breakfast with his face turned to us. Two poached eggs and a slice of toast." Against fallback run 1, greedy changed 29 spans (158 words) of the TEDx text, mostly punctuation and the staged dialogue (base model; no human reference exists offline, so neither side is proven right there). The greedy words were identical across three separate processes. Timings were taken while other jobs loaded the machine (load average about 10), so only the large differences mean anything.
+
+- **Why not greedy alone.** Greedy decoding with conditioning on the previous text copies a loop from window to window. Pink noise mixed into the same talks (amplitudes 0.15 and 0.3), three runs each through `transcribe_to_words`; loop words are the words inside 3+ back-to-back copies of one phrase; WER is against the clean-audio transcript of the same talk:
+
+  | Audio / decoding | Words r1 | Same in 3 runs | Longest back-to-back repeat | Loop words | WER r1/r2/r3 |
+  |---|---|---|---|---|---|
+  | TEDx + noise 0.15, fallback | 943 | no | 4x "good quote" | 8 | 0.26/0.28/0.25 |
+  | same, greedy | 712 | yes | 42x "I had no idea" | 314 | 0.62 |
+  | same, greedy, no conditioning | 840 | yes | 2x | 0 | 0.33 |
+  | same, greedy, repetition penalty 1.1 | 817 | yes | 2x | 0 | 0.37 |
+  | same, **this decision** (loop found, fallback used) | 927 | no | 4x "good quote" | 8 | 0.29/0.26/0.28 |
+  | TEDx + noise 0.3, fallback | 897 | no | 2x | 0 | 0.57/0.59/0.54 |
+  | same, greedy | 950 | yes | 81x "they can breathe high contact" | 405 | 0.81 |
+  | same, greedy, no conditioning | 918 | yes | 13x "this is what he has to do" | 153 | 0.65 |
+  | same, **this decision** (loop found, fallback used) | 660 | no | 2x | 0 | 0.70/0.60/0.61, then 0.56/0.55/0.56 |
+  | Wikimania + noise 0.15, fallback | 432 | no | 1x | 0 | 0.77/0.76/0.75 |
+  | same, **this decision** (no loop: greedy) | 439 | yes | 1x | 0 | 0.76 |
+  | Wikimania + noise 0.3, fallback | 72 | yes | 2x | 0 | 0.93 |
+  | same, greedy | 565 | yes | 61x "You want to keep your future in the Dandak" | 549 | 1.31 |
+  | same, greedy, no conditioning | 347 | yes | 48x "7 8" | 250 | 0.95 |
+  | same, **this decision** (loop found, fallback used) | 72 | yes | 2x | 0 | 0.93 |
+
+  The fallback is not loop-free either: one of its six runs at TEDx noise 0.3 under this decision had a 13x repeat. The loop check separates the cases measured: greedy loops covered 314 to 549 words, while the longest repeat in a greedy decode of clean speech was a 15-word stutter ("I don't know." five times, in one of two extractions of the TEDx audio), which is kept. A false alarm only costs repeatability, since the default result is then used.
+- **Rejected.**
+  - *Greedy alone*: loops on noisy audio (table above).
+  - *Greedy without conditioning on the previous text* (what faster-whisper's batched pipeline uses): no long loop at TEDx noise 0.15, but a 13x loop at 0.3 and a 48x loop on Wikimania at 0.3, and worse text on clean audio: on Wikimania 59 words changed ("SDGs" became "SVGs", "Ugandan Body" "Dandan body", "committee" "comedians", sentence breaks lost, which the proposer uses to place windows); on TEDx a 5x "I don't know".
+  - *Beam size 5*: about twice the decode time, and still loops on noisy audio (66x and 69x).
+  - *A repetition penalty*: 1.1 drops most full stops and capitals ("This Is the actor up close") and changed 61 spans of the clean Wikimania text; 1.05 still looped 94x.
+  - *`no_repeat_ngram_size=10`*: the loops stayed (42x, 53x): they repeat across windows, not inside one.
+  - *A near-zero second temperature with `prompt_reset_on_temperature=0`* (a deterministic stand-in for the fallback's prompt reset): still loops (11x, 189 loop words at noise 0.15), and it depends on CTranslate2's sampling internals.
+  - *Keeping the fallback and documenting it*: discovery stays non-repeatable on clean talks such as the TEDx one.
+- **Limits.**
+  - Repeatable on one install: the same CTranslate2 build, CPU kernels and `whisper_cpu_threads`. Not checked across machines or versions.
+  - A source whose greedy decode loops (seen only with added noise here) stays non-repeatable and is decoded twice; both passes share one decode budget, `max(transcription_timeout_seconds, audio seconds)`. With `base` the greedy pass took about 8 s on the 585 s talk; a model close to real time could run out of budget, and then discovery falls back to one "Full Video" clip.
+  - The loop thresholds come from two talks and synthetic pink noise, whisper `base` only, English only. No music bed, crowd noise or real noisy upload was tried.
+  - Captions of chapter clips are not repeatable: a chapter is still transcribed with the default decoding. Discovered clips take their captions from the discovery words, so theirs are.
+
 ### Reprompt (PR #51)
 
 - **Router** (`app/routers/reprompt.py`). It validates the request:
@@ -158,7 +216,8 @@
   - a reprompt without a time range answers 409 "clip discovery is off (segment_provider=chapter) ...".
 
   Set `YTVIDEO_SEGMENT_PROVIDER=local_heuristic` to opt in. Flipping the default is an open owner decision, recorded with the ranking work in `specs/001-reelsmith-baseline/tasks.md`.
-- **Cost.** Discovery transcribes the whole source once. The sidecar saves a second transcription on every re-render and reprompt.
+- **Cost.** Discovery transcribes the whole source once (greedily; twice when the greedy result loops, *Repeatable transcription*). The sidecar saves a second transcription on every re-render and reprompt.
+- **Repeatability.** For one source on one install, discovery gives the same words, so the same candidates and kept clips, unless its greedy decode loops (T047).
 - **Disk.** `retire_clips` deletes no files, so the clips a reprompt replaced stay on disk until the retention janitor's `sweep_retired_files` deletes them, once each file is older than `YTVIDEO_RETIRED_FILES_GRACE_HOURS` (24); a job with a reprompt in flight is skipped. The sidecar lives as long as the source does: `sweep_unused_sources` removes both once the job has no live clip and has been idle for `retention_days` (T033, FR-013).
 - **Concurrency.** The in-flight guard is per process. One API process is assumed.
 - **Quality.** The ranking is heuristic and partly loudness-driven: `audio` is the window's relative RMS, and `hook` averages text cues with the opening's RMS. It is not signed off (G1). The optional re-rank (*Re-rank* above) adds a local model's judgement; it is off by default and its effect is unmeasured.
@@ -167,5 +226,6 @@
 ## Tests
 
 - Discovery: `tests/unit/test_orchestrator_discover.py`, `test_segment_discovery.py`, `test_segment_selection.py`, `test_segment_proposer.py`, `test_segment_proposer_heuristic.py`.
+- Repeatable transcription: `tests/unit/test_transcription_whisper_path.py` (a fake model records the decoding options: greedy `temperature=0.0` for a repeatable call, none for the default; the loop retry and the loop check's bounds), `test_discover_asks_for_a_repeatable_transcription` and the re-render case in `tests/unit/test_orchestrator_discover.py`, the missing-sidecar case in `tests/unit/test_orchestrator_reprompt.py`. The real-audio runs are in *Repeatable transcription* above, not in the suite.
 - Re-rank: `tests/unit/test_segment_rerank.py` (stubbed model: order, blend, parsing, the pinned request body, prompt bounds, Unicode and injection, every fallback including partial and cut-off replies, deadline, cancellation, the log lines) and the re-rank cases in `tests/unit/test_orchestrator_discover.py`.
 - Reprompt: `tests/contract/test_reprompt_router.py`, `tests/unit/test_orchestrator_reprompt.py` (memory and SQL stores), `tests/unit/test_event_bus.py`, `web/src/routes/jobs.$jobId.test.tsx`, `web/src/hooks/useJobSSE.test.ts`.

@@ -427,7 +427,7 @@ async def _discover_segments(
         if audio_path is None:
             raise RuntimeError("source has no audio stream")
         words = await transcription_service.transcribe_words_async(
-            audio_path, language=language, audio_duration_s=safe_end
+            audio_path, language=language, audio_duration_s=safe_end, repeatable=True
         )
         try:
             await asyncio.to_thread(
@@ -746,7 +746,7 @@ async def _propose_reprompt_chapters(
             raise RuntimeError("source has no audio stream")
         if words is None:
             words = await transcription_service.transcribe_words_async(
-                audio_path, language=language, audio_duration_s=safe_end
+                audio_path, language=language, audio_duration_s=safe_end, repeatable=True
             )
             try:
                 await asyncio.to_thread(
