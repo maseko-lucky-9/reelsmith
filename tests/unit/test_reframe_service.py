@@ -265,6 +265,63 @@ def test_split_screen_means_letterbox():
     assert plan.track is None and plan.reason == "split screen"
 
 
+def _row(t: float, count: int, *, src_w: float, h: float) -> Observation:
+    """``count`` faces of height ``h`` evenly spread over 8 % - 90 % of the width."""
+    xs = [src_w * (0.08 + 0.82 * i / max(count - 1, 1)) for i in range(count)]
+    return _obs(t, *(_face(x, h=h, score=0.85) for x in xs))
+
+
+def test_a_crowd_is_not_called_a_split_screen():
+    """T048: seven faces of similar size spread across the frame are a crowd.
+    It still falls back to the letterbox, under its own reason."""
+    obs = [_row(k * 0.5, 7, src_w=SRC[0], h=40) for k in range(10)]
+
+    plan = plan_crop_track(obs, SRC)
+
+    assert plan.track is None and plan.reason == reframe_service.CROWD_REASON
+    assert plan.reason != "split screen"
+
+
+# T3 of the 2026-10-11 evidence packet (TEDxSydney 455-500 s, 854x480): the
+# number of faces of at least 5 % of the frame height YuNet found in each of
+# its 91 samples (an audience of 6-13 faces about 11 % tall, 17.5 s without a
+# face, then 17-26 faces about 6 % tall). Main called it a split screen.
+T3_LARGE_FACES = [
+    11, 11, 12, 11, 11, 11, 11, 12, 12, 11, 12, 13, 13, 13, 12, 11, 11, 10, 11, 9, 7,
+    7, 6, 6, 9, 7, 10, 9, 12, 9, 10, 8, 7, 7, 7, 7, 8, 9, 8, 8, 7, 8, *[0] * 35,
+    17, 26, 22, 22, 23, 25, 25, 26, 24, 24, 25, 24, 23, 26,
+]  # fmt: skip
+
+
+def test_the_t3_crowd_pattern_is_reported_as_a_crowd():
+    tedx = (854, 480)
+    obs = [
+        _row(k * 0.5, n, src_w=tedx[0], h=(0.109 if k < 42 else 0.058) * tedx[1])
+        for k, n in enumerate(T3_LARGE_FACES)
+    ]
+
+    plan = plan_crop_track(obs, tedx)
+
+    assert plan.track is None and plan.reason == reframe_service.CROWD_REASON
+    assert plan.face_samples == 56
+
+
+@pytest.mark.parametrize(("crowded", "reason"), [(5, "split screen"), (6, "a crowd")])
+def test_two_panes_with_an_occasional_third_face_stay_a_split_screen(crowded, reason):
+    """Two panes, one face each; a third face (someone passing behind) shows
+    in ``crowded`` of the 10 split frames. A crowd needs more than half of
+    them to hold ``CROWD_FACES`` faces, so up to half is still a split screen."""
+    assert reframe_service.CROWD_FACES == 3
+    obs = [
+        _obs(k * 0.5, _face(100), _face(540), *([_face(320, h=50)] if k < crowded else []))
+        for k in range(10)
+    ]
+
+    plan = plan_crop_track(obs, SRC)
+
+    assert plan.track is None and plan.reason == reason
+
+
 def test_several_similar_faces_mean_letterbox():
     obs = [_obs(k * 0.5, _face(250), _face(390, h=55)) for k in range(10)]
 

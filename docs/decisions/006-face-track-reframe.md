@@ -4,7 +4,7 @@
 **Date:** 2026-10-09
 **Author:** Thulani Maseko
 **Implements:** FR-010 (reframe half of T012)
-**Amended:** 2026-10-10 by T041: primary-face continuity, small faces in wide shots, the face-share fallback; *Known limits* rewritten; revised after the PR #67 review. G2 is still open (T046).
+**Amended:** 2026-10-10 by T041: primary-face continuity, small faces in wide shots, the face-share fallback; *Known limits* rewritten; revised after the PR #67 review. G2 is still open (T046). 2026-10-11 by T048: a crowd has its own fallback reason.
 **Numbering:** merged as `005-face-track-reframe.md` (PR #52) alongside [ADR-005](005-api-route-prefix.md) (PR #50); renumbered to 006 in the Spec Kit close-out. The content is unchanged.
 
 ## Context
@@ -41,8 +41,8 @@ Sources: a Wikimania 2025 lightning talk (1920x1080 VP9, 236 s, a speaker inset 
   - **Smoothing.** A zero-phase EMA (forward and backward, padded by reflection, so no lag), then a dead zone of 0.1 window widths, then a speed cap of 0.5 window widths per second. The crop never snaps.
   - **Keyframes.** At most 64, chosen by greedy top-down simplification that keeps both endpoints.
 - **Fallbacks.** The reel keeps the letterbox exactly as before, and `StageSkipped(reframe, reason)` is emitted, when any of these holds:
-  - a split screen (`active_speaker_service.detect_split_screen`);
-  - several faces of similar size in most face frames (these two tests count only faces of at least 5 % of the frame height, as before T041, so a small poster or audience face cannot trigger them);
+  - faces far apart in most frames (`active_speaker_service.detect_split_screen`: two faces more than 0.4 frame widths apart). The reason is `split screen`, or `a crowd` when more than half of those frames hold three or more such faces (T048: the G2 TEDx crowd, T3, had 6 to 26 in every such frame and was reported as a split screen; two panes show one face each, and a third face in up to half of the frames still reads `split screen`);
+  - several faces of similar size in most face frames (these tests count only faces of at least 5 % of the frame height, as before T041, so a small poster or audience face cannot trigger them);
   - no face in the clip, or a usable face in fewer than half the samples (slides, credits, shots the detector cannot read; T041);
   - a source with no horizontal pan room;
   - any error, including a failed download.
