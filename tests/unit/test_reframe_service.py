@@ -76,10 +76,12 @@ def test_primary_face_of_nothing_is_none():
     assert primary_face([], SRC[0]) is None
 
 
-# T049: the score does not pick the main face. The two tests below hold the
-# same sizes and scores (a large face scoring 0.62-0.68 beside a small one
-# scoring 0.86) with the roles swapped, so no rule on box size and score
-# passes both; ADR-006 *Known limits* has the real-footage check.
+# T049: the score does not pick the main face. On real footage the sizes and
+# scores of real speakers and false positives overlap (a lone performer's face
+# at 10-11 % scoring 0.61-0.68, the back of a head at 16-17 % scoring
+# 0.64-0.75); the two tests below pin each side: a dim speaker (11 %, 0.62)
+# keeps the crop, and the back of a head (17 %, 0.68) still wins over a small
+# clear host (a known limit). ADR-006 *Known limits* has the real-footage check.
 _DIM_SPEAKER = {"h": 40, "score": 0.62}  # 11 %: the lone TEDx performer, 0.61-0.68
 _SMALL_CLEAR = {"h": 13, "score": 0.86}  # 3.6 %
 
@@ -357,6 +359,22 @@ def test_two_panes_with_an_occasional_third_face_stay_a_split_screen(crowded, re
     plan = plan_crop_track(obs, SRC)
 
     assert plan.track is None and plan.reason == reason
+
+
+def test_the_crowd_share_counts_only_the_frames_with_faces_far_apart():
+    """T048 review: the crowd majority is over the frames the split test
+    counts, not over all frames. 20 samples: 11 with faces far apart (7 of
+    them with a third face), 9 with one face. 7 of 11 is a crowd; 7 of 20
+    would not be."""
+    obs = [
+        _obs(k * 0.5, _face(100), _face(540), *([_face(320, h=50)] if k < 7 else []))
+        for k in range(11)
+    ]
+    obs += [_obs(5.5 + k * 0.5, _face(320)) for k in range(9)]
+
+    plan = plan_crop_track(obs, SRC)
+
+    assert plan.track is None and plan.reason == reframe_service.CROWD_REASON
 
 
 def test_several_similar_faces_mean_letterbox():
