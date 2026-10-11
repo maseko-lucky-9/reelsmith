@@ -1,11 +1,10 @@
 import asyncio
 from logging.config import fileConfig
 
+from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
-
-from alembic import context
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -18,8 +17,8 @@ if config.config_file_name is not None:
 
 # Import Base so alembic autogenerate can detect model changes.
 # app/db/models.py is imported here to ensure all mapped classes register.
-from app.db.base import Base  # noqa: E402
 import app.db.models  # noqa: F401, E402  — side-effect: registers ORM models
+from app.db.base import Base  # noqa: E402
 
 target_metadata = Base.metadata
 

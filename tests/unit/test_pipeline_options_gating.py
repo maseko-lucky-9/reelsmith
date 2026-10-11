@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -11,11 +10,13 @@ from app.bus.event_bus import AsyncEventBus
 from app.bus.job_store import JobStore
 from app.domain.events import Event, EventType
 from app.domain.models import JobState, PipelineOptions
-from app.workers import orchestrator as orch
 from app.services.platforms.base import Chapter, DownloadResult
+from app.workers import orchestrator as orch
 
 
-def _fake_subfolder(download_path: str, url: str, platform_id: str = "video"):
+def _fake_subfolder(
+    download_path: str, url: str, platform_id: str = "video", job_id: str | None = None
+):
     base = Path(download_path) / "vid"
     clips = base / "clips"
     clips.mkdir(parents=True, exist_ok=True)
@@ -231,7 +232,10 @@ async def test_all_on_identical_to_full_pipeline(tmp_path, monkeypatch):
 
     Note: ai_hook and filler_removal default to False (opt-in per W1.7/W2.5),
     so "all on" must turn them on explicitly. The original regression intent
-    is preserved: no STAGE_SKIPPED events when every gated stage is enabled.
+    is preserved: no STAGE_SKIPPED events when every gated stage is enabled,
+    except B-roll, which also needs a provider: with the default
+    ``broll_provider=none`` each chapter reports StageSkipped(broll,
+    "no provider") (T012).
     """
     opts = PipelineOptions(ai_hook=True, filler_removal=True)
     events, store = await _run_pipeline(tmp_path, opts, monkeypatch)
@@ -246,9 +250,14 @@ async def test_all_on_identical_to_full_pipeline(tmp_path, monkeypatch):
     assert EventType.CLIP_RENDERED in types
     assert types[-1] is EventType.JOB_COMPLETED
 
-    # No STAGE_SKIPPED events when all on
+    # No STAGE_SKIPPED events when all on, but the provider-less B-roll stage
     skip_events = [e for e in events if e.type == EventType.STAGE_SKIPPED]
-    assert len(skip_events) == 0
+    rendered = [e.payload["chapter_index"] for e in events if e.type == EventType.CLIP_RENDERED]
+    assert rendered == [0]
+    assert sorted(
+        (e.payload["stage_id"], e.payload["chapter_index"], e.payload["reason"])
+        for e in skip_events
+    ) == [("broll", i, "no provider") for i in sorted(rendered)]
 
     final = await store.get("job-gate")
     assert final.status == "completed"

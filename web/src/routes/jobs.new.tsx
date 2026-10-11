@@ -19,7 +19,8 @@ export const jobsNewRoute = createRoute({
 function NewJobPage() {
   const navigate = useNavigate()
   const [url, setUrl] = useState('')
-  const [downloadPath, setDownloadPath] = useState('/tmp/yt')
+  // Empty = let the server choose (YTVIDEO_DEFAULT_DOWNLOAD_PATH).
+  const [downloadPath, setDownloadPath] = useState('')
   const [language, setLanguage] = useState('en-US')
   const [segmentMode, setSegmentMode] = useState<'auto' | 'chapter'>('chapter')
 
@@ -30,7 +31,7 @@ function NewJobPage() {
     mutationFn: () =>
       api.createJob({
         url,
-        download_path: downloadPath,
+        ...(downloadPath.trim() ? { download_path: downloadPath.trim() } : {}),
         language,
         segment_mode: segmentMode,
       }),
@@ -73,8 +74,10 @@ function NewJobPage() {
         </div>
 
         <div className="space-y-1">
-          <Label>Download path</Label>
+          <Label htmlFor="download-path">Download path</Label>
           <Input
+            id="download-path"
+            placeholder="Server default (YTVIDEO_DEFAULT_DOWNLOAD_PATH)"
             value={downloadPath}
             onChange={(e) => setDownloadPath(e.target.value)}
             className="bg-zinc-900 border-zinc-700"

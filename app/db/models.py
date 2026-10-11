@@ -5,8 +5,16 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    Boolean, DateTime, Float, ForeignKey, Index, Integer, LargeBinary, String,
-    Text, UniqueConstraint,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    LargeBinary,
+    String,
+    Text,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -218,7 +226,13 @@ PUBLISH_JOB_STATUSES: tuple[str, ...] = (
 
 
 class PublishJob(Base):
-    """Scheduled or immediate publish to a social platform (W1.4)."""
+    """Immediate publish to a social platform (W1.4).
+
+    ``schedule_at`` is unused: scheduled publishing was dropped (FR-032,
+    T010). The column stays because migrations are additive-only
+    (constitution V); rows written before the drop may still carry it
+    with ``status='pending'``, which nothing advances.
+    """
 
     __tablename__ = "publish_jobs"
 
@@ -244,6 +258,7 @@ class PublishJob(Base):
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default="pending", index=True
     )
+    # Unused since FR-032 was dropped; kept for additive-only migrations.
     schedule_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
@@ -340,8 +355,18 @@ class WorkspaceMember(Base):
 
 
 class ScheduledPost(Base):
+    """Unused since scheduling was dropped (T010/T045); table kept for
+    migration history.
+
+    Scheduled publishing was removed (FR-032) and its W3.2 worker
+    (``scheduler_service``) deleted, so nothing reads or writes this table.
+    Migrations are additive-only (constitution V): deployed databases have
+    it, and ``tests/unit/test_alembic_parity.py`` requires the models to
+    match the migrations, so the model stays.
+    """
+
     __tablename__ = "scheduled_posts"
-    # Worker poll path: WHERE status = ... AND scheduled_for <= now.
+    # Index created by migration l0m1n2o3p4q5 (status, scheduled_for).
     __table_args__ = (
         Index("ix_sp_status_scheduled_for", "status", "scheduled_for"),
     )

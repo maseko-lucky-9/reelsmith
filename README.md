@@ -2,7 +2,7 @@
 
 **Problem:** Manually trimming long-form videos from YouTube, Facebook, TikTok, or Instagram into captioned short-form clips is tedious and time-consuming for a solo creator.
 
-Reelsmith automates the pipeline: download a video from any supported platform, transcribe it with word-level timing, score clips by virality heuristics, burn karaoke subtitles, and produce 9:16 vertical reels — all through a FastAPI backend and a React dashboard with a live per-stage progress timeline.
+Reelsmith automates the pipeline: download a video from any supported platform, transcribe it with word-level timing, cut chapters into clips (or, with `YTVIDEO_SEGMENT_PROVIDER=local_heuristic`, pick clips from a source without chapters by heuristic scores), burn karaoke subtitles, and produce 9:16 vertical reels — all through a FastAPI backend and a React dashboard with a live per-stage progress timeline.
 
 ## Supported Platforms
 
@@ -13,12 +13,53 @@ Reelsmith automates the pipeline: download a video from any supported platform, 
 | TikTok | Short-form | Single clip (no chapters) |
 | Instagram | Short-form | Public posts only |
 
-URLs are routed via a `PlatformAdapter` strategy registry (`app/services/platforms/`). Unsupported URLs are rejected at submission time with HTTP 400.
+URLs are routed via a `PlatformAdapter` strategy registry (`app/services/platforms/`). Unsupported URLs are rejected at submission time with HTTP 400. MP4 uploads and, with `YTVIDEO_GENERATE_ENABLED=true`, text briefs run through the same pipeline.
+
+## What It Does Today
+
+**Default pipeline.** Every job gets the following by default (most stages have a per-job switch in `PipelineOptions`):
+
+- one clip per chapter; a source without chapters is one "Full Video" clip;
+- faster-whisper word timings and burned-in captions;
+- a letterboxed 9:16 reel rendered in one ffmpeg pass;
+- a thumbnail;
+- social copy from a local Ollama model, when it answers;
+- an export folder with `manifest.csv`;
+- live per-stage progress over SSE.
+
+Speech enhancement cleans only the audio used for transcription. AI hook text and filler removal are per-job options, off by default.
+
+**Opt-in stages.** These are off in a default install:
+
+| Feature | Turn on with | Default |
+|---|---|---|
+| Clip discovery in sources without chapters, and reprompt by prompt or length range ([ADR-007](docs/decisions/007-clip-discovery-and-reprompt.md)) | `YTVIDEO_SEGMENT_PROVIDER=local_heuristic` | `chapter`: one "Full Video" clip; a reprompt works only with an explicit time range |
+| Re-rank of the discovered clips by a local LLM, blended with the heuristic score (ADR-007, *Re-rank*; needs clip discovery on) | `YTVIDEO_SEGMENT_RERANK_PROVIDER=ollama` (uses `YTVIDEO_OLLAMA_*`; Ollama down or a bad reply keeps the heuristic ranking) | `none`: the heuristic ranking only |
+| Face-tracked 9:16 crop instead of the letterbox ([ADR-006](docs/decisions/006-face-track-reframe.md)) | `YTVIDEO_REFRAME_PROVIDER=face_track` | `letterbox` |
+| B-roll inserts (up to two 3 s windows per reel) | `YTVIDEO_BROLL_PROVIDER=local` (keyword-named mp4s in `YTVIDEO_BROLL_LIBRARY_DIR`) or `pexels` (needs `YTVIDEO_PEXELS_API_KEY`) | `none` |
+
+**Curation and output:**
+
+- like and dislike;
+- re-render one clip from the job's retained source;
+- a timeline editor that saves a versioned timeline and returns a render plan (nothing renders a timeline into a video yet);
+- Premiere and DaVinci XML;
+- a bulk zip export;
+- publish now. `YTVIDEO_SOCIAL_PROVIDER` defaults to `stub`; YouTube has a real OAuth adapter, and TikTok has a cookie session or an n8n sidecar.
+
+**Removed.** Scheduled publishing was dropped (FR-032): `POST /social/publish` rejects `schedule_at` with 422.
+
+**Not part of the render or the pipeline.** The code exists, but nothing in a job uses it:
+
+- **Unwired services.** Animated captions, transitions, brand vocabulary, the profanity filter and voice-over. Brand templates are stored and a job can name one, but no render applies it; the UI marks these settings "Not applied to renders yet".
+- **No routes.** Analytics, share links, webhooks and API tokens have tables and services but no routes of their own. Workspaces have tables only.
+
+Both groups are roadmap specs in [`specs/README.md`](specs/README.md).
 
 ## Quick Start
 
 ```bash
-# 1. Start Postgres
+# 1. Optional: Postgres (the default `sql` store is SQLite, ./reelsmith.db; step 3 uses the in-memory store)
 docker compose up -d postgres
 
 # 2. Install Python deps (Python 3.14 required; 3.12 is unsupported, see CLAUDE.md)
@@ -39,6 +80,8 @@ pip install pre-commit && pre-commit install
 
 Open **<http://localhost:5173>** in your browser.
 
+Settings come from `YTVIDEO_*` environment variables or a `.env` file in the project root. `.env.example` lists them all; note that it points `YTVIDEO_DB_URL` at the docker-compose Postgres. To try the opt-in stages, set the variables listed under [What It Does Today](#what-it-does-today).
+
 > **Note:** Only process videos you have the right to use. Check the platform's terms of service before downloading.
 
 ## Architecture
@@ -56,7 +99,7 @@ app/services/platforms/  — PlatformAdapter strategy: youtube, facebook, tiktok
 app/services/download_service.py — backward-compat shim (delegates to YouTube adapter)
 app/workers/orchestrator — async pipeline runner (resolves adapter per URL)
 app/domain/              — events, models (incl. JobState.source), IDs
-app/bus/                 — async event bus + job store (memory / Postgres)
+app/bus/                 — async event bus + job store (memory / SQL: SQLite or Postgres)
 app/db/                  — SQLAlchemy ORM models + alembic migrations
 ```
 
@@ -64,7 +107,7 @@ app/db/                  — SQLAlchemy ORM models + alembic migrations
 
 The `/jobs/$jobId` page renders a per-stage timeline while the pipeline runs. Stages: prepare workspace → download source → detect chapters → extract clips → transcribe → caption → render → thumbnails+social → export & manifest → done. Per-chapter stages show `N/M` sub-progress.
 
-- **Live updates, no polling:** the backend sends named SSE events, and `useJobSSE` registers a listener for every backend event type. Each event refreshes only that job and its clips. The job page has no `refetchInterval`, and the stream is open only while the job is `pending`/`running`.
+- **Live updates, no polling:** the backend sends named SSE events, and `useJobSSE` registers a listener for every backend event type. Each event refreshes only that job and its clips. The job page has no `refetchInterval`, and the stream is open only while the job is `pending`/`running` or a reprompt it queued is running.
 - **Data plane:** `useJobSSE` mirrors every SSE event into the React Query cache `['job-events', jobId]`. `deriveStageStates(jobState, events)` is a pure helper — `JobState` is the source of truth, events are a low-latency optimisation. Max-merge reconciliation between SSE counts and `JobState.chapters[i]` artifact fields means a stage never un-completes (kills SSE-reconnect drift and tab-refocus races in one rule).
 - **Accessibility:** single visually-hidden `role="status" aria-live="polite"` region announces only stage transitions (~10/job, not ~60). Active row gets `aria-current="step"` plus a static emerald left-border so reduced-motion users still get a non-animation cue.
 - **Resilience:** `<TimelineErrorBoundary>` wraps the component; a malformed `JobState` falls back without blanking the page.
@@ -74,18 +117,19 @@ The `/jobs/$jobId` page renders a per-stage timeline while the pipeline runs. St
 | Layer | Library |
 |---|---|
 | API | FastAPI + Uvicorn |
-| Database | Postgres 16 + SQLAlchemy 2 async + Alembic |
+| Database | SQLite (default) or Postgres 16 + SQLAlchemy 2 async + Alembic |
 | Video download | yt-dlp (YouTube / Facebook / TikTok / Instagram via PlatformAdapter registry) |
 | Video editing | ffmpeg (bundled via imageio-ffmpeg) + PyAV |
 | Transcription | faster-whisper (word-level) |
-| Virality scoring | librosa + VADER + spaCy + webrtcvad |
-| Reframe | MediaPipe face detection (optional, not in `requirements.txt`; `face_track` falls back to a centre crop without it) |
+| Segment scoring | NumPy + standard library (wav RMS, word timings); VADER and spaCy optional |
+| Reframe | YuNet face detector on onnxruntime (already a dependency); the 232 KB model is downloaded on first `face_track` use and SHA-256 checked ([ADR-006](docs/decisions/006-face-track-reframe.md)) |
+| B-roll | Local keyword-named mp4 library, or the Pexels video API over httpx (cached, `*.pexels.com` downloads only) |
 | Captions | pysrt / webvtt-py |
 | Subtitle images | Pillow + NumPy |
 | UI | React 19 + Vite 8 + shadcn/ui |
 | Tests | pytest + vitest |
 
-**Performance & dependencies.** Each reel renders in a single ffmpeg pass from the source. MoviePy has been removed, and the binary is the one bundled by `imageio-ffmpeg`, never a system ffmpeg. `av` is pinned at 18.1.0 because 19.x breaks faster-whisper 1.2.1. Measured numbers and the deliberate output changes are recorded in [ADR-004](docs/decisions/004-ffmpeg-render-pipeline.md); the concurrency model is described in [docs/architecture.md](docs/architecture.md).
+**Performance & dependencies.** Each reel renders in a single ffmpeg pass from the source. MoviePy has been removed, and the binary is the one bundled by `imageio-ffmpeg`, never a system ffmpeg; yt-dlp merges video and audio with it too (`ffmpeg_location`), and URL previews run `python -m yt_dlp`, so neither `ffmpeg` nor `yt-dlp` needs to be on `PATH`. `av` is pinned at 18.1.0 because 19.x breaks faster-whisper 1.2.1. Measured numbers and the deliberate output changes are recorded in [ADR-004](docs/decisions/004-ffmpeg-render-pipeline.md); the concurrency model is described in [docs/architecture.md](docs/architecture.md).
 
 ## Environment Variables
 
@@ -97,10 +141,12 @@ See `.env.example` for the full list. Key settings:
 | `YTVIDEO_DB_URL` | `sqlite+aiosqlite:///./reelsmith.db` | Database URL (`.env.example` points it at the docker-compose Postgres) |
 | `YTVIDEO_MAX_CONCURRENT_JOBS` | `1` | Pipelines running at once; extra jobs wait as `pending` |
 | `YTVIDEO_MAX_PARALLEL_CHAPTERS` | `1` | Chapters processed concurrently within a job |
-| `YTVIDEO_SEGMENT_PROVIDER` | `chapter` | `chapter`, `local_heuristic`, or `stub` |
-| `YTVIDEO_REFRAME_PROVIDER` | `letterbox` | `letterbox`, `face_track`, or `stub` |
+| `YTVIDEO_DEFAULT_DOWNLOAD_PATH` | `<project>/data/downloads` | Where each job's source video (kept for re-render and reprompt), its output folder and uploads (`uploads/`) live; gitignored. Do not point it at `/tmp`: the OS clears it, the sources are lost and re-render and reprompt answer 409 "source video not retained" |
+| `YTVIDEO_SEGMENT_PROVIDER` | `chapter` | `chapter` (a source without chapters is one "Full Video" clip), `local_heuristic` (discover clips in it, and reprompt by prompt; ADR-007), or `stub` (tests) |
+| `YTVIDEO_REFRAME_PROVIDER` | `letterbox` | `letterbox` or `face_track` (the 9:16 window follows the speaker's face; falls back to `letterbox`) |
+| `YTVIDEO_BROLL_PROVIDER` | `none` | `none`, `local` (`YTVIDEO_BROLL_LIBRARY_DIR`, default `<project>/data/broll`) or `pexels` (`YTVIDEO_PEXELS_API_KEY`) |
 | `YTVIDEO_SERVE_FRONTEND` | `false` | Serve built React app from FastAPI |
-| `YTVIDEO_REQUIRE_AUTH` | `false` | Enable API key auth |
+| `YTVIDEO_REQUIRE_AUTH` | `false` | Enable API key auth; also switches `/docs`, `/redoc` and `/openapi.json` off |
 | `YTVIDEO_API_KEY` | `null` | API key when auth enabled |
 | `YTVIDEO_WHISPER_BEAM_SIZE` | `1` | Whisper beam size (bench: `scripts/bench_whisper.py`) |
 | `YTVIDEO_WHISPER_VAD_FILTER` | `true` | Silero VAD before decoding; stops Whisper skipping speech after long silences |
@@ -130,3 +176,21 @@ cd web && pnpm build
 # Then run API with YTVIDEO_SERVE_FRONTEND=true
 YTVIDEO_SERVE_FRONTEND=true uvicorn app.main:app
 ```
+
+The API is served at both `/x` and `/api/x` (`app/api_prefix.py`, [ADR-005](docs/decisions/005-api-route-prefix.md)). The UI calls `/api/...`: in dev the Vite proxy strips `/api`, and with `YTVIDEO_SERVE_FRONTEND=true` FastAPI strips it itself, so `curl localhost:8000/api/health` and `curl localhost:8000/health` both answer.
+
+The live OpenAPI schema is served by the backend at `/openapi.json` (and `/api/openapi.json`), with Swagger UI at `/docs`, while `YTVIDEO_REQUIRE_AUTH` is off. With auth on, these docs routes are switched off and answer 404 (FR-060, T043). The web client (`web/src/api/client.ts`) is hand-written, so there is no generated schema or types file to keep in sync (T038).
+
+Reloading a client route such as `/uploads/new` or `/jobs/<id>` serves the UI (`app/spa_fallback.py`, T036): a browser navigation (`Accept: text/html`) to a route of `web/src/routeTree.ts` gets `index.html`, while `fetch`, `curl` and anything under `/api/...` get the API. Add a new client route to `CLIENT_ROUTES` in `app/spa_fallback.py` too; a test fails until you do.
+
+## Decision Records
+
+| ADR | Decision |
+|---|---|
+| [001](docs/decisions/001-react-dashboard.md) | Replace Streamlit with a React dashboard |
+| [002](docs/decisions/002-opus-clip-ui-redesign.md) | Opus Clip UI redesign |
+| [003](docs/decisions/003-opusclip-feature-parity.md) | OpusClip feature parity, Waves 1-3 (the MoviePy part of decision 2 is superseded by ADR-004) |
+| [004](docs/decisions/004-ffmpeg-render-pipeline.md) | One-pass ffmpeg render pipeline, MoviePy removed |
+| [005](docs/decisions/005-api-route-prefix.md) | Serve the API at both `/x` and `/api/x` |
+| [006](docs/decisions/006-face-track-reframe.md) | Face-tracked reframe with YuNet on onnxruntime |
+| [007](docs/decisions/007-clip-discovery-and-reprompt.md) | Clip discovery in chapterless sources, and reprompt |

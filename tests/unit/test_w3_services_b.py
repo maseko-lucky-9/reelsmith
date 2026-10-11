@@ -9,10 +9,14 @@ from cryptography.fernet import Fernet
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db.base import Base
-from app.db.models import ApiToken, Webhook, Workspace
+from app.db.models import Webhook, Workspace
 from app.services import (
     api_token_service as ats,
+)
+from app.services import (
     token_vault,
+)
+from app.services import (
     webhook_dispatcher as wd,
 )
 from app.settings import settings

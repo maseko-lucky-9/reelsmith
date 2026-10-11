@@ -21,7 +21,6 @@ from app.bus.event_bus import AsyncEventBus
 from app.domain.events import EventType
 from app.services.brand_vocabulary_service import apply_vocabulary
 
-
 # ---------------------------------------------------------------------------
 # Parametrised: case-preserving replacement
 # Each tuple: (input_text, vocabulary, expected_output, test_id)

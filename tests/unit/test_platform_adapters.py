@@ -11,7 +11,6 @@ from app.services.platforms import (
 )
 from app.services.platforms.base import Chapter
 
-
 _CHAPTERED_INFO = {
     "chapters": [
         {"title": "Intro", "start_time": 0.0, "end_time": 30.0},

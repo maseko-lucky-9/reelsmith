@@ -1,7 +1,5 @@
 from pathlib import Path
 
-import pytest
-
 from app.services.export_service import export_clips
 
 

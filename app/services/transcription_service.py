@@ -28,10 +28,9 @@ from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import app.logging_config  # noqa: F401
 from app.services import ffmpeg_tools
 from app.settings import settings
-
-import app.logging_config  # noqa: F401
 
 if TYPE_CHECKING:  # pragma: no cover
     from faster_whisper import WhisperModel

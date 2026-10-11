@@ -6,9 +6,8 @@ from collections import deque
 from collections.abc import AsyncIterator
 from typing import Iterable
 
-from app.domain.events import Event, EventType
-
 import app.logging_config  # noqa: F401
+from app.domain.events import Event, EventType
 
 log = logging.getLogger(__name__)
 
@@ -88,6 +87,20 @@ class AsyncEventBus:
             async with self._lock:
                 if sub in self._subscriptions:
                     self._subscriptions.remove(sub)
+
+    async def forget(self, job_id: str) -> int:
+        """Drop ``job_id``'s events from the replay history; return how many.
+
+        Live subscriptions and later events are unaffected. A reprompt calls
+        this so a new subscriber is not replayed the job's previous
+        ``JobCompleted``, on which the SSE route closes the stream.
+        """
+        async with self._lock:
+            kept = [e for e in self._history if e.job_id != job_id]
+            dropped = len(self._history) - len(kept)
+            self._history.clear()
+            self._history.extend(kept)
+        return dropped
 
     async def aclose(self) -> None:
         self._closed = True

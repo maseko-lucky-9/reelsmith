@@ -20,7 +20,6 @@ import pytest
 
 from scripts import ltx_smoke, voicebox_smoke
 
-
 # ── Gate A: NOT_CONFIGURED path ───────────────────────────────────────────────
 
 

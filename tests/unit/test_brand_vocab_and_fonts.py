@@ -2,13 +2,11 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db.base import Base
 from app.db.models import BrandTemplate, BrandTemplateFont
 from app.services.brand_vocabulary_service import apply_vocabulary
-
 
 # ── W2.7 vocabulary replacement ────────────────────────────────────────────
 

@@ -5,8 +5,8 @@ import pytest
 
 from app.services.animated_caption_service import (
     ANIMATION_KINDS,
-    CaptionWord,
     PRESETS,
+    CaptionWord,
     get_preset,
     plan_caption_frames,
 )

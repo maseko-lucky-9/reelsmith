@@ -124,7 +124,6 @@ export function WorkflowPage() {
       const segmentMode = mode === 'chapter' ? 'chapter' : 'auto'
       const res = await api.createJob({
         url: decodedUrl,
-        download_path: '/tmp/yt',
         segment_mode: segmentMode,
         prompt: prompt || undefined,
         auto_hook: false,

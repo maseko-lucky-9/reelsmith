@@ -5,6 +5,7 @@ import { ThumbsUp, ThumbsDown, Play } from 'lucide-react'
 import type { ClipRecord } from '@/api/client'
 import { api } from '@/api/client'
 import { scoreToGrade, formatTime, formatTimestamp } from '@/lib/scoreToGrade'
+import { BrollCredits } from '@/components/broll-credits'
 
 interface ClipListRowProps {
   clip: ClipRecord
@@ -119,6 +120,7 @@ export function ClipListRow({ clip, rank, jobId }: ClipListRowProps) {
           {transcriptText && (
             <p className="text-xs text-zinc-500 line-clamp-3">{transcriptText}</p>
           )}
+          <BrollCredits assets={clip.broll_assets} className="pt-1" />
           <label className="flex items-center gap-1.5 text-xs text-zinc-500 cursor-pointer">
             <input type="checkbox" className="accent-white w-3 h-3" />
             Transcript only

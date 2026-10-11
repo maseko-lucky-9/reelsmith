@@ -25,7 +25,8 @@ def _default_font_path() -> str | None:
 
 # Anchor .env to the project root (app/settings.py → app/ → project root),
 # so the path is CWD-independent regardless of where uvicorn is launched from.
-_ENV_FILE = str(Path(__file__).resolve().parent.parent / ".env")
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_ENV_FILE = str(_PROJECT_ROOT / ".env")
 
 
 class Settings(BaseSettings):
@@ -53,7 +54,10 @@ class Settings(BaseSettings):
     max_thread_workers: int = 4
 
     # ── Pipeline defaults ─────────────────────────────────────────────────
-    default_download_path: str = "/tmp/yt"
+    # Downloaded and uploaded source videos (kept for re-render) and job
+    # output folders. Not under /tmp: macOS clears it. Gitignored; created on
+    # first use.
+    default_download_path: str = str(_PROJECT_ROOT / "data" / "downloads")
     default_caption_format: str = "srt"
     default_target_aspect_ratio: float = 9 / 16
     default_transcription_language: str = "en-US"
@@ -85,19 +89,38 @@ class Settings(BaseSettings):
     score_weights: str = (
         '{"hook":0.30,"value":0.25,"emotion":0.15,"audio":0.15,"trend":0.15}'
     )
+    # Optional re-rank of the discovered candidates by a local LLM
+    # (app/services/segment_rerank.py): "none" (default: the heuristic's
+    # order) | "ollama" (the ollama_* settings below; needs ollama_enabled).
+    # Any failure keeps the heuristic's order.
+    segment_rerank_provider: str = "none"
 
     # ── Reframe ───────────────────────────────────────────────────────────
-    # "letterbox" | "face_track" | "stub"
+    # "letterbox" (default: scaled inset over the blurred background) |
+    # "face_track" (9:16 window pans with the speaker's face; YuNet on
+    # onnxruntime). Any other value is treated as "letterbox". Only applies
+    # when a job's ``reframe`` option is on.
     reframe_provider: str = "letterbox"
+    # Where face_track downloads its face model on first use (232 KB,
+    # SHA-256 pinned in app/services/face_detector.py). Gitignored.
+    reframe_model_dir: str = str(_PROJECT_ROOT / "data" / "models")
 
     # ── B-Roll ────────────────────────────────────────────────────────────
-    # "local" | "none"
+    # Fills a reel's B-roll inserts when the job's ``broll`` option is on:
+    # "none" (default: no B-roll) | "local" (broll_library_dir) | "pexels"
+    # (Pexels video search; needs pexels_api_key).
     broll_provider: str = "none"
+    # The local provider's library: *.mp4 files named by keyword
+    # (``ocean_waves.mp4`` answers "ocean" and "waves").
+    broll_library_dir: str = str(_PROJECT_ROOT / "data" / "broll")
 
     # ── Media & retention ─────────────────────────────────────────────────
     max_upload_mb: int = 500
     retention_days: int = 30
     retention_sweep_minutes: int = 60
+    # Files of retired clips still on disk (e.g. the clips a reprompt
+    # replaced) are deleted once the file is older than this (T033).
+    retired_files_grace_hours: int = 24
 
     # ── Frontend ──────────────────────────────────────────────────────────
     serve_frontend: bool = False
@@ -133,19 +156,12 @@ class Settings(BaseSettings):
     social_provider_linkedin: str = ""
     social_provider_x: str = ""
 
-    # ── Publish scheduler (W1.4) ──────────────────────────────────────────
-    scheduler_enabled: bool = False
-    scheduler_poll_seconds: int = 30
-    scheduler_max_concurrent: int = 3
-
     # ── TikTok cookie adapter ─────────────────────────────────────────────
     # Set YTVIDEO_SOCIAL_PROVIDER_TIKTOK=cookie to activate.
     # YTVIDEO_OAUTH_ENCRYPT_KEY must be a stable Fernet key or cookies
     # die on process restart (generate: python -c "from cryptography.fernet
     # import Fernet; print(Fernet.generate_key().decode())").
     tiktok_cookies_dir: str = "data/tiktok-cookies"
-    tiktok_profile_url_base: str = "https://www.tiktok.com/@"
-    tiktok_node_bin: str = "node"
     tiktok_session_ttl_days: int = 21
     # ── TikTok n8n sidecar (interchangeable path) ─────────────────────────
     # Set YTVIDEO_SOCIAL_PROVIDER_TIKTOK=n8n to activate.
@@ -162,6 +178,8 @@ class Settings(BaseSettings):
     audio_enhance_rnnoise_model: str | None = None
 
     # ── B-Roll Pexels (W1.9) ──────────────────────────────────────────────
+    # Sent only as the Authorization header of the search request; never
+    # logged. Downloads are cached in broll_cache_dir by Pexels video id.
     pexels_api_key: str | None = None
     broll_cache_dir: str = "data/broll-cache"
 
@@ -173,12 +191,6 @@ class Settings(BaseSettings):
     generate_enabled: bool = False
     generate_brief_dir: str = "data/generate-briefs"
     ltx_provider: str = "stub"  # "stub" | "ltx"
-    # Legacy in-process knobs — retained for back-compat with smoke tooling
-    # and tests; the real ``ltx`` path is now a subprocess (see below) and
-    # does not use these.
-    ltx_model_path: str = ""
-    ltx_use_mps: bool = True
-    ltx_num_frames: int = 121
     # ── LTX subprocess path (real provider) ───────────────────────────────
     # The LTX fork runs in its OWN venv (deps conflict with reelsmith's), so
     # the ``ltx`` provider shells out to the fork's inference.py CLI rather
@@ -205,11 +217,8 @@ class Settings(BaseSettings):
     bulk_export_max_clips: int = 200
 
     # ── Long-stage hardening (W2.10) ──────────────────────────────────────
-    # Per-stage soft timeout in seconds. Workers respect this to abort
-    # runaway voice-over / demucs / animated-caption renders.
-    stage_timeout_seconds: int = 1800
-    # SSE keep-alive heartbeat interval. Sent as ': ping\n\n' so it's a
-    # comment frame the client ignores. 0 disables.
+    # Seconds between keep-alive pings on the job SSE stream (sse-starlette
+    # sends a ': ping' comment frame the client ignores). 0 disables.
     sse_keepalive_seconds: int = 15
     # Connection pool recycle (Postgres only).
     db_pool_recycle_seconds: int = 1800

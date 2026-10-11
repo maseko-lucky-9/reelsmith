@@ -10,7 +10,7 @@ from app.db.models import ClipRecord
 from app.db.session import get_session
 from app.services.ai_hook_service import generate_hook
 
-router = APIRouter(prefix="/api/clips", tags=["ai-hook"])
+router = APIRouter(prefix="/clips", tags=["ai-hook"])
 
 
 class HookResponse(BaseModel):

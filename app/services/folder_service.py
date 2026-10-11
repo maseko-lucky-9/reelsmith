@@ -19,7 +19,14 @@ def _slugify(name: str, fallback: str) -> str:
 
 
 def fetch_video_title(video_url: str) -> str:
-    ydl_opts = {"quiet": True, "extract_flat": True, "no_warnings": True}
+    # socket_timeout bounds each network read: this runs in a worker thread
+    # (asyncio.to_thread), which no asyncio timeout can stop.
+    ydl_opts = {
+        "quiet": True,
+        "extract_flat": True,
+        "no_warnings": True,
+        "socket_timeout": 10,
+    }
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(video_url, download=False)
         return info["title"]
@@ -29,10 +36,19 @@ def create_video_subfolder(
     download_path: str,
     video_url: str,
     platform_id: str = "video",
+    job_id: str | None = None,
 ) -> tuple[str, str]:
+    """Create ``<download_path>/<slug>[-<job8>]/clips`` and return both paths.
+
+    With ``job_id`` the folder name ends in the first 8 characters of the job
+    id, so two jobs never share an output folder: ``upload://`` and
+    ``generate://`` sources all map to one constant slug, and two videos can
+    share a title. Without it (the job-less ``POST /folders``) the name is the
+    bare slug, as before.
+    """
     log.info(
-        "Resolving folder  url=%s  base=%s  platform=%s",
-        video_url, download_path, platform_id,
+        "Resolving folder  url=%s  base=%s  platform=%s  job=%s",
+        video_url, download_path, platform_id, job_id,
     )
     fallback = f"{platform_id}_video"
     # Only yt-dlp can resolve a title for real http(s) URLs. Internal schemes
@@ -47,6 +63,8 @@ def create_video_subfolder(
         except Exception as e:
             log.warning("Falling back to generic folder name (%s): %s", fallback, e)
             slug = fallback
+    if job_id:
+        slug = f"{slug}-{job_id[:8]}"
 
     video_folder_path = os.path.join(download_path, slug)
     clips_folder_path = os.path.join(video_folder_path, "clips")

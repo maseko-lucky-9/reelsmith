@@ -1,10 +1,9 @@
 import os
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from app.services.folder_service import create_video_subfolder
-
 
 VIDEO_URL = "https://www.youtube.com/watch?v=y5dCjpptTVU"
 

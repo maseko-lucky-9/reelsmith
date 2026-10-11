@@ -5,11 +5,27 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
+from starlette.convertors import StringConvertor, register_url_convertor
 
 from app.bus.job_store import JobNotFoundError
 from app.domain.events import Event, EventType
 
 router = APIRouter(prefix="/clips", tags=["clips"])
+
+
+class _ClipIdConvertor(StringConvertor):
+    """One path segment with no dot.
+
+    Routers match in the order ``create_app`` includes them, and ``clips``
+    comes before ``bulk_export``. A plain ``{clip_id}`` would take
+    ``GET /clips/bulk-export.zip`` and the export would never run. Clip ids
+    are UUIDs, so a fixed ``/clips/<name>.<ext>`` path can never be one.
+    """
+
+    regex = r"[^/.]+"
+
+
+register_url_convertor("clip_id", _ClipIdConvertor())
 
 
 @router.get("", response_model=list[dict[str, Any]])
@@ -22,6 +38,19 @@ async def list_clips(
     return await request.app.state.job_store.list_clips(
         job_id=job_id, min_score=min_score, search=search
     )
+
+
+@router.get("/{clip_id:clip_id}", response_model=dict[str, Any])
+async def get_clip_by_id(clip_id: str, request: Request) -> dict[str, Any]:
+    """One live clip, in the shape ``list_clips`` returns it.
+
+    Raises:
+        HTTPException: 404 if the clip is unknown or retired.
+    """
+    clip = await request.app.state.job_store.get_clip(clip_id)
+    if clip is None:
+        raise HTTPException(status_code=404, detail="clip not found")
+    return clip
 
 
 @router.patch("/{clip_id}/like")
@@ -60,6 +89,9 @@ async def dislike_clip(clip_id: str, request: Request) -> dict[str, Any]:
 
 class RerenderRequest(BaseModel):
     reframe_provider: str = "letterbox"
+    # False re-renders the video only: the clip keeps its title, summary,
+    # hashtags and AI hook text instead of having them regenerated.
+    regenerate_copy: bool = True
 
 
 @router.post("/{clip_id}/rerender", status_code=202)
@@ -99,8 +131,10 @@ async def rerender_clip(
         "target_aspect_ratio": job.target_aspect_ratio,
         "language": job.language,
         "pipeline_options": job.pipeline_options.model_dump(),
-        # Passed through for API compatibility; reframe is unwired (task T012).
+        # Passed through for API compatibility and ignored: the reframe
+        # provider is the server's YTVIDEO_REFRAME_PROVIDER (FR-010).
         "reframe_provider": req.reframe_provider,
+        "regenerate_copy": req.regenerate_copy,
     }
     if hasattr(request.app.state, "job_queue"):
         await request.app.state.job_queue.put((job.job_id, payload))

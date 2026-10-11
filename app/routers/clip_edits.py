@@ -2,9 +2,9 @@
 
 REST contract:
 
-* ``GET    /api/clips/{clip_id}/edit``    → edit state or 404
-* ``PUT    /api/clips/{clip_id}/edit``    → upsert; bumps ``version``
-* ``DELETE /api/clips/{clip_id}/edit``    → discard edits (clip falls
+* ``GET    /clips/{clip_id}/edit``    → edit state or 404
+* ``PUT    /clips/{clip_id}/edit``    → upsert; bumps ``version``
+* ``DELETE /clips/{clip_id}/edit``    → discard edits (clip falls
   back to the main pipeline render on next view)
 
 Concurrency: optimistic; clients send ``version`` in the body. A
@@ -43,7 +43,7 @@ from app.services.timeline_render_service import (
     build_render_plan,
 )
 
-router = APIRouter(prefix="/api/clips", tags=["clip-edits"])
+router = APIRouter(prefix="/clips", tags=["clip-edits"])
 
 
 _VALID_TRACK_KINDS: set[str] = {"video", "caption", "text-overlay"}

@@ -2,16 +2,14 @@
 from __future__ import annotations
 
 import mimetypes
-import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.session import get_session
 from app.db.models import BrandTemplate
+from app.db.session import get_session
 
 router = APIRouter(prefix="/brand-templates", tags=["brand-templates"])
 

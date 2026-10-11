@@ -1,5 +1,5 @@
 /**
- * /clips/$clipId/publish — schedule or immediately publish a clip
+ * /clips/$clipId/publish — publish a clip now (scheduling was dropped, FR-032)
  * to a connected social account (W1.14 + TikTok confirmation summary + PUBLISH_* toasts).
  */
 import { createRoute, useParams, Link } from '@tanstack/react-router'
@@ -65,7 +65,7 @@ function ClipPublishPage() {
   const jobsQuery = useQuery({
     queryKey: ['publish-jobs', clipId],
     queryFn: () => api.listPublishForClip(clipId),
-    // Poll only while a publish is queued/posting/due; createMutation invalidates on submit.
+    // Poll only while a publish is queued/posting; createMutation invalidates on submit.
     refetchInterval: (query) => publishHistoryRefetchInterval(query.state.data),
   })
   const clipQuery = useQuery({
@@ -77,7 +77,6 @@ function ClipPublishPage() {
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [hashtagsRaw, setHashtagsRaw] = useState('')
-  const [scheduleAt, setScheduleAt] = useState('')
 
   // Track the most recently submitted publish job ID for toast polling.
   const [activePublishId, setActivePublishId] = useState<string | null>(null)
@@ -124,7 +123,6 @@ function ClipPublishPage() {
         title: title || undefined,
         description: description || undefined,
         hashtags: parsedHashtags,
-        schedule_at: scheduleAt || undefined,
       }),
     onSuccess: (data) => {
       setActivePublishId(data.id)
@@ -217,18 +215,6 @@ function ClipPublishPage() {
           />
         </label>
 
-        <label className="block">
-          <span className="text-xs uppercase tracking-wide text-zinc-400">
-            Schedule (leave empty to publish now)
-          </span>
-          <input
-            type="datetime-local"
-            value={scheduleAt}
-            onChange={(e) => setScheduleAt(e.target.value)}
-            className="mt-1 w-full bg-zinc-900 border border-white/10 rounded px-3 py-2 text-sm"
-          />
-        </label>
-
         {/* Confirmation summary — shown when an account is selected */}
         {accountId && selectedAccount ? (
           <div className="rounded-md border border-white/10 bg-zinc-900/50 p-4 space-y-1.5 text-sm">
@@ -259,12 +245,6 @@ function ClipPublishPage() {
                   : <em className="text-zinc-600 not-italic">none</em>}
               </span>
             </div>
-            {scheduleAt ? (
-              <div className="flex gap-2">
-                <span className="text-zinc-500 w-20 shrink-0">Scheduled</span>
-                <span>{new Date(scheduleAt).toLocaleString()}</span>
-              </div>
-            ) : null}
           </div>
         ) : null}
 
@@ -274,11 +254,7 @@ function ClipPublishPage() {
           onClick={() => createMutation.mutate()}
           className="text-xs px-3 py-1.5 rounded-md border border-white/20 hover:border-white/40 disabled:opacity-50"
         >
-          {createMutation.isPending
-            ? 'Submitting…'
-            : scheduleAt
-              ? 'Schedule publish'
-              : 'Publish now'}
+          {createMutation.isPending ? 'Submitting…' : 'Publish now'}
         </button>
       </section>
 

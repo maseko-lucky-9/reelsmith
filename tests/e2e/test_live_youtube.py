@@ -19,7 +19,6 @@ from asgi_lifespan import LifespanManager
 
 from app.main import create_app
 
-
 pytestmark = [pytest.mark.live, pytest.mark.asyncio]
 
 

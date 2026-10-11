@@ -1,6 +1,7 @@
 import { createRoute } from '@tanstack/react-router'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState, useEffect } from 'react'
+import { toast } from 'sonner'
 import { LayoutGrid, List, Search, SlidersHorizontal } from 'lucide-react'
 import { rootRoute } from './root'
 import { api } from '@/api/client'
@@ -11,6 +12,8 @@ import { ClipListRow } from '@/components/dashboard/ClipListRow'
 import { JobProgressTimeline } from '@/components/job-progress-timeline'
 import { TimelineErrorBoundary } from '@/components/timeline-error-boundary'
 import { PlatformChip } from '@/components/platform-chip'
+import { RepromptForm } from '@/components/reprompt-form'
+import type { PipelineEvent } from '@/lib/pipelineStages'
 
 export const jobDetailRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -47,9 +50,40 @@ function JobDetailPage() {
     queryFn: () => api.listClips({ job_id: jobId }),
   })
 
-  // Stream only while the job can still change; a completed/failed job renders from the fetch.
+  // Events filled in by useJobSSE. Queuing a reprompt clears them, so the first
+  // JobCompleted or RepromptFailed after that is the reprompt's outcome.
+  const queryClient = useQueryClient()
+  const eventsQuery = useQuery<PipelineEvent[]>({
+    queryKey: ['job-events', jobId],
+    queryFn: async () => [],
+    enabled: false,
+    initialData: [],
+  })
+  const [repromptQueued, setRepromptQueued] = useState(false)
+  const repromptOutcome = repromptQueued
+    ? eventsQuery.data.find((e) => e.type === 'JobCompleted' || e.type === 'RepromptFailed')
+    : undefined
+  const reprompting = repromptQueued && !repromptOutcome
+
+  // Stream only while the job can still change; a completed/failed job renders from the
+  // fetch. A reprompt changes a completed job's clips, so it streams until it ends.
   const jobStatus = jobQuery.data?.status
-  useJobSSE(jobId, { enabled: jobStatus === 'pending' || jobStatus === 'running' })
+  useJobSSE(jobId, { enabled: jobStatus === 'pending' || jobStatus === 'running' || reprompting })
+
+  useEffect(() => {
+    if (!repromptOutcome) return
+    if (repromptOutcome.type === 'RepromptFailed') {
+      const error = repromptOutcome.payload?.error
+      toast.error(`Reprompt failed: ${typeof error === 'string' ? error : 'unknown error'}`)
+    } else {
+      toast.success('New clips are ready')
+    }
+  }, [repromptOutcome])
+
+  function onRepromptQueued() {
+    queryClient.setQueryData<PipelineEvent[]>(['job-events', jobId], [])
+    setRepromptQueued(true)
+  }
 
   const job = jobQuery.data
   const allClips = clipsQuery.data ?? []
@@ -199,6 +233,10 @@ function JobDetailPage() {
           ? `${job.prompt} (${filteredClips.length})`
           : `Give me highlight compilations of all the exciting moments in this video (${filteredClips.length})`}
       </p>
+
+      {job.status === 'completed' && (
+        <RepromptForm jobId={jobId} busy={reprompting} onQueued={onRepromptQueued} />
+      )}
 
       {/* Section header */}
       <p className="text-sm text-zinc-500">Original clips ({filteredClips.length})</p>

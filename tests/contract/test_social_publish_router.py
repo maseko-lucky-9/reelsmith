@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -9,7 +10,7 @@ from cryptography.fernet import Fernet
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db.base import Base
-from app.db.models import ClipRecord, JobRecord
+from app.db.models import ClipRecord, JobRecord, PublishJob
 from app.db.session import get_session
 from app.main import create_app
 from app.services import token_vault
@@ -66,7 +67,7 @@ async def social_client(tmp_path):
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
-        yield client, clip_id, str(tmp_path / "stubs")
+        yield client, clip_id, str(tmp_path / "stubs"), factory
 
     await engine.dispose()
 
@@ -110,7 +111,7 @@ async def test_account_lifecycle(social_client):
 
 
 async def test_publish_immediate_runs_via_stub(social_client):
-    client, clip_id, _ = social_client
+    client, clip_id, *_ = social_client
 
     acct = (await client.post(
         "/social/accounts",
@@ -126,14 +127,39 @@ async def test_publish_immediate_runs_via_stub(social_client):
     assert r.status_code == 201
     pj = r.json()
     assert pj["status"] in ("queued", "published")  # background may have completed
+    assert "schedule_at" not in pj  # dropped with FR-032
 
     # Poll once.
     r = await client.get(f"/social/publish/{pj['id']}")
     assert r.status_code == 200
 
 
+async def test_publish_create_rejects_schedule_at(social_client):
+    """Scheduled publishing was dropped (FR-032, T010).
+
+    An old client that still sends ``schedule_at`` must get a 422, not an
+    immediate publish of a post it meant to delay.
+    """
+    client, clip_id, *_ = social_client
+    acct = (await client.post(
+        "/social/accounts",
+        json={"platform": "youtube", "account_handle": "@me", "access_token": "tok"},
+    )).json()
+
+    r = await client.post(
+        "/social/publish",
+        json={"clip_id": clip_id, "social_account_id": acct["id"],
+              "schedule_at": "2030-01-01T12:00:00+00:00"},
+    )
+
+    assert r.status_code == 422
+    assert any(e["loc"][-1] == "schedule_at" for e in r.json()["detail"])
+    jobs = await client.get("/social/jobs")
+    assert jobs.json() == []
+
+
 async def test_publish_with_unknown_clip_404(social_client):
-    client, _, _ = social_client
+    client, *_ = social_client
     acct = (await client.post(
         "/social/accounts",
         json={"platform": "youtube", "account_handle": "@me",
@@ -147,7 +173,7 @@ async def test_publish_with_unknown_clip_404(social_client):
 
 
 async def test_publish_with_unknown_account_404(social_client):
-    client, clip_id, _ = social_client
+    client, clip_id, *_ = social_client
     r = await client.post(
         "/social/publish",
         json={"clip_id": clip_id, "social_account_id": "missing"},
@@ -156,7 +182,7 @@ async def test_publish_with_unknown_account_404(social_client):
 
 
 async def test_list_publish_for_clip(social_client):
-    client, clip_id, _ = social_client
+    client, clip_id, *_ = social_client
     acct = (await client.post(
         "/social/accounts",
         json={"platform": "youtube", "account_handle": "@me", "access_token": "tok"},
@@ -175,6 +201,23 @@ async def test_list_publish_for_clip(social_client):
 
 # ── T-05: GET /social/jobs ───────────────────────────────────────────────
 
+async def _seed_legacy_pending(factory, clip_id: str, account_id: str,
+                               hours_ahead: int = 1) -> str:
+    """Insert a ``pending`` row as written before scheduling was dropped.
+
+    The API can no longer create one (FR-032); the list endpoint must still
+    return and filter such rows.
+    """
+    async with factory() as session:
+        pj = PublishJob(
+            clip_id=clip_id, social_account_id=account_id, status="pending",
+            schedule_at=datetime.now(timezone.utc) + timedelta(hours=hours_ahead),
+        )
+        session.add(pj)
+        await session.commit()
+        return pj.id
+
+
 async def test_list_jobs_empty_returns_200(social_client):
     """No jobs → 200 with empty list, not 404."""
     client, *_ = social_client
@@ -185,7 +228,7 @@ async def test_list_jobs_empty_returns_200(social_client):
 
 async def test_list_jobs_response_shape(social_client):
     """Response items contain the T-05 required fields."""
-    client, clip_id, _ = social_client
+    client, clip_id, *_ = social_client
     acct = (await client.post(
         "/social/accounts",
         json={"platform": "youtube", "account_handle": "@me", "access_token": "tok"},
@@ -200,34 +243,29 @@ async def test_list_jobs_response_shape(social_client):
     items = r.json()
     assert len(items) >= 1
     item = items[0]
-    for field in ("id", "clip_id", "status", "schedule_at", "posted_at",
+    for field in ("id", "clip_id", "status", "posted_at",
                   "platform", "external_url", "error"):
         assert field in item, f"missing field: {field}"
+    assert "schedule_at" not in item  # dropped with FR-032
     assert item["clip_id"] == clip_id
     assert item["platform"] == "youtube"
 
 
 async def test_list_jobs_status_filter_single(social_client):
     """?status=pending returns only pending jobs."""
-    client, clip_id, _ = social_client
+    client, clip_id, _, factory = social_client
     acct = (await client.post(
         "/social/accounts",
         json={"platform": "youtube", "account_handle": "@me", "access_token": "tok"},
     )).json()
 
-    # Immediate publish → status=queued (no schedule_at)
+    # Immediate publish → queued, then the stub runner advances it
     await client.post(
         "/social/publish",
         json={"clip_id": clip_id, "social_account_id": acct["id"]},
     )
-    # Scheduled publish → status=pending
-    from datetime import datetime, timezone, timedelta
-    future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
-    await client.post(
-        "/social/publish",
-        json={"clip_id": clip_id, "social_account_id": acct["id"],
-              "schedule_at": future},
-    )
+    # Legacy scheduled row → pending
+    await _seed_legacy_pending(factory, clip_id, acct["id"])
 
     r = await client.get("/social/jobs?status=pending")
     assert r.status_code == 200
@@ -239,48 +277,31 @@ async def test_list_jobs_status_filter_single(social_client):
 async def test_list_jobs_status_filter_multi_valued(social_client):
     """?status=pending&status=published returns jobs with either status.
 
-    Two scheduled (pending) jobs are seeded plus one immediate job that the
-    stub runner will advance to published.  We then filter for both statuses
-    and assert both IDs appear.
+    Two legacy scheduled (pending) rows are seeded. We then filter for two
+    statuses and assert both IDs appear.
     """
-    client, clip_id, _ = social_client
+    client, clip_id, _, factory = social_client
     acct = (await client.post(
         "/social/accounts",
         json={"platform": "youtube", "account_handle": "@me", "access_token": "tok"},
     )).json()
 
-    from datetime import datetime, timezone, timedelta
-    future1 = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
-    future2 = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
-
-    # Two pending (scheduled) jobs with different schedule times
-    pj_a = (await client.post(
-        "/social/publish",
-        json={"clip_id": clip_id, "social_account_id": acct["id"],
-              "schedule_at": future1},
-    )).json()
-    pj_b = (await client.post(
-        "/social/publish",
-        json={"clip_id": clip_id, "social_account_id": acct["id"],
-              "schedule_at": future2},
-    )).json()
-
-    assert pj_a["status"] == "pending"
-    assert pj_b["status"] == "pending"
+    pj_a = await _seed_legacy_pending(factory, clip_id, acct["id"], hours_ahead=1)
+    pj_b = await _seed_legacy_pending(factory, clip_id, acct["id"], hours_ahead=2)
 
     # Multi-valued filter should return both
     r = await client.get("/social/jobs?status=pending&status=queued")
     assert r.status_code == 200
     items = r.json()
     ids = {i["id"] for i in items}
-    assert pj_a["id"] in ids
-    assert pj_b["id"] in ids
+    assert pj_a in ids
+    assert pj_b in ids
     assert all(i["status"] in ("pending", "queued") for i in items)
 
 
 async def test_list_jobs_status_filter_no_match_returns_empty(social_client):
     """?status=failed returns [] when no failed jobs exist."""
-    client, clip_id, _ = social_client
+    client, clip_id, *_ = social_client
     acct = (await client.post(
         "/social/accounts",
         json={"platform": "youtube", "account_handle": "@me", "access_token": "tok"},
@@ -297,7 +318,7 @@ async def test_list_jobs_status_filter_no_match_returns_empty(social_client):
 
 async def test_list_jobs_clip_id_filter(social_client):
     """?clip_id=<id> restricts results to that clip."""
-    client, clip_id, _ = social_client
+    client, clip_id, *_ = social_client
     acct = (await client.post(
         "/social/accounts",
         json={"platform": "youtube", "account_handle": "@me", "access_token": "tok"},
@@ -320,28 +341,21 @@ async def test_list_jobs_clip_id_filter(social_client):
 
 async def test_list_jobs_no_status_filter_returns_all(social_client):
     """Absence of ?status returns all jobs regardless of status."""
-    client, clip_id, _ = social_client
+    client, clip_id, _, factory = social_client
     acct = (await client.post(
         "/social/accounts",
         json={"platform": "youtube", "account_handle": "@me", "access_token": "tok"},
     )).json()
 
-    from datetime import datetime, timezone, timedelta
-    future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
-
     await client.post(
         "/social/publish",
         json={"clip_id": clip_id, "social_account_id": acct["id"]},
     )
-    await client.post(
-        "/social/publish",
-        json={"clip_id": clip_id, "social_account_id": acct["id"],
-              "schedule_at": future},
-    )
+    await _seed_legacy_pending(factory, clip_id, acct["id"])
 
     r = await client.get("/social/jobs")
     assert r.status_code == 200
-    # Both jobs (queued + pending) should be present
+    # Both jobs (immediate + legacy pending) should be present
     assert len(r.json()) >= 2
 
 

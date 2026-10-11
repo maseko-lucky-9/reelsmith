@@ -11,20 +11,16 @@ export const PUBLISH_TERMINAL_STATUSES: ReadonlySet<PublishJob['status']> = new 
 export const PUBLISH_POLL_MS = 3000
 
 /**
- * True while the backend is actively working a publish job: queued or posting, or
- * pending and due now. A pending job scheduled for later is waiting, not in flight.
+ * Statuses the backend is actively working. Publishing is immediate-only (FR-032 dropped):
+ * `pending` only survives on rows created by the old scheduler, which nothing advances.
  */
-export function isPublishInFlight(job: PublishJob, now: number = Date.now()): boolean {
-  if (PUBLISH_TERMINAL_STATUSES.has(job.status)) return false
-  if (job.status !== 'pending' || !job.schedule_at) return true
-  const due = Date.parse(job.schedule_at)
-  return Number.isNaN(due) || due <= now
+const IN_FLIGHT_STATUSES: ReadonlySet<PublishJob['status']> = new Set(['queued', 'posting'])
+
+export function isPublishInFlight(job: PublishJob): boolean {
+  return IN_FLIGHT_STATUSES.has(job.status)
 }
 
 /** refetchInterval for a clip's publish history: poll only while a publish is in flight. */
-export function publishHistoryRefetchInterval(
-  jobs: PublishJob[] | undefined,
-  now: number = Date.now(),
-): number | false {
-  return jobs?.some((j) => isPublishInFlight(j, now)) ? PUBLISH_POLL_MS : false
+export function publishHistoryRefetchInterval(jobs: PublishJob[] | undefined): number | false {
+  return jobs?.some(isPublishInFlight) ? PUBLISH_POLL_MS : false
 }

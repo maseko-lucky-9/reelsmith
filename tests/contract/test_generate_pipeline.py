@@ -16,7 +16,6 @@ from app.main import create_app
 from app.settings import settings
 from app.workers import orchestrator as orch
 
-
 pytestmark = pytest.mark.e2e
 
 

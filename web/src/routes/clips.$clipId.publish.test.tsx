@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, act } from '@testing-library/react'
+import { render, act, screen, fireEvent } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createElement, type ComponentType, type ReactNode } from 'react'
 import type { PublishJob } from '@/api/client'
@@ -35,7 +35,6 @@ function publishJob(status: PublishJob['status'], extra: Partial<PublishJob> = {
     description: null,
     hashtags: [],
     status,
-    schedule_at: null,
     posted_at: null,
     external_post_id: null,
     external_post_url: null,
@@ -58,6 +57,17 @@ async function renderWithHistory(history: PublishJob[]) {
     await vi.advanceTimersByTimeAsync(15_000)
   })
   return vi.mocked(api.listPublishForClip).mock.calls.length
+}
+
+async function renderAndSettle() {
+  vi.mocked(api.listPublishForClip).mockResolvedValue([])
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const Page = clipPublishRoute.options.component as ComponentType
+  const view = render(createElement(QueryClientProvider, { client: qc }, createElement(Page)))
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(50)
+  })
+  return view
 }
 
 beforeEach(() => {
@@ -86,15 +96,35 @@ describe('ClipPublishPage — history polling', () => {
     expect(await renderWithHistory([])).toBe(1)
   })
 
-  it('does not poll for a publish scheduled in the future', async () => {
-    const calls = await renderWithHistory([
-      publishJob('pending', { schedule_at: '2026-10-20T12:00:00Z' }),
-    ])
-    expect(calls).toBe(1)
+  it('does not poll for a legacy pending job (nothing advances it since scheduling was dropped)', async () => {
+    expect(await renderWithHistory([publishJob('pending')])).toBe(1)
   })
 
-  it.each(['pending', 'queued', 'posting'] as const)('polls while a publish is %s', async (status) => {
+  it.each(['queued', 'posting'] as const)('polls while a publish is %s', async (status) => {
     const calls = await renderWithHistory([publishJob('published'), publishJob(status)])
     expect(calls).toBeGreaterThan(2)
+  })
+})
+
+describe('ClipPublishPage — publish now only', () => {
+  it('has no schedule input and submits without schedule_at', async () => {
+    vi.mocked(api.listSocialAccounts).mockResolvedValue([
+      { id: 'acc-1', platform: 'youtube', account_handle: '@me' } as never,
+    ])
+    vi.mocked(api.createPublish).mockReset().mockResolvedValue(publishJob('queued'))
+    vi.mocked(api.getPublish).mockReset().mockResolvedValue(publishJob('queued'))
+    const { container } = await renderAndSettle()
+
+    expect(container.querySelector('input[type="datetime-local"]')).toBeNull()
+    expect(screen.queryByText(/schedule/i)).toBeNull()
+
+    fireEvent.change(container.querySelector('select')!, { target: { value: 'acc-1' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Publish now' }))
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50)
+    })
+
+    expect(api.createPublish).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(api.createPublish).mock.calls[0][0]).not.toHaveProperty('schedule_at')
   })
 })

@@ -13,8 +13,9 @@ Run order per ``publish_jobs`` row:
 Idempotency: a job already past ``posting`` is skipped; same external
 id is preserved.
 
-Caller (router or scheduler tick) is responsible for invoking this
-once per queued id and emitting EventType events on the bus.
+The only caller is ``POST /social/publish`` (``app/routers/social_publish.py``),
+which runs this once per queued id and passes its bus; there is no scheduler
+(FR-032 dropped scheduled publishing).
 """
 from __future__ import annotations
 

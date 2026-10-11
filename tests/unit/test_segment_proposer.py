@@ -2,16 +2,16 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
 
 from app.services.segment_proposer import (
     LocalHeuristicProposer,
     StubProposer,
-    filter_word_timings,
-    get_segment_proposer,
     _extract_title,
     _load_trends,
+    filter_word_timings,
+    get_segment_proposer,
 )
 from app.settings import settings
 
@@ -98,7 +98,7 @@ def test_heuristic_hook_strength_no_rms():
     assert 0.0 <= score <= 1.0
 
 
-def test_heuristic_audio_engagement_no_rms():
+def test_heuristic_audio_engagement_no_audio_is_neutral():
     proposer = LocalHeuristicProposer(weights=_DEFAULT_WEIGHTS)
     score = proposer._audio_engagement(None, 0.0, 30.0)
-    assert score == 0.0
+    assert score == 0.5

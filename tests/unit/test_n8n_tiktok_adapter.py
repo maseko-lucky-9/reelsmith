@@ -5,8 +5,8 @@ not yet available so collection never fails regardless of merge order.
 """
 from __future__ import annotations
 
-import pytest
 import httpx
+import pytest
 
 # Try to import; skip entire module if Agent A adapters aren't merged yet
 try:
@@ -21,7 +21,6 @@ pytestmark = pytest.mark.skipif(
 )
 
 from app.services.social.base import PublishRequest  # noqa: E402 — always importable
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import httpx
 import pytest
@@ -22,7 +21,6 @@ from app.services.social.stub import StubAdapter
 from app.services.social.youtube import YouTubeAdapter
 from app.services.social_publish_service import run_publish_job
 from app.settings import settings
-
 
 # ── Registry ────────────────────────────────────────────────────────────────
 

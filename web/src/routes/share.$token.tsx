@@ -24,8 +24,8 @@ function SharePage() {
           {token}
         </p>
         <p className="mt-4 text-xs text-zinc-500">
-          The video player UI lands in a follow-up — this route exists
-          today so the share link contract is reachable.
+          Share links are not available yet: no server endpoint resolves
+          this token and there is no player. The route is a placeholder.
         </p>
       </div>
     </div>

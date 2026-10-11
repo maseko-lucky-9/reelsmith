@@ -10,7 +10,7 @@ because we don't bill anything.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass
 from typing import Mapping
 
 
@@ -35,8 +35,6 @@ class Capabilities:
     publish_linkedin: bool = True
     publish_x: bool = True
     multi_profile: bool = True
-    scheduler: bool = True
-    bulk_schedule: bool = True
     xml_export: bool = True
     bulk_export: bool = True
     share_links: bool = True

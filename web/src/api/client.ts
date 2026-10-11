@@ -59,6 +59,27 @@ export interface ClipRecord {
   retired: boolean
   liked: boolean
   disliked: boolean
+  /** B-roll inserted into the rendered reel (`clips.broll_assets`); null or absent without B-roll. */
+  broll_assets?: BrollAsset[] | null
+}
+
+/**
+ * One B-roll insert of a clip, as stored by the orchestrator's B-roll step.
+ * `start`/`duration` are seconds on the clip's clock. `path` is a server-side
+ * file path: never show it in the UI.
+ */
+export interface BrollAsset {
+  query: string
+  start: number
+  duration: number
+  /** `pexels`, `local`, ... */
+  provider: string
+  asset_id: string
+  /** Empty when the provider has no credit (the local library). */
+  author: string
+  /** The asset's page (Pexels); empty for local files. Untrusted: link only http(s). */
+  source_url: string
+  path?: string
 }
 
 export interface BrandTemplate {
@@ -92,7 +113,8 @@ export interface VideoPreviewResponse {
 
 export interface CreateJobRequest {
   url: string
-  download_path: string
+  /** Omit to use the server's YTVIDEO_DEFAULT_DOWNLOAD_PATH. */
+  download_path?: string
   caption_format?: string
   target_aspect_ratio?: number
   language?: string
@@ -200,7 +222,7 @@ export const api = {
   dislikeClip: (clipId: string) =>
     apiFetch<ClipRecord>(`/api/clips/${clipId}/dislike`, { method: 'PATCH' }),
 
-  rerenderClip: (clipId: string, body: { reframe_provider?: string }) =>
+  rerenderClip: (clipId: string, body: RerenderRequest) =>
     apiFetch<{ status: string; clip_id: string }>(`/api/clips/${clipId}/rerender`, {
       method: 'POST',
       body: JSON.stringify(body),
@@ -259,6 +281,7 @@ export const api = {
     `${BASE}/api/clips/${clipId}/export.xml?format=${format}`,
 
   // ── Wave 1 — Reprompt ────────────────────────────────────────────────────
+  /** 202 queued; the job stays completed. 409 when it cannot run (detail says why). */
   repromptJob: (jobId: string, body: RepromptRequest) =>
     apiFetch<{
       job_id: string
@@ -315,7 +338,6 @@ export const api = {
 
   // ── TikTok — connect account ─────────────────────────────────────────────
   /** POST /api/social/tiktok/connect — connect via cookie-JSON export. */
-  // TODO: gen:api after backend lands
   connectTikTok: (body: { account_handle: string; cookies_json: string; display_name?: string }) =>
     apiFetch<SocialAccount>('/api/social/tiktok/connect', {
       method: 'POST',
@@ -324,7 +346,6 @@ export const api = {
 
   // ── TikTok — capabilities ────────────────────────────────────────────────
   /** GET /api/social/tiktok/capabilities — server feature flags. */
-  // TODO: gen:api after backend lands
   getTikTokCapabilities: () =>
     apiFetch<TikTokCapabilities>('/api/social/tiktok/capabilities'),
 }
@@ -374,11 +395,23 @@ export interface RenderPlan {
   }>
 }
 
+/** Body of POST /clips/{id}/rerender (app/routers/clips.py RerenderRequest). */
+export interface RerenderRequest {
+  reframe_provider?: string
+  /** false re-renders the video only; title, summary, hashtags and AI hook are kept. Server default true. */
+  regenerate_copy?: boolean
+}
+
+/** Body of POST /jobs/{id}/reprompt (app/routers/reprompt.py RepromptRequest). */
 export interface RepromptRequest {
+  /** Omitted: the job keeps its prompt. */
   prompt?: string
   length_range?: '0-1m' | '1-3m' | '3-5m' | '5-10m' | '10-15m'
   length_min_seconds?: number
   length_max_seconds?: number
+  /** One clip of exactly this source range instead of the proposer's picks; both or neither. */
+  start_seconds?: number
+  end_seconds?: number
 }
 
 export interface SocialAccount {
@@ -408,7 +441,6 @@ export interface PublishCreate {
   title?: string
   description?: string
   hashtags?: string[]
-  schedule_at?: string
 }
 
 export interface PublishJob {
@@ -426,7 +458,6 @@ export interface PublishJob {
     | 'posted_unverified'
     | 'failed'
     | 'cancelled'
-  schedule_at: string | null
   posted_at: string | null
   external_post_id: string | null
   external_post_url: string | null
@@ -435,7 +466,7 @@ export interface PublishJob {
   created_at: string
 }
 
-/** TikTok server capabilities — TODO: gen:api after backend lands */
+/** TikTok server capabilities. */
 export interface TikTokCapabilities {
   has_stable_key: boolean
   sidecar_configured: boolean

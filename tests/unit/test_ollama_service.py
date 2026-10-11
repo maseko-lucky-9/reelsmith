@@ -1,8 +1,6 @@
 import json
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from app.services.ollama_service import generate_social_content
 
 _DEFAULTS = dict(base_url="http://localhost:11434", model="mistral", timeout=30)

@@ -12,6 +12,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+import app.logging_config  # noqa: F401
+from app.api_prefix import ApiPrefixMiddleware
 from app.bus.event_bus import AsyncEventBus
 from app.bus.job_store import InMemoryJobStore, SqlJobStore
 from app.domain.events import Event, EventType
@@ -37,13 +39,15 @@ from app.routers import (
     xml_export,
 )
 from app.services import transcription_service
-from app.services.retention import sweep_expired_clips
+from app.services.retention import run_retention_sweeps
 from app.settings import settings
+from app.spa_fallback import SpaFallbackMiddleware
 from app.workers.orchestrator import run_orchestrator
 
-import app.logging_config  # noqa: F401
-
 log = logging.getLogger(__name__)
+
+# The built React app, served at "/" when YTVIDEO_SERVE_FRONTEND=true.
+FRONTEND_DIST = Path(__file__).parents[1] / "web" / "dist"
 
 
 async def _warm_up_whisper() -> None:
@@ -138,13 +142,10 @@ async def lifespan(app: FastAPI):
             while True:
                 await asyncio.sleep(settings.retention_sweep_minutes * 60)
                 try:
-                    retired = await sweep_expired_clips(
-                        get_session_factory(),
-                        retention_days=settings.retention_days,
-                        now=datetime.now(UTC),
+                    # Expired clips, unused sources, retired clip files (T033).
+                    await run_retention_sweeps(
+                        get_session_factory(), now=datetime.now(UTC)
                     )
-                    if retired:
-                        log.info("Retention: retired %d clip(s)", len(retired))
                 except Exception:  # noqa: BLE001 — keep the janitor alive
                     log.exception("Retention sweep failed")
 
@@ -179,11 +180,20 @@ def create_app() -> FastAPI:
     from app.auth import require_api_key
 
     dependencies = [Depends(require_api_key)] if settings.require_auth else []
+    # FastAPI adds /docs, /redoc and /openapi.json outside the app-level
+    # dependencies, and the Swagger page could not send the key on its own
+    # schema fetch anyway, so with auth on the docs surface is switched off
+    # (FR-060, T043): those paths get the 404 of any unknown path. app.openapi()
+    # still builds the schema in process.
+    docs_on = not settings.require_auth
     app = FastAPI(
         title="Reelsmith API",
         version="0.1.0",
         lifespan=lifespan,
         dependencies=dependencies,
+        docs_url="/docs" if docs_on else None,
+        redoc_url="/redoc" if docs_on else None,
+        openapi_url="/openapi.json" if docs_on else None,
     )
 
     app.add_middleware(
@@ -192,8 +202,11 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    # Every route answers at /x and /api/x: the Vite dev proxy strips /api,
+    # the UI served by serve_frontend does not (T034). Routers stay unprefixed.
+    app.add_middleware(ApiPrefixMiddleware)
 
-    # Health probe — Vite proxy strips /api prefix so this must live at /health.
+    # Health probe: /health, and /api/health through ApiPrefixMiddleware.
     @app.get("/health", tags=["meta"])
     async def health() -> JSONResponse:
         return JSONResponse({"status": "ok", "job_store": settings.job_store})
@@ -226,8 +239,12 @@ def create_app() -> FastAPI:
 
     # Serve the built React app in production (YTVIDEO_SERVE_FRONTEND=true).
     if settings.serve_frontend:
-        frontend_dir = Path(__file__).parents[1] / "web" / "dist"
+        frontend_dir = FRONTEND_DIST
         if frontend_dir.is_dir():
+            # Reloading a client route (/uploads/new, /jobs/<id>) gets index.html
+            # (T036). Added after ApiPrefixMiddleware, so it runs before it and
+            # still sees the /api prefix.
+            app.add_middleware(SpaFallbackMiddleware, dist=frontend_dir)
             app.mount("/", StaticFiles(directory=str(frontend_dir), html=True), name="frontend")
 
     return app

@@ -9,8 +9,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:ui": "vitest --ui",
-    "gen:api": "python -m app.scripts.dump_openapi && openapi-typescript src/api/openapi.json -o src/api/types.gen.ts"
+    "test:ui": "vitest --ui"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",

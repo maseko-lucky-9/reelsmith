@@ -5,7 +5,6 @@ import asyncio
 import json
 
 import httpx
-import pytest
 
 from app.bus.event_bus import AsyncEventBus
 from app.domain.events import EventType

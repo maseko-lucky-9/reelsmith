@@ -12,13 +12,11 @@ from __future__ import annotations
 import logging
 from dataclasses import asdict
 
+import app.logging_config  # noqa: F401
 from app.services.platforms import (
-    UnsupportedPlatformError,
     YouTubeAdapter,
     detect_platform_id,
 )
-
-import app.logging_config  # noqa: F401
 
 log = logging.getLogger(__name__)
 

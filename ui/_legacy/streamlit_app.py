@@ -6,10 +6,8 @@ import subprocess
 from datetime import datetime
 
 import streamlit as st
-
 from api_client import ApiClient
 from log_formatter import format_event
-
 
 _API_BASE_URL = os.environ.get("YTVIDEO_API_URL", "http://127.0.0.1:8000")
 

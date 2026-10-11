@@ -6,14 +6,13 @@ from pathlib import Path
 
 import pytest
 
+import app.services.platforms.generate as gen_mod
 from app.services.platforms import (
     GenerateAdapter,
     detect_platform_id,
     resolve,
 )
 from app.services.platforms.base import DownloadResult
-import app.services.platforms.generate as gen_mod
-
 
 # ── matches() ─────────────────────────────────────────────────────────────────
 

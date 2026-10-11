@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request, UploadFile, File
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 
 from app.domain.ids import new_job_id
@@ -14,7 +14,9 @@ from app.settings import settings
 router = APIRouter(prefix="/uploads", tags=["uploads"])
 
 _ALLOWED_MIME = {"video/mp4", "video/quicktime", "video/x-m4v"}
-_UPLOAD_DIR = Path("/tmp/yt/uploads")
+# Kept beside the other sources so it survives a /tmp clean-up; must match
+# app/services/platforms/upload.py::_UPLOAD_ROOT.
+_UPLOAD_DIR = Path(settings.default_download_path) / "uploads"
 # Spooled-upload read size: 1 MiB keeps per-chunk await/write overhead low
 # for multi-GB videos while staying small in memory.
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
