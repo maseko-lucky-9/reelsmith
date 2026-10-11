@@ -257,22 +257,31 @@ def _several_similar(faces: Sequence[Face]) -> bool:
     return second >= EQUAL_FACE_AREA * first
 
 
-def _spread_layout(
+def _layout_frames(
     observations: Sequence[Observation], src_size: tuple[int, int]
-) -> str | None:
-    """``"split screen"`` or ``CROWD_REASON`` when ``detect_split_screen``
-    finds faces far apart in most frames, else ``None``. It is a crowd when
-    more than half of the frames it counts hold ``CROWD_FACES`` faces."""
+) -> list[list[FaceObservation]]:
     src_w, src_h = src_size
-    frames = [
+    return [
         [FaceObservation(o.t, f.cx / src_w, f.cy / src_h, f.score) for f in o.faces]
         for o in observations
     ]
+
+
+def _is_crowd(faces: list[FaceObservation]) -> bool:
+    """A crowd frame: ``CROWD_FACES`` faces or more, far apart as the
+    split-screen test counts them (more than 0.4 of the width)."""
+    return len(faces) >= CROWD_FACES and detect_split_screen([faces])
+
+
+def _spread_layout(frames: Sequence[list[FaceObservation]]) -> str | None:
+    """``"split screen"`` or ``CROWD_REASON`` when ``detect_split_screen``
+    finds faces far apart in most frames, else ``None``. It is a crowd when
+    more than half of the frames it counts are crowd frames."""
     if not detect_split_screen(frames):
         return None
-    spread = [faces for faces in frames if detect_split_screen([faces])]
-    crowds = sum(1 for faces in spread if len(faces) >= CROWD_FACES)
-    return CROWD_REASON if crowds > len(spread) / 2 else "split screen"
+    spread = sum(1 for faces in frames if detect_split_screen([faces]))
+    crowds = sum(1 for faces in frames if _is_crowd(faces))
+    return CROWD_REASON if crowds > spread / 2 else "split screen"
 
 
 # ── positions ─────────────────────────────────────────────────────────────────
@@ -410,7 +419,8 @@ def plan_crop_track(
     # usable: a poster or an audience face must not letterbox a tracked clip.
     min_h = MIN_FACE_HEIGHT * src_h
     large = [Observation(o.t, tuple(f for f in o.faces if f.h >= min_h)) for o in usable]
-    layout = _spread_layout(large, src_size)
+    frames = _layout_frames(large, src_size)
+    layout = _spread_layout(frames)
     if layout is not None:
         return CropTrackPlan(None, layout, samples, len(with_faces))
     with_large = [o for o in large if o.faces]
@@ -419,9 +429,19 @@ def plan_crop_track(
         return CropTrackPlan(
             None, "several faces of similar size", samples, len(with_faces)
         )
+    # T049: a crowd frame does not choose the primary (the crop holds through
+    # it), as a clip of mostly crowd frames is letterboxed: its largest face is
+    # no more the subject than the others (in the G2 Wikimania opening it was
+    # the back of a head). The frames still count as samples with a face.
+    voting = [
+        Observation(o.t, ()) if _is_crowd(faces) else o
+        for o, faces in zip(usable, frames)
+    ]
+    if not any(o.faces for o in voting):
+        return CropTrackPlan(None, CROWD_REASON, samples, len(with_faces))
     targets = [
         None if face is None else x_left_for(face.cx, src_w, window.width)
-        for face in follow_primary(usable, src_w, window.width, src_h=src_h)
+        for face in follow_primary(voting, src_w, window.width, src_h=src_h)
     ]
     xs = hold_gaps(targets)
     assert xs is not None  # with_faces is not empty, so some sample has a primary

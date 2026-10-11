@@ -930,6 +930,124 @@ def test_switch_seconds_allows_for_frame_time_jitter(shot, moves):
     assert (max(x for _t, x in plan.track) > SPEAKER_X + DEADBAND) is moves
 
 
+# ── T049: a crowd frame does not choose the primary ───────────────────────────
+
+# The G2 Wikimania opening (W0) in miniature, 1920x1080: a wide shot over the
+# audience. Its large faces are a blurred foreground head seen from behind
+# (17 %, score 0.68, a YuNet false positive), a second head seen from behind
+# (9 %) and an audience face (6.5 %), spread over 0.67 of the width; the host
+# on stage is small (3.4 %). Faces under 5 % do not count as large.
+_W0_HOST_CLOSE_UP = 930
+
+
+def _w0_wide_shot(t: float, *, host_cx: float = 612) -> Observation:
+    return _obs(
+        t,
+        _hd(270, h=180, score=0.68, cy=880),  # back of a head, foreground
+        _hd(990, h=100, score=0.72, cy=630),  # back of a head
+        _hd(1560, h=70, score=0.8, cy=520),  # audience face
+        _hd(host_cx, h=37, score=0.82, cy=130),  # the host on stage
+    )
+
+
+def _w0_opening() -> list[Observation]:
+    """Wide shot 0-3 s, the host's close-up 3.5-5.5 s, wide shot 6-8 s, then
+    the close-up for 15 s (the wide shot is a minority of the clip, as in W0,
+    so the clip is not letterboxed as a crowd)."""
+    return [
+        *[_w0_wide_shot(k * 0.5) for k in range(7)],
+        *[_obs(3.5 + k * 0.5, _hd(_W0_HOST_CLOSE_UP, h=180, score=0.91)) for k in range(5)],
+        *[_w0_wide_shot(6.0 + k * 0.5, host_cx=805 + 60 * k) for k in range(5)],
+        *[_obs(8.5 + k * 0.5, _hd(_W0_HOST_CLOSE_UP, h=180, score=0.91)) for k in range(30)],
+    ]
+
+
+def test_a_crowd_wide_shot_does_not_hand_the_crop_to_a_foreground_head():
+    """T049 (W0): in a frame with ``CROWD_FACES`` large faces spread like a
+    split screen, the largest is no more the subject than the others (on W0 it
+    is the back of a head), so the frame does not choose the primary: the crop
+    holds, and the wide shot before the first primary takes the close-up's
+    position. Before T049 the head was followed for 3 s (x = 0) and again
+    from 6 s. The crowd frames still count as samples with a face."""
+    obs = _w0_opening()
+
+    plan = plan_crop_track(obs, HD)
+
+    assert plan.track is not None, plan.reason
+    assert {x for _t, x in plan.track} == {_hd_x(_W0_HOST_CLOSE_UP)}
+    assert plan.face_samples == len(obs)
+
+
+def test_a_crowd_cutaway_longer_than_the_switch_wait_holds_the_crop():
+    """A 3 s cutaway to the audience (three large faces spread across the
+    frame, the largest 1,100 px from the speaker) used to be followed as a
+    change of speaker (``SWITCH_SECONDS``); a crowd frame chooses no primary,
+    so the crop stays on the speaker."""
+    audience = (
+        _hd(1500, h=200, score=0.85),
+        _hd(900, h=80, score=0.8),
+        _hd(1850, h=70, score=0.8),
+    )
+    obs = [
+        *[_obs(k * 0.5, _hd(400)) for k in range(10)],
+        *[_obs(5.0 + k * 0.5, *audience) for k in range(7)],
+        *[_obs(8.5 + k * 0.5, _hd(400)) for k in range(24)],
+    ]
+
+    plan = plan_crop_track(obs, HD)
+
+    assert {x for _t, x in plan.track} == {_hd_x(400)}
+
+
+def test_three_large_faces_close_together_are_not_a_crowd_frame():
+    """The crowd test needs the faces spread over more than 0.4 of the width
+    (as the split-screen test): a speaker who walks up to two people standing
+    next to them (400 px apart in all) is still followed."""
+    obs = [
+        *[_obs(k * 0.5, _hd(400, h=200)) for k in range(6)],
+        *[
+            _obs(3.0 + k * 0.5, _hd(1000, h=200), _hd(800, h=80), _hd(1200, h=80))
+            for k in range(20)
+        ],
+    ]
+
+    plan = plan_crop_track(obs, HD)
+
+    assert abs(plan.track[-1][1] - _hd_x(1000)) <= HD_DEADBAND + 1.0
+
+
+def test_a_clip_whose_faces_are_all_in_crowd_frames_is_letterboxed_as_a_crowd():
+    """Half the samples are crowd frames and half have no face: too few far-
+    apart frames for the clip-wide crowd test (it needs more than half of
+    all samples), but no frame chooses a primary, so there is nothing to
+    follow: the clip falls back to the letterbox as a crowd."""
+    obs = [_w0_wide_shot(k * 0.5) if k % 2 == 0 else _obs(k * 0.5) for k in range(20)]
+
+    plan = plan_crop_track(obs, HD)
+
+    assert plan.track is None and plan.reason == reframe_service.CROWD_REASON
+    assert plan.face_samples == 10
+
+
+def test_known_limit_a_speaker_moving_in_crowd_frames_is_held():
+    """A DOCUMENTED LIMIT (ADR-006 *Known limits*), pinned so that changing it
+    is deliberate. The speaker (23 % of the frame) walks 400 → 1000 px for
+    4 s with two audience faces (6.5 %) at the edges of the frame: those are
+    crowd frames, so the crop holds where the speaker was and catches up
+    once they are alone again. Main followed the walk."""
+    edges = (_hd(100, h=70, score=0.8), _hd(1800, h=70, score=0.8))
+    obs = [
+        *[_obs(k * 0.5, _hd(400, h=250)) for k in range(6)],
+        *[_obs(3.0 + k * 0.5, _hd(400 + 75 * k, h=250), *edges) for k in range(9)],
+        *[_obs(7.5 + k * 0.5, _hd(1000, h=250)) for k in range(16)],
+    ]
+
+    plan = plan_crop_track(obs, HD)
+
+    assert _x_at(plan, 5.0) <= _hd_x(400) + HD_DEADBAND
+    assert abs(plan.track[-1][1] - _hd_x(1000)) <= HD_DEADBAND + 1.0
+
+
 # ── frame sampling (real decode of synthetic sources) ─────────────────────────
 
 
