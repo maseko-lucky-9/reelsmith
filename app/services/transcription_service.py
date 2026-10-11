@@ -16,6 +16,17 @@ Provider (``YTVIDEO_TRANSCRIPTION_PROVIDER``): ``whisper`` or ``stub``.
   ``max(transcription_timeout_seconds, audio seconds)`` from the moment
   decoding starts, not while the call waits for a thread, the model load or
   another chapter's decode.
+* **Repeatable decoding** (``repeatable=True``: clip discovery, T047) — by
+  default faster-whisper re-decodes a 30 s window by *sampling* at
+  temperatures 0.2-1.0 when its greedy text compresses too well or scores too
+  low, so one source can give different words run to run (a TEDx talk gave
+  1006, 1008 and 1002 words and two different kept-clip sets). A repeatable
+  call decodes greedily (``temperature=0.0`` only): the same audio gives the
+  same words on one install. Greedy decoding alone can loop on noisy audio
+  (one phrase copied window after window), so when the greedy result repeats
+  a phrase ``LOOP_REPEATS`` times back to back (``has_decode_loop``) the audio
+  is decoded again with the default fallback and that result, which is not
+  repeatable, is used. Measurements: ADR-007 *Repeatable transcription*.
 """
 
 from __future__ import annotations
@@ -23,7 +34,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from collections.abc import Callable, Collection, Iterator
+from collections.abc import Callable, Collection, Iterator, Sequence
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -40,6 +51,15 @@ log = logging.getLogger(__name__)
 AUTO_DETECT = "auto"
 # How often a call queued behind another decode re-checks its cancel event.
 _LOCK_POLL_SECONDS = 0.1
+
+# Repeatable decoding (T047): one temperature, so no sampled fallback.
+GREEDY_TEMPERATURE = 0.0
+# A greedy result with one phrase of up to LOOP_MAX_PHRASE_WORDS words this
+# many times back to back is a decode loop. Measured greedy loops ran 42-81
+# copies; clean talks never went past 2. A false alarm only costs
+# repeatability (the fallback result is used).
+LOOP_REPEATS = 4
+LOOP_MAX_PHRASE_WORDS = 20
 
 _model: WhisperModel | None = None
 _model_lock = threading.Lock()
@@ -154,20 +174,84 @@ def _decode_slot(cancel: threading.Event | None) -> Iterator[None]:
         _decode_lock.release()
 
 
+def _phrase_token(word: str) -> str:
+    return "".join(ch for ch in word.casefold() if ch.isalnum())
+
+
+def has_decode_loop(words: Sequence[str]) -> bool:
+    """Whether one phrase occurs ``LOOP_REPEATS`` times back to back.
+
+    A phrase is 1 to ``LOOP_MAX_PHRASE_WORDS`` words; case and punctuation
+    are ignored (``"Yeah."`` matches ``"yeah,"``). Sentences that only share
+    an opening ("This is him ... This is him ...") do not count.
+    """
+    tokens = [t for t in map(_phrase_token, words) if t]
+    for size in range(1, LOOP_MAX_PHRASE_WORDS + 1):
+        # N back-to-back copies of a ``size``-word phrase are a stretch of
+        # (N - 1) * size tokens each equal to the token ``size`` places on.
+        run = 0
+        for i in range(len(tokens) - size):
+            run = run + 1 if tokens[i] == tokens[i + size] else 0
+            if run >= size * (LOOP_REPEATS - 1):
+                return True
+    return False
+
+
+def _decode(
+    model: WhisperModel,
+    audio_path: str,
+    code: str | None,
+    cancel: threading.Event | None,
+    **decoding: float,
+) -> list[WordTiming]:
+    """One faster-whisper pass; ``decoding`` adds options (``temperature``)."""
+    log.info(
+        "Transcribing audio  path=%s  language=%s  model=%s  beam=%d  vad=%s  decoding=%s",
+        audio_path,
+        code or AUTO_DETECT,
+        settings.whisper_model,
+        settings.whisper_beam_size,
+        settings.whisper_vad_filter,
+        "greedy" if decoding else "temperature fallback",
+    )
+    segments, _info = model.transcribe(
+        audio_path,
+        word_timestamps=True,
+        language=code,
+        beam_size=settings.whisper_beam_size,
+        vad_filter=settings.whisper_vad_filter,
+        **decoding,
+    )
+    words: list[WordTiming] = []
+    with closing(segments):
+        for segment in segments:
+            words.extend(
+                WordTiming(word=w.word.strip(), start=w.start, end=w.end)
+                for w in segment.words or ()
+            )
+            _raise_if_cancelled(cancel)
+    return words
+
+
 def transcribe_to_words(
     audio_path: str,
     language: str | None = None,
     *,
+    repeatable: bool = False,
     cancel: threading.Event | None = None,
     on_start: Callable[[], None] | None = None,
 ) -> list[WordTiming]:
     """Word-timed transcript of ``audio_path`` (blocking; run it in a thread).
 
     ``language`` is a job language tag, resolved by ``resolve_language``.
-    ``cancel`` defaults to the event ``ffmpeg_tools.to_thread_cancellable``
-    installs; once set, the call raises ``TranscriptionCancelled`` at the next
-    segment boundary. ``on_start`` is called when decoding begins (model
-    loaded, decode slot held), so a caller can start its timeout clock there.
+    ``repeatable`` decodes greedily, so the same audio gives the same words,
+    unless the greedy result loops (``has_decode_loop``): then the audio is
+    decoded again with faster-whisper's default temperature fallback (module
+    docstring). ``cancel`` defaults to the event
+    ``ffmpeg_tools.to_thread_cancellable`` installs; once set, the call raises
+    ``TranscriptionCancelled`` at the next segment boundary. ``on_start`` is
+    called when decoding begins (model loaded, decode slot held), so a caller
+    can start its timeout clock there; a second pass runs on that clock too.
 
     Raises:
         TranscriptionCancelled: ``cancel`` was set before decoding finished.
@@ -185,29 +269,18 @@ def transcribe_to_words(
     with _decode_slot(cancel):
         if on_start is not None:
             on_start()
-        log.info(
-            "Transcribing audio  path=%s  language=%s  model=%s  beam=%d  vad=%s",
-            audio_path,
-            code or AUTO_DETECT,
-            settings.whisper_model,
-            settings.whisper_beam_size,
-            settings.whisper_vad_filter,
-        )
-        segments, _info = model.transcribe(
-            audio_path,
-            word_timestamps=True,
-            language=code,
-            beam_size=settings.whisper_beam_size,
-            vad_filter=settings.whisper_vad_filter,
-        )
-        words: list[WordTiming] = []
-        with closing(segments):
-            for segment in segments:
-                words.extend(
-                    WordTiming(word=w.word.strip(), start=w.start, end=w.end)
-                    for w in segment.words or ()
+        if repeatable:
+            words = _decode(model, audio_path, code, cancel, temperature=GREEDY_TEMPERATURE)
+            if has_decode_loop([w.word for w in words]):
+                log.warning(
+                    "Greedy transcription repeats a phrase %d+ times back to back; decoding again "
+                    "with the temperature fallback (not repeatable)  path=%s",
+                    LOOP_REPEATS,
+                    audio_path,
                 )
-                _raise_if_cancelled(cancel)
+                words = _decode(model, audio_path, code, cancel)
+        else:
+            words = _decode(model, audio_path, code, cancel)
     log.info("Transcription complete  words=%d", len(words))
     return words
 
@@ -224,7 +297,11 @@ def decode_timeout_seconds(audio_duration_s: float) -> float:
 
 
 async def transcribe_words_async(
-    audio_path: str, *, language: str | None, audio_duration_s: float
+    audio_path: str,
+    *,
+    language: str | None,
+    audio_duration_s: float,
+    repeatable: bool = False,
 ) -> list[WordTiming]:
     """``transcribe_to_words`` in a worker thread under a decode-time budget.
 
@@ -251,6 +328,7 @@ async def transcribe_words_async(
                     transcribe_to_words,
                     audio_path,
                     language=language,
+                    repeatable=repeatable,
                     on_start=lambda: loop.call_soon_threadsafe(arm),
                 )
             finally:
