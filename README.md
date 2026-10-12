@@ -177,7 +177,7 @@ cd web && pnpm build
 YTVIDEO_SERVE_FRONTEND=true uvicorn app.main:app
 ```
 
-The API is served at both `/x` and `/api/x` (`app/api_prefix.py`, [ADR-005](docs/decisions/005-api-route-prefix.md)). The UI calls `/api/...`: in dev the Vite proxy strips `/api`, and with `YTVIDEO_SERVE_FRONTEND=true` FastAPI strips it itself, so `curl localhost:8000/api/health` and `curl localhost:8000/health` both answer.
+The API is served at both `/x` and `/api/x` (`app/api_prefix.py`, [ADR-005](docs/decisions/005-api-route-prefix.md)). The UI calls `/api/...`: in dev the Vite proxy strips `/api` and forwards to `http://127.0.0.1:8000` (set `YTVIDEO_API_URL`, for example `YTVIDEO_API_URL=http://127.0.0.1:8001 pnpm dev`, when another service holds that port), and with `YTVIDEO_SERVE_FRONTEND=true` FastAPI strips it itself, so `curl localhost:8000/api/health` and `curl localhost:8000/health` both answer.
 
 The live OpenAPI schema is served by the backend at `/openapi.json` (and `/api/openapi.json`), with Swagger UI at `/docs`, while `YTVIDEO_REQUIRE_AUTH` is off. With auth on, these docs routes are switched off and answer 404 (FR-060, T043). The web client (`web/src/api/client.ts`) is hand-written, so there is no generated schema or types file to keep in sync (T038).
 
