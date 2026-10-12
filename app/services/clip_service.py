@@ -44,6 +44,13 @@ class ReelGeometry:
     source_size: tuple[int, int]
     canvas_size: tuple[int, int]
     band_anchor_y: int
+    inset_height: int  # the source scaled to the canvas width (scale=W:-2)
+
+
+# 1080 px is the standard reel width. A wider canvas only costs time: the blur,
+# the caption PNGs and the encode all scale with it (a 1080p source used to get
+# a 1920x3413 canvas).
+MAX_CANVAS_WIDTH = 1080
 
 
 def reel_geometry(
@@ -51,18 +58,22 @@ def reel_geometry(
 ) -> ReelGeometry:
     """Canvas size and caption anchor for a reel (legacy clip_service.py:186-195).
 
-    The canvas keeps the source width and is ``int(w / ratio)`` tall; captions
-    are anchored in the middle of the blur band below the vertically centred
-    inset.
+    The canvas is the source width, capped at ``MAX_CANVAS_WIDTH``, and
+    ``int(w / ratio)`` tall; captions are anchored in the middle of the blur
+    band below the vertically centred inset.
     """
-    canvas_h = int(source_w / target_aspect_ratio)
-    inner_top = (canvas_h - source_h) // 2
-    inner_bottom = inner_top + source_h
+    canvas_w = min(source_w, MAX_CANVAS_WIDTH)
+    canvas_h = int(canvas_w / target_aspect_ratio)
+    # scale=canvas_w:-2 rounds the height half-up to an even number.
+    inset_height = 2 * ((source_h * canvas_w + source_w) // (2 * source_w))
+    inner_top = (canvas_h - inset_height) // 2
+    inner_bottom = inner_top + inset_height
     band_anchor_y = inner_bottom + (canvas_h - inner_bottom) // 2
     return ReelGeometry(
         source_size=(source_w, source_h),
-        canvas_size=(source_w, canvas_h),
+        canvas_size=(canvas_w, canvas_h),
         band_anchor_y=band_anchor_y,
+        inset_height=inset_height,
     )
 
 

@@ -130,12 +130,20 @@ def _caption_band(
     )
 
 
-def _inset(fixture: SyncFixture, canvas: tuple[int, int], inset_y: int):
+def _inset(
+    fixture: SyncFixture,
+    canvas: tuple[int, int],
+    inset_y: int,
+    inset_size: tuple[int, int] | None = None,
+):
+    """``inset_size`` is the source as drawn on the canvas (scaled when the
+    source is wider than the 1080 px canvas cap); default: unscaled."""
+    inset_w, inset_h = inset_size or (fixture.width, fixture.height)
     return inset_geometry(
         fixture.geometry,
         source_size=(fixture.width, fixture.height),
         canvas_size=canvas,
-        inset_rect=(0, inset_y, fixture.width, fixture.height),
+        inset_rect=(0, inset_y, inset_w, inset_h),
     )
 
 
@@ -265,13 +273,13 @@ def test_720_no_audio_reel(sync_fixture_720: SyncFixture, tmp_path, monkeypatch)
         monkeypatch=monkeypatch,
     )
     info = _video_info(out)
-    # canvas 1280x2275 → 2274; inset y = even((2275 - 720) // 2) = 776
-    assert info["size"] == (1280, 2274)
+    # 1280 px source → capped canvas 1080x1920; inset 1080x608, y = (1920 - 608) // 2
+    assert info["size"] == (1080, 1920)
     assert info["pix_fmt"] == "yuv420p"
     assert info["audio"] == []
     report = assert_av_sync(
         out,
-        _inset(sync_fixture_720, (1280, 2274), inset_y=776),
+        _inset(sync_fixture_720, (1080, 1920), inset_y=656, inset_size=(1080, 608)),
         fps=sync_fixture_720.fps,
         click_frames=(),
         source_start=START_720,
@@ -363,7 +371,7 @@ def test_empty_word_list_renders_reel_without_captions(
         lossless=True,
         monkeypatch=monkeypatch,
     )
-    assert _video_info(out)["size"] == (1280, 2274)
+    assert _video_info(out)["size"] == (1080, 1920)
     band = _caption_band(
         sync_fixture_720, START_720, DURATION_720, WORDS_720, tmp_path / "oracle"
     )
@@ -449,7 +457,7 @@ def test_huge_rate_fraction_still_renders(
         str(sync_fixture_720.path), str(out), 0.0, 2.0, word_timings=WORDS_720
     )
     info = _video_info(out)
-    assert info["size"] == (1280, 2274)
+    assert info["size"] == (1080, 1920)
     assert info["frames"] == pytest.approx(2.0 * float(rate), abs=1)
     with av.open(str(out)) as container:
         times = [float(f.time) for f in container.decode(video=0)]

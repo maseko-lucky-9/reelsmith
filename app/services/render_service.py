@@ -151,7 +151,7 @@ def even_floor(value: int) -> int:
 
 def inset_y(geometry: clip_service.ReelGeometry) -> int:
     """Top of the vertically centred inset, rounded down to an even row."""
-    return even_floor((geometry.canvas_size[1] - geometry.source_size[1]) // 2)
+    return even_floor((geometry.canvas_size[1] - geometry.inset_height) // 2)
 
 
 # ── Moving crop (reframe) ─────────────────────────────────────────────────────
@@ -416,6 +416,15 @@ def background_still(
     MoviePy's compositor, missing area is black and excess is cut.
     """
     frame = ffmpeg_tools.grab_frame(src, start + duration / 2).convert("RGB")
+    canvas_w = geometry.canvas_size[0]
+    if frame.width > canvas_w:
+        # Blur at canvas size, not source size. The height is floored (as
+        # create_background floors its own) so a 16:9 frame can't round just
+        # above the canvas aspect and lose the cover-scale branch.
+        frame = frame.resize(
+            (canvas_w, max(1, frame.height * canvas_w // frame.width)),
+            Image.LANCZOS,
+        )
     bg = clip_service.create_background(frame, target_aspect_ratio)
     if bg.size != geometry.canvas_size:
         bg = bg.crop((0, 0, *geometry.canvas_size))

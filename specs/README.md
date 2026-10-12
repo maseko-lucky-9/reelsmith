@@ -15,6 +15,7 @@ Spec numbers and ADR numbers (`docs/decisions/NNN-*.md`) are separate sequences.
 | 005 webhooks | Roadmap stub (from T017) | this file |
 | 006 api-tokens | Roadmap stub (from T017) | this file |
 | 007 workspaces | Roadmap stub (from T017) | this file |
+| 008 render-speed | Implemented (T053-T055; T056 decision and T057 open) | [spec](008-render-speed/spec.md) · [plan](008-render-speed/plan.md) · [tasks](008-render-speed/tasks.md) |
 
 ## Roadmap stubs
 

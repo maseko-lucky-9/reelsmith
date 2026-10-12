@@ -17,7 +17,14 @@ from app.services.platforms.base import DownloadResult
 log = logging.getLogger(__name__)
 
 
-_DEFAULT_FORMAT = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+# H.264 first: the old pick was whichever codec had the highest bitrate (VP9 or
+# AV1), and libaom decodes 1080p AV1 ~10x slower than H.264. The reel canvas is
+# 1080 wide, so avc1's 1080p ceiling costs nothing; videos without H.264 fall
+# through to the old chain.
+_DEFAULT_FORMAT = (
+    "bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]"
+    "/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+)
 
 # Called with the overall download percent (0-100) each time it rises. Set by
 # the caller around the download; ``asyncio.to_thread`` copies the context,
