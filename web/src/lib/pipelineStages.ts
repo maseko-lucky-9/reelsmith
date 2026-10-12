@@ -123,7 +123,7 @@ export interface DerivedStage {
   state: StageState
   /** For per-chapter stages: how many chapters have cleared this stage. */
   done: number
-  /** Total chapters when known; null if chapters not yet detected. */
+  /** Total chapters when known (per-chapter stages and 'chapters'); null if not yet detected. */
   total: number | null
   /** Failure message when state === 'failed'. */
   error: string | null
@@ -196,14 +196,25 @@ function isOuterStageDone(
   job: JobState,
   events: PipelineEvent[],
 ): boolean {
-  // Cold-mount signal per the hydration table.
+  // Cold-mount signal per the hydration table. A known chapter total implies the first
+  // three steps ran; the SQL store returns no current_step/destination_folder/chapters.
+  const chaptersKnown = job.chapters_total > 0
   switch (stage.id) {
     case 'folder':
-      return Boolean(job.destination_folder) || isStepPast(job.current_step, 'folder')
+      // A download that reports progress, or has finished, ran in the workspace.
+      return (
+        Boolean(job.destination_folder) ||
+        isStepPast(job.current_step, 'folder') ||
+        Boolean(job.video_path) ||
+        events.some((e) => e.type === 'DownloadProgress') ||
+        chaptersKnown
+      )
     case 'download':
-      return Boolean(job.video_path) || isStepPast(job.current_step, 'download')
+      return Boolean(job.video_path) || isStepPast(job.current_step, 'download') || chaptersKnown
     case 'chapters':
-      return Object.keys(job.chapters ?? {}).length > 0 || isStepPast(job.current_step, 'chapters')
+      return (
+        Object.keys(job.chapters ?? {}).length > 0 || isStepPast(job.current_step, 'chapters') || chaptersKnown
+      )
     case 'export':
       return (
         (job.output_paths?.length ?? 0) >= Object.keys(job.chapters ?? {}).length &&
@@ -236,7 +247,10 @@ export function deriveStageStates(
     }))
   }
 
-  const totalChapters = Object.keys(job.chapters ?? {}).length || null
+  // The memory store seeds `chapters` lazily (1, 2, 3…) and the SQL store never fills it,
+  // so the persisted counter is the total; the dict only covers jobs without one.
+  const totalChapters = job.chapters_total || Object.keys(job.chapters ?? {}).length || null
+  const chaptersDone = job.chapters_done || 0
 
   // Resolve skipped stages from pipeline_options (always populated per backend contract).
   const skippedStages = job.pipeline_options
@@ -256,7 +270,8 @@ export function deriveStageStates(
     if (stage.perChapter) {
       const fromArtifacts = chaptersDoneFromArtifacts(job.chapters ?? {}, stage)
       const fromEvents = chaptersDoneFromEvents(evs, stage)
-      const count = Math.max(fromArtifacts, fromEvents)
+      // A finished chapter has cleared every stage.
+      const count = Math.max(fromArtifacts, fromEvents, chaptersDone)
       const fullyDone = totalChapters !== null && count >= totalChapters && totalChapters > 0
       return { stage, done: fullyDone, count, skipped: false }
     }
@@ -306,10 +321,96 @@ export function deriveStageStates(
       descriptor: r.stage,
       state,
       done: r.count,
-      total: r.stage.perChapter ? totalChapters : null,
+      total: r.stage.perChapter || r.stage.id === 'chapters' ? totalChapters : null,
       error,
     }
   })
+}
+
+export type OverallPhase = 'queued' | 'download' | 'detecting' | 'chapters' | 'failed'
+
+export interface OverallProgress {
+  phase: OverallPhase
+  /** True once the chapter total is known (> 0). */
+  known: boolean
+  total: number
+  done: number
+  remaining: number
+  /** 0..100, or null when there is nothing to measure yet (indeterminate). */
+  percent: number | null
+  label: string
+  percentText: string | null
+  failed: boolean
+}
+
+function clampPercent(n: number): number {
+  return Math.min(100, Math.max(0, Math.round(n)))
+}
+
+/** The last DownloadProgress percent, or null without a numeric one. */
+function latestDownloadPercent(events: PipelineEvent[]): number | null {
+  const last = events.findLast((e) => e.type === 'DownloadProgress')
+  const percent = last?.payload?.percent
+  return typeof percent === 'number' && Number.isFinite(percent) ? clampPercent(percent) : null
+}
+
+// A downloaded source with an unknown total is also what a job that failed before
+// chapters_total existed looks like, so it gets no claim about detection.
+function failedLabel(known: boolean, done: number, total: number, downloaded: boolean): string {
+  if (known) return `Failed after ${done} of ${total} chapters`
+  return downloaded ? 'Failed' : 'Failed before chapters were detected'
+}
+
+/**
+ * The job's main progress bar. It fills on FINISHED chapters only (chapters_done ÷
+ * chapters_total), so the text, the percent and the bar always agree. Before the total is
+ * known it shows the download percent, then an indeterminate "Detecting chapters…".
+ */
+export function deriveOverallProgress(job: JobState, events: PipelineEvent[] | undefined): OverallProgress {
+  const evs = events ?? []
+  const known = Number.isFinite(job.chapters_total) && job.chapters_total > 0
+  const total = known ? job.chapters_total : 0
+  const done = known ? Math.min(total, Math.max(0, job.chapters_done || 0)) : 0
+  const remaining = total - done
+  const chapterPercent = known ? clampPercent((done / total) * 100) : null
+  const base = { known, total, done, remaining }
+
+  if (job.status === 'failed') {
+    return {
+      ...base,
+      phase: 'failed',
+      percent: chapterPercent,
+      label: failedLabel(known, done, total, Boolean(job.video_path)),
+      percentText: chapterPercent === null ? null : `${chapterPercent}%`,
+      failed: true,
+    }
+  }
+  if (known) {
+    return {
+      ...base,
+      phase: 'chapters',
+      percent: chapterPercent,
+      label: `${done} of ${total} chapters done · ${remaining} remaining`,
+      percentText: `${chapterPercent}%`,
+      failed: false,
+    }
+  }
+  if (job.status === 'pending') {
+    return { ...base, phase: 'queued', percent: null, label: 'Queued…', percentText: null, failed: false }
+  }
+  const downloaded = Boolean(job.video_path) || evs.some((e) => e.type === 'VideoDownloaded')
+  if (downloaded) {
+    return { ...base, phase: 'detecting', percent: null, label: 'Detecting chapters…', percentText: null, failed: false }
+  }
+  const percent = latestDownloadPercent(evs)
+  return {
+    ...base,
+    phase: 'download',
+    percent,
+    label: 'Downloading source…',
+    percentText: percent === null ? null : `${percent}%`,
+    failed: false,
+  }
 }
 
 /**
@@ -375,6 +476,9 @@ const NON_STAGE_EVENT_TYPES = [
   'BulkExportCompleted',
   'ShareLinkCreated',
   'AnalyticsRefreshed',
+  // Drive the main progress bar (deriveOverallProgress), not a row.
+  'ChapterCompleted',
+  'DownloadProgress',
 ] as const
 
 /**

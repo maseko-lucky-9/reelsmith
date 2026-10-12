@@ -12,6 +12,9 @@ from app.domain.events import Event, EventType
 log = logging.getLogger(__name__)
 
 _HISTORY_SIZE = 200
+# Delivered live but never replayed: up to 100 a download, they would evict
+# the events a late subscriber needs, and only the latest one matters.
+_NOT_REPLAYED: frozenset[EventType] = frozenset({EventType.DOWNLOAD_PROGRESS})
 
 
 class _Subscription:
@@ -52,7 +55,8 @@ class AsyncEventBus:
         if self._closed:
             return
         async with self._lock:
-            self._history.append(event)
+            if event.type not in _NOT_REPLAYED:
+                self._history.append(event)
             subs = list(self._subscriptions)
         matched = [s for s in subs if s.matches(event)]
         log.debug("Event published  type=%s  job_id=%s  subscribers=%d",

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import type { ChapterArtifacts, JobState } from '@/api/client'
 import {
   STAGES,
+  deriveOverallProgress,
   deriveStageStates,
   describeActiveStage,
   describeSkippedStages,
@@ -50,6 +51,8 @@ function job(overrides: Partial<JobState> = {}): JobState {
     title: null,
     duration: null,
     chapters: {},
+    chapters_total: 0,
+    chapters_done: 0,
     output_paths: [],
     error: null,
     pipeline_options: { ...ALL_ON_OPTIONS },
@@ -95,6 +98,21 @@ describe('deriveStageStates — outer stages from JobState', () => {
     expect(result.find((r) => r.descriptor.id === 'chapters')?.state).toBe('done')
   })
 
+  it('marks folder done when the video is downloaded but the store returns no destination_folder', () => {
+    const result = deriveStageStates(job({ current_step: null, video_path: '/tmp/vid/x.mp4' }), [])
+    expect(result.find((r) => r.descriptor.id === 'folder')?.state).toBe('done')
+    expect(result.find((r) => r.descriptor.id === 'download')?.state).toBe('done')
+    expect(result.find((r) => r.descriptor.id === 'chapters')?.state).toBe('active')
+  })
+
+  it('marks folder done while the download is reporting progress', () => {
+    const result = deriveStageStates(job({ current_step: null }), [
+      { type: 'DownloadProgress', payload: { percent: 42 } },
+    ])
+    expect(result.find((r) => r.descriptor.id === 'folder')?.state).toBe('done')
+    expect(result.find((r) => r.descriptor.id === 'download')?.state).toBe('active')
+  })
+
   it('first incomplete stage is active', () => {
     const result = deriveStageStates(
       job({ destination_folder: '/tmp/v' }), // folder done, download next
@@ -126,9 +144,10 @@ describe('deriveStageStates — per-chapter aggregation', () => {
     expect(transcribe.done).toBe(1)
   })
 
-  it('marks per-chapter stage done when count == total', () => {
+  it('marks per-chapter stage done when count == chapters_total', () => {
     const result = deriveStageStates(
       job({
+        chapters_total: 2,
         chapters: {
           '0': chapter(0, { status: 'transcribing' }),
           '1': chapter(1, { status: 'transcribing' }),
@@ -137,6 +156,49 @@ describe('deriveStageStates — per-chapter aggregation', () => {
       [],
     )
     expect(result.find((r) => r.descriptor.id === 'extract')?.state).toBe('done')
+  })
+
+  it('keeps a per-chapter stage open while chapters are still being seeded', () => {
+    const result = deriveStageStates(
+      job({
+        destination_folder: '/v',
+        video_path: '/v/x.mp4',
+        chapters_total: 5,
+        chapters: {
+          '0': chapter(0, { status: 'transcribing' }),
+          '1': chapter(1, { status: 'transcribing' }),
+        },
+      }),
+      [],
+    )
+    const extract = result.find((r) => r.descriptor.id === 'extract')!
+    expect(extract.total).toBe(5)
+    expect(extract.done).toBe(2)
+    expect(extract.state).toBe('active')
+  })
+
+  it('reads totals and counts from the counters when the SQL store returns no chapters', () => {
+    const result = deriveStageStates(
+      job({
+        current_step: null,
+        destination_folder: null,
+        video_path: null,
+        chapters: {},
+        chapters_total: 21,
+        chapters_done: 15,
+      }),
+      [],
+    )
+    for (const id of ['folder', 'download', 'chapters'] as const) {
+      expect(result.find((r) => r.descriptor.id === id)?.state, id).toBe('done')
+    }
+    expect(result.find((r) => r.descriptor.id === 'chapters')?.total).toBe(21)
+    for (const r of result.filter((s) => s.descriptor.perChapter)) {
+      expect(r.done, r.descriptor.id).toBeGreaterThanOrEqual(15)
+      expect(r.total, r.descriptor.id).toBe(21)
+      expect(r.state, r.descriptor.id).not.toBe('done')
+    }
+    expect(result.find((r) => r.descriptor.id === 'extract')?.state).toBe('active')
   })
 
   it('events take over when JobState chapters lag', () => {
@@ -257,6 +319,125 @@ describe('deriveStageStates — terminal states', () => {
     const transcribe = result.find((r) => r.descriptor.id === 'transcribe')!
     expect(transcribe.state).toBe('failed')
     expect(transcribe.error).toBe('transcription crashed')
+  })
+})
+
+describe('deriveOverallProgress', () => {
+  const downloadTick = (percent: unknown): PipelineEvent => ({ type: 'DownloadProgress', payload: { percent } })
+
+  it('download phase has no percent before the first tick', () => {
+    const p = deriveOverallProgress(job(), [])
+    expect(p.phase).toBe('download')
+    expect(p.label).toBe('Downloading source…')
+    expect(p.percent).toBeNull()
+    expect(p.percentText).toBeNull()
+    expect(p.known).toBe(false)
+  })
+
+  it('download phase shows the latest DownloadProgress percent', () => {
+    const p = deriveOverallProgress(job(), [downloadTick(10), downloadTick(42)])
+    expect(p.phase).toBe('download')
+    expect(p.percent).toBe(42)
+    expect(p.percentText).toBe('42%')
+  })
+
+  it('download phase clamps the percent and ignores a non-numeric one', () => {
+    expect(deriveOverallProgress(job(), [downloadTick(140)]).percent).toBe(100)
+    expect(deriveOverallProgress(job(), [downloadTick(-5)]).percent).toBe(0)
+    expect(deriveOverallProgress(job(), [downloadTick('42')]).percent).toBeNull()
+  })
+
+  it.each([
+    ['video_path is set', job({ video_path: '/v/x.mp4' }), []],
+    ['VideoDownloaded arrived', job(), [{ type: 'VideoDownloaded' }]],
+  ] as const)('ignores a stale DownloadProgress once %s', (_name, j, extra) => {
+    const p = deriveOverallProgress(j, [downloadTick(42), ...extra])
+    expect(p.phase).toBe('detecting')
+    expect(p.label).toBe('Detecting chapters…')
+    expect(p.percent).toBeNull()
+    expect(p.percentText).toBeNull()
+  })
+
+  it('chapters phase at 0 of 5', () => {
+    const p = deriveOverallProgress(job({ chapters_total: 5, chapters_done: 0 }), [])
+    expect(p.phase).toBe('chapters')
+    expect(p.label).toBe('0 of 5 chapters done · 5 remaining')
+    expect(p.percent).toBe(0)
+    expect(p.percentText).toBe('0%')
+  })
+
+  it('chapters phase at 3 of 10 counts finished chapters only', () => {
+    const p = deriveOverallProgress(job({ chapters_total: 10, chapters_done: 3 }), [])
+    expect(p).toMatchObject({ known: true, total: 10, done: 3, remaining: 7, failed: false })
+    expect(p.label).toBe('3 of 10 chapters done · 7 remaining')
+    expect(p.percent).toBe(30)
+    expect(p.percentText).toBe('30%')
+  })
+
+  it('chapters phase at 10 of 10', () => {
+    const p = deriveOverallProgress(job({ chapters_total: 10, chapters_done: 10 }), [])
+    expect(p.label).toBe('10 of 10 chapters done · 0 remaining')
+    expect(p.percent).toBe(100)
+  })
+
+  it('a known chapter total overrides a leftover DownloadProgress', () => {
+    const p = deriveOverallProgress(job({ chapters_total: 4, chapters_done: 1 }), [downloadTick(50)])
+    expect(p.phase).toBe('chapters')
+    expect(p.percent).toBe(25)
+  })
+
+  it('clamps chapters_done to the total', () => {
+    const p = deriveOverallProgress(job({ chapters_total: 4, chapters_done: 6 }), [])
+    expect(p.done).toBe(4)
+    expect(p.remaining).toBe(0)
+    expect(p.label).toBe('4 of 4 chapters done · 0 remaining')
+    expect(p.percent).toBe(100)
+  })
+
+  it('treats a missing chapters_total as not yet known', () => {
+    const legacy = { ...job({ video_path: '/v/x.mp4' }), chapters_total: undefined } as unknown as JobState
+    const p = deriveOverallProgress(legacy, [])
+    expect(p.known).toBe(false)
+    expect(p.phase).toBe('detecting')
+    expect(p.label).toBe('Detecting chapters…')
+  })
+
+  it('failed after chapters were known keeps the finished share, in red', () => {
+    const p = deriveOverallProgress(
+      job({ status: 'failed', chapters_total: 10, chapters_done: 3 }),
+      [],
+    )
+    expect(p.phase).toBe('failed')
+    expect(p.failed).toBe(true)
+    expect(p.label).toBe('Failed after 3 of 10 chapters')
+    expect(p.percent).toBe(30)
+  })
+
+  it('failed with an unknown total after the download does not claim chapters were never detected', () => {
+    const p = deriveOverallProgress(job({ status: 'failed', video_path: '/v/x.mp4' }), [])
+    expect(p.failed).toBe(true)
+    expect(p.label).toBe('Failed')
+    expect(p.percent).toBeNull()
+  })
+
+  it('a pending job is queued, not downloading', () => {
+    const p = deriveOverallProgress(job({ status: 'pending' }), [])
+    expect(p.phase).toBe('queued')
+    expect(p.label).toBe('Queued…')
+    expect(p.percent).toBeNull()
+  })
+
+  it('a running job that has not downloaded yet is downloading', () => {
+    expect(deriveOverallProgress(job({ status: 'running' }), []).label).toBe('Downloading source…')
+  })
+
+  it('failed before chapters were detected has no percent', () => {
+    const p = deriveOverallProgress(job({ status: 'failed' }), [downloadTick(42)])
+    expect(p.phase).toBe('failed')
+    expect(p.failed).toBe(true)
+    expect(p.label).toBe('Failed before chapters were detected')
+    expect(p.percent).toBeNull()
+    expect(p.percentText).toBeNull()
   })
 })
 

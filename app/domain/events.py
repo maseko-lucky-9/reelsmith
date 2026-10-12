@@ -20,6 +20,10 @@ class EventType(str, Enum):
     FOLDER_CREATED = "FolderCreated"
     VIDEO_DOWNLOADED = "VideoDownloaded"
     CHAPTERS_DETECTED = "ChaptersDetected"
+    # Job progress (T052): a chapter finished every stage (payload
+    # ``chapter_index``), and the source download reached ``percent`` (0-100).
+    CHAPTER_COMPLETED = "ChapterCompleted"
+    DOWNLOAD_PROGRESS = "DownloadProgress"
     CHAPTER_CLIP_EXTRACTED = "ChapterClipExtracted"
     CHAPTER_TRANSCRIBED = "ChapterTranscribed"
     CAPTIONS_GENERATED = "CaptionsGenerated"

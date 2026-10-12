@@ -63,6 +63,8 @@ function job(status: JobState['status']): JobState {
     destination_folder: '/tmp/x',
     video_path: '/tmp/x/v.mp4',
     chapters: {},
+    chapters_total: 0,
+    chapters_done: 0,
     output_paths: [],
     error: null,
   } as unknown as JobState
