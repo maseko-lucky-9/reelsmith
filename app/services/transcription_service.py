@@ -11,6 +11,8 @@ Provider (``YTVIDEO_TRANSCRIPTION_PROVIDER``): ``whisper`` or ``stub``.
   ``cublas64_12.dll``) loads the model fine and only fails on the first decode,
   so under ``auto`` that ``RuntimeError`` reloads the model on the CPU and
   retries once (``_decode_with_cpu_fallback``); later calls stay on the CPU.
+  Before the first non-CPU load, ``cuda_runtime.ensure_cublas`` preloads the pip
+  ``nvidia-cublas-cu12`` DLLs on Windows so the GPU is normally usable.
 * **Language** — job languages are BCP-47 tags (``"en-US"``), which
   faster-whisper rejects with ``ValueError``; ``resolve_language`` maps them to
   the ISO 639-1 code Whisper knows (see its docstring for the fallbacks).
@@ -46,7 +48,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import app.logging_config  # noqa: F401
-from app.services import ffmpeg_tools
+from app.services import cuda_runtime, ffmpeg_tools
 from app.settings import settings
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -146,6 +148,8 @@ def _get_model() -> WhisperModel:
                 from faster_whisper import WhisperModel
 
                 device = "cpu" if _cpu_fallback else settings.whisper_device
+                if device != "cpu":
+                    cuda_runtime.ensure_cublas()
                 log.info(
                     "Loading Whisper model  name=%s  device=%s  cpu_threads=%d",
                     settings.whisper_model,
@@ -158,7 +162,10 @@ def _get_model() -> WhisperModel:
                     compute_type="int8",
                     cpu_threads=settings.whisper_cpu_threads,
                 )
-                log.info("Whisper model loaded")
+                log.info(
+                    "Whisper model loaded  device=%s",
+                    getattr(getattr(_model, "model", None), "device", device),
+                )
     return _model
 
 
@@ -180,8 +187,9 @@ def _switch_to_cpu(exc: BaseException) -> None:
     with _model_lock:
         if not _cpu_fallback:
             log.warning(
-                "Whisper cannot use CUDA (%s); falling back to the CPU. "
-                "Set YTVIDEO_WHISPER_DEVICE=cpu to skip the GPU attempt.",
+                "Whisper cannot use CUDA (%s); falling back to the CPU. On Windows install "
+                "cuBLAS 12 (pip install nvidia-cublas-cu12); set YTVIDEO_WHISPER_DEVICE=cpu "
+                "to skip the GPU attempt.",
                 exc,
             )
         _cpu_fallback = True
