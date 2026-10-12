@@ -12,6 +12,7 @@ job_queue (asyncio.Queue) → queue worker → AsyncEventBus.publish(VIDEO_REQUE
 run_orchestrator  (max_concurrent_jobs semaphore around each _run_job;
     │              jobs waiting for a slot stay "pending")
     ├─ FOLDER_CREATED
+    ├─ DOWNLOAD_PROGRESS       (yt-dlp sources, integer % rises; not replayed)
     ├─ VIDEO_DOWNLOADED
     ├─ SEGMENTS_PROPOSED, SEGMENT_SCORED  (opt-in clip discovery, no-chapter sources only)
     ├─ CHAPTERS_DETECTED
@@ -27,7 +28,8 @@ run_orchestrator  (max_concurrent_jobs semaphore around each _run_job;
     │   ├─ CLIP_RENDERED           (opt-in face-track reframe runs just before it)
     │   ├─ THUMBNAIL_GENERATED
     │   ├─ AI_HOOK_GENERATED
-    │   └─ SOCIAL_CONTENT_GENERATED
+    │   ├─ SOCIAL_CONTENT_GENERATED
+    │   └─ CHAPTER_COMPLETED       (after jobs.chapters_done is incremented)
     ├─ EXPORT_COMPLETED
     ├─ MANIFEST_CREATED
     ├─ JOB_COMPLETED
@@ -99,8 +101,11 @@ Two optional inputs extend the same graph (FR-010): `broll` is passed by the orc
 
 ## Live Progress (SSE)
 
-- **Backend.** The backend sends **named** SSE events (`event: <EventType>`, `id: <event_id>`). The event bus keeps its last 200 events and replays this job's events from that history to each new subscriber.
-- **Web.** `web/src/hooks/useJobSSE.ts` registers a listener for every backend event type (a drift test parses `app/domain/events.py`) and dedupes events by `event_id`. It refreshes only `['job', id]` and `['clips', id]` (bursts merged within 500 ms), and `['jobs']` only on terminal events (`JobCompleted`, `JobFailed`, `RepromptFailed`; the backend ends the stream on the same three). The job page does not poll, and its stream is open only while the job is `pending`/`running` or a reprompt it queued is running. A fallback poll runs only when SSE fails.
+- **Backend.** The backend sends **named** SSE events (`event: <EventType>`, `id: <event_id>`). The event bus keeps its last 200 events and replays this job's events from that history to each new subscriber. `DownloadProgress` is not kept in that history, so a reconnect is not replayed up to 100 download ticks.
+- **Counters.** The job carries `chapters_total` (set after the chapters are final, before `ChaptersDetected`) and `chapters_done` (`JobStore.increment_chapters_done`, one atomic `UPDATE … RETURNING` in SQL, before `ChapterCompleted`). Both are columns on `jobs`, so `GET /jobs/{id}` is right after a reload, in the SQL store (which keeps no per-chapter status) and in fallback polling. Only the first run counts; a re-render or a reprompt leaves them alone.
+- **Download %.** `yt_dlp_download` reports progress when the `download_progress` context variable holds a callback (the orchestrator sets it around the download thread). `DownloadTracker` weights each part by the requested formats' sizes (a `before_dl` postprocessor reads them, because yt-dlp's progress hooks see one part at a time) or equally when a size is unknown, never goes down, and calls back only when the integer % rises; `finish()` reports 100 when the download returns, for the single-call merged download where yt-dlp reports one file.
+- **Web.** `web/src/hooks/useJobSSE.ts` registers a listener for every backend event type (a drift test parses `app/domain/events.py`) and dedupes events by `event_id`. It refreshes only `['job', id]` and `['clips', id]` (bursts merged within 500 ms), and `['jobs']` only on terminal events (`JobCompleted`, `JobFailed`, `RepromptFailed`; the backend ends the stream on the same three). The job page does not poll, and its stream is open only while the job is `pending`/`running` or a reprompt it queued is running. A fallback poll runs only when SSE fails. Every (re)connect refetches the job (`onopen`), since a restart fails jobs without an event.
+- **Job page.** `JobProgressTimeline` puts one bar above the stage rows, from `deriveOverallProgress` (`web/src/lib/pipelineStages.ts`): `Queued…` while pending, `Downloading source… 42%` (the last `DownloadProgress`; `DownloadProgress` does not trigger a job refetch), `Detecting chapters…`, then `3 of 10 chapters done · 7 remaining` with the bar at finished chapters ÷ total (no partial credit), or `Failed after 3 of 10 chapters` / `Failed before chapters were detected` in red. The stage rows take their total from `chapters_total`, floor their counts at `chapters_done`, and mark workspace, download and chapter detection done once the total is known.
 
 ## Bulk Export
 

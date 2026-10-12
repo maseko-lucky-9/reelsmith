@@ -167,7 +167,7 @@ function JobDetailPage() {
         </div>
 
         {/* Job status */}
-        <p className="text-sm font-medium text-white truncate max-w-[200px]">
+        <p data-testid="job-status" className="text-sm font-medium text-white truncate max-w-[200px]">
           {jobStatusLabel(job.status)}
         </p>
 

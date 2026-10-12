@@ -5,8 +5,8 @@ SQL store had no columns for them, so they were lost on the next read and the
 job page showed "Loading title..." forever. Nullable: jobs created before this
 migration keep no title or duration (the UI falls back to the source URL).
 
-Revision ID: p4q5r6s7t8u9
-Revises: o3p4q5r6s7t8
+Revision ID: q5r6s7t8u9v0
+Revises: p4q5r6s7t8u9
 Create Date: 2026-10-12 09:00:00.000000
 
 """
@@ -16,8 +16,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = "p4q5r6s7t8u9"
-down_revision: Union[str, None] = "o3p4q5r6s7t8"
+revision: str = "q5r6s7t8u9v0"
+down_revision: Union[str, None] = "p4q5r6s7t8u9"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

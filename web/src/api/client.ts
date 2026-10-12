@@ -36,6 +36,10 @@ export interface JobState {
   title: string | null
   duration: number | null
   chapters: Record<string, ChapterArtifacts>
+  /** Chapters the job will process; 0 until detected. Persisted by both stores, unlike `chapters`. */
+  chapters_total: number
+  /** Chapters that finished every stage; 0 until the first one does. */
+  chapters_done: number
   output_paths: string[]
   error: string | null
   prompt?: string | null

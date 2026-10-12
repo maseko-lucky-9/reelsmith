@@ -63,6 +63,8 @@ function job(status: JobState['status'], overrides: Partial<JobState> = {}): Job
     destination_folder: '/tmp/x',
     video_path: '/tmp/x/v.mp4',
     chapters: {},
+    chapters_total: 0,
+    chapters_done: 0,
     output_paths: [],
     error: null,
     ...overrides,
@@ -305,7 +307,7 @@ describe('JobDetailPage — header title and status', () => {
 
   it('says Failed for a failed job', async () => {
     await renderPage('failed', { title: null, error: 'boom' })
-    expect(screen.getByText('Failed')).toBeTruthy()
+    expect(screen.getByTestId('job-status').textContent).toBe('Failed')
   })
 })
 

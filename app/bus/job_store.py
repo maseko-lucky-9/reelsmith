@@ -33,6 +33,7 @@ class JobStoreProtocol(Protocol):
     async def create(self, state: JobState) -> JobState: ...
     async def get(self, job_id: str) -> JobState: ...
     async def update(self, job_id: str, mutator: Callable[[JobState], None]) -> JobState: ...
+    async def increment_chapters_done(self, job_id: str) -> tuple[int, int]: ...
     async def upsert_chapter(
         self, job_id: str, mutator: Callable[[ChapterArtifacts], None], chapter_index: int
     ) -> ChapterArtifacts: ...
@@ -87,6 +88,16 @@ class InMemoryJobStore:
                 raise JobNotFoundError(job_id) from e
             mutator(state)
             return state
+
+    async def increment_chapters_done(self, job_id: str) -> tuple[int, int]:
+        """Count one more finished chapter; return (done, total)."""
+        async with self._lock:
+            try:
+                state = self._jobs[job_id]
+            except KeyError as e:
+                raise JobNotFoundError(job_id) from e
+            state.chapters_done += 1
+            return state.chapters_done, state.chapters_total
 
     async def upsert_chapter(
         self,
@@ -234,6 +245,7 @@ class SqlJobStore:
                 brand_template_id=state.brand_template_id,
                 pipeline_options=state.pipeline_options.model_dump(),
                 video_path=state.video_path,
+                chapters_total=state.chapters_total,
                 title=state.title,
                 duration=state.duration,
             )
@@ -285,10 +297,33 @@ class SqlJobStore:
             record.brand_template_id = state.brand_template_id
             record.pipeline_options = state.pipeline_options.model_dump()
             record.video_path = state.video_path
+            # Not chapters_done: this snapshot may predate a concurrent
+            # increment_chapters_done, and writing it back would undo that.
+            record.chapters_total = state.chapters_total
             record.title = state.title
             record.duration = state.duration
             await session.commit()
         return state
+
+    async def increment_chapters_done(self, job_id: str) -> tuple[int, int]:
+        """Count one more finished chapter (one atomic UPDATE, so concurrent
+        chapters lose no increment); return (done, total)."""
+        from sqlalchemy import update
+
+        from app.db.models import JobRecord
+
+        async with self._factory() as session:
+            result = await session.execute(
+                update(JobRecord)
+                .where(JobRecord.id == job_id)
+                .values(chapters_done=JobRecord.chapters_done + 1)
+                .returning(JobRecord.chapters_done, JobRecord.chapters_total)
+            )
+            row = result.one_or_none()
+            await session.commit()
+        if row is None:
+            raise JobNotFoundError(job_id)
+        return row[0], row[1]
 
     async def upsert_chapter(
         self,
@@ -528,6 +563,8 @@ def _record_to_state(record: Any) -> JobState:
         brand_template_id=getattr(record, "brand_template_id", None),
         pipeline_options=pipeline_opts,
         video_path=getattr(record, "video_path", None),
+        chapters_total=getattr(record, "chapters_total", None) or 0,
+        chapters_done=getattr(record, "chapters_done", None) or 0,
         title=getattr(record, "title", None),
         duration=getattr(record, "duration", None),
     )
