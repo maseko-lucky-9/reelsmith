@@ -52,7 +52,7 @@ class FakeEventSource {
   }
 }
 
-function job(status: JobState['status']): JobState {
+function job(status: JobState['status'], overrides: Partial<JobState> = {}): JobState {
   return {
     job_id: 'job-1',
     status,
@@ -65,11 +65,12 @@ function job(status: JobState['status']): JobState {
     chapters: {},
     output_paths: [],
     error: null,
+    ...overrides,
   } as unknown as JobState
 }
 
-async function renderPage(status: JobState['status']) {
-  vi.mocked(api.getJob).mockResolvedValue(job(status))
+async function renderPage(status: JobState['status'], overrides: Partial<JobState> = {}) {
+  vi.mocked(api.getJob).mockResolvedValue(job(status, overrides))
   vi.mocked(api.listClips).mockResolvedValue([])
   vi.spyOn(jobDetailRoute, 'useParams').mockReturnValue({ jobId: 'job-1' } as never)
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -278,3 +279,33 @@ describe('JobDetailPage — reprompt', () => {
     expect(openStreams()).toEqual([])
   })
 })
+
+describe('JobDetailPage — header title and status', () => {
+  it('shows the job title and the status word, not a placeholder', async () => {
+    await renderPage('completed', { title: 'NASA Earth Minute' })
+    expect(screen.getByText('NASA Earth Minute')).toBeTruthy()
+    expect(screen.getByText('Completed')).toBeTruthy()
+    expect(screen.queryByText('Loading title…')).toBeNull()
+    expect(screen.queryByText('Processing…')).toBeNull()
+  })
+
+  it('does not say "Loading title…" or "Processing…" for a completed job with no title', async () => {
+    await renderPage('completed', { title: null, url: 'https://www.youtube.com/watch?v=abc123' })
+    expect(screen.getByText('youtube.com/watch?v=abc123')).toBeTruthy()
+    expect(screen.getByText('Completed')).toBeTruthy()
+    expect(screen.queryByText('Loading title…')).toBeNull()
+    expect(screen.queryByText('Processing…')).toBeNull()
+  })
+
+  it('still shows the placeholders while the job is running', async () => {
+    await renderPage('running', { title: null })
+    expect(screen.getByText('Loading title…')).toBeTruthy()
+    expect(screen.getAllByText('Processing…').length).toBeGreaterThan(0)
+  })
+
+  it('says Failed for a failed job', async () => {
+    await renderPage('failed', { title: null, error: 'boom' })
+    expect(screen.getByText('Failed')).toBeTruthy()
+  })
+})
+

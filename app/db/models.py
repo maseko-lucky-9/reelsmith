@@ -47,6 +47,8 @@ class JobRecord(Base):
     # Downloaded source video; kept so a single clip can be re-rendered.
     # NULL for jobs created before this column existed.
     video_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    duration: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_now
     )

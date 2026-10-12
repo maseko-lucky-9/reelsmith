@@ -234,6 +234,8 @@ class SqlJobStore:
                 brand_template_id=state.brand_template_id,
                 pipeline_options=state.pipeline_options.model_dump(),
                 video_path=state.video_path,
+                title=state.title,
+                duration=state.duration,
             )
             session.add(record)
             await session.commit()
@@ -283,6 +285,8 @@ class SqlJobStore:
             record.brand_template_id = state.brand_template_id
             record.pipeline_options = state.pipeline_options.model_dump()
             record.video_path = state.video_path
+            record.title = state.title
+            record.duration = state.duration
             await session.commit()
         return state
 
@@ -524,6 +528,8 @@ def _record_to_state(record: Any) -> JobState:
         brand_template_id=getattr(record, "brand_template_id", None),
         pipeline_options=pipeline_opts,
         video_path=getattr(record, "video_path", None),
+        title=getattr(record, "title", None),
+        duration=getattr(record, "duration", None),
     )
 
 

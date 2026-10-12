@@ -14,6 +14,7 @@ import { TimelineErrorBoundary } from '@/components/timeline-error-boundary'
 import { PlatformChip } from '@/components/platform-chip'
 import { RepromptForm } from '@/components/reprompt-form'
 import type { PipelineEvent } from '@/lib/pipelineStages'
+import { jobDisplayTitle, jobStatusLabel } from '@/lib/jobTitle'
 
 export const jobDetailRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -126,19 +127,17 @@ function JobDetailPage() {
   return (
     <div className="space-y-4">
       {/* Header: title + platform chip + duration (visible during processing & after) */}
-      {(job.source || job.title) && (
-        <div className="flex items-center gap-2 flex-wrap">
-          {job.source && <PlatformChip platform={job.source} />}
-          <span className="text-sm font-medium text-white truncate max-w-md">
-            {job.title ?? 'Loading title…'}
+      <div className="flex items-center gap-2 flex-wrap">
+        {job.source && <PlatformChip platform={job.source} />}
+        <span className="text-sm font-medium text-white truncate max-w-md">
+          {jobDisplayTitle(job)}
+        </span>
+        {job.duration != null && (
+          <span className="text-xs text-zinc-500 tabular-nums">
+            {formatDuration(job.duration)}
           </span>
-          {job.duration != null && (
-            <span className="text-xs text-zinc-500 tabular-nums">
-              {formatDuration(job.duration)}
-            </span>
-          )}
-        </div>
-      )}
+        )}
+      </div>
 
       {/* Live progress timeline during pending/running/failed */}
       {showTimeline && (
@@ -167,9 +166,9 @@ function JobDetailPage() {
           </button>
         </div>
 
-        {/* Job title */}
+        {/* Job status */}
         <p className="text-sm font-medium text-white truncate max-w-[200px]">
-          {job.title ?? 'Processing…'}
+          {jobStatusLabel(job.status)}
         </p>
 
         {/* Search */}
