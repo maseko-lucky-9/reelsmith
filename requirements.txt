@@ -26,6 +26,11 @@ av==18.1.0
 # Transcription. Transitives pinned so the real-model path can't drift
 # (guarded by tests/integration/test_whisper_real.py).
 faster-whisper==1.2.1
+# Windows GPU decoding: the ctranslate2 wheel bundles cuDNN but not cuBLAS, and
+# app/services/cuda_runtime.py preloads these DLLs. Without them Whisper falls
+# back to the CPU. Not installed (or needed) on Linux/macOS.
+nvidia-cublas-cu12==12.9.2.10; sys_platform == "win32"
+nvidia-cuda-nvrtc-cu12==12.9.86; sys_platform == "win32"  # dependency of nvidia-cublas-cu12
 ctranslate2==4.8.2
 tokenizers==0.23.2
 onnxruntime==1.30.0
