@@ -341,16 +341,16 @@ async def test_reprompt_retires_old_clips_only_after_every_new_clip_rendered(
     ]
 
 
-async def test_reprompt_clip_indexes_follow_the_existing_ones(harness, memory_store):
-    old = await harness.complete_job(memory_store)
+async def test_reprompt_clip_indexes_follow_the_existing_ones(harness, store):
+    old = await harness.complete_job(store)
     old_bytes = {c["output_path"]: Path(c["output_path"]).read_bytes() for c in old}
 
-    await harness.reprompt(memory_store)
+    await harness.reprompt(store)
 
     for path, data in old_bytes.items():
         assert Path(path).read_bytes() == data
-    assert _names(await _live(memory_store)) == ["02_Alpha.mp4", "03_Gamma.mp4"]
-    job = await memory_store.get(JOB_ID)
+    assert _names(await _live(store)) == ["02_Alpha.mp4", "03_Gamma.mp4"]
+    job = await store.get(JOB_ID)
     assert sorted(job.chapters) == [2, 3]
 
 
@@ -469,13 +469,13 @@ async def test_failed_reprompt_keeps_the_old_clips(harness, store):
     assert list((harness.clips / "_tmp").iterdir()) == []
 
 
-async def test_failed_reprompt_drops_its_chapters_from_the_job(harness, memory_store):
-    await harness.complete_job(memory_store)
+async def test_failed_reprompt_drops_its_chapters_from_the_job(harness, store):
+    await harness.complete_job(store)
     harness.fail_on = {"03_Gamma.mp4"}
 
-    await harness.reprompt(memory_store)
+    await harness.reprompt(store)
 
-    assert sorted((await memory_store.get(JOB_ID)).chapters) == [0, 1]
+    assert sorted((await store.get(JOB_ID)).chapters) == [0, 1]
 
 
 async def test_reprompt_with_no_kept_segment_fails_softly(harness, memory_store):

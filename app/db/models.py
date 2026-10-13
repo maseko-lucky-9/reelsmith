@@ -56,6 +56,9 @@ class JobRecord(Base):
     chapters_done: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0")
     )
+    # JobState fields without a column of their own (title, duration,
+    # current_step, folders, request options, ...). Empty for older rows.
+    state: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_now
     )
@@ -82,6 +85,8 @@ class ChapterRecord(Base):
     title: Mapped[str] = mapped_column(Text, nullable=False, default="")
     start_time: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     end_time: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    # One chapter's ChapterArtifacts. Empty for rows written before it existed.
+    artifacts: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     job: Mapped[JobRecord] = relationship("JobRecord", back_populates="chapters")
     clips: Mapped[list[ClipRecord]] = relationship(

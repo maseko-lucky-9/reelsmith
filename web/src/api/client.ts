@@ -184,9 +184,11 @@ async function apiUpload(path: string, formData: FormData): Promise<Response> {
 export const api = {
   health: () => apiFetch<{ status: string; job_store: string }>('/api/health'),
 
+  // The API's own default is 20 jobs, which hid the older history.
+  // ponytail: one page of 500; add "load more" pagination when history outgrows it.
   listJobs: (params?: { limit?: number; offset?: number; search?: string }) => {
     const q = new URLSearchParams()
-    if (params?.limit != null) q.set('limit', String(params.limit))
+    q.set('limit', String(params?.limit ?? 500))
     if (params?.offset != null) q.set('offset', String(params.offset))
     if (params?.search) q.set('search', params.search)
     return apiFetch<JobState[]>(`/api/jobs?${q}`)

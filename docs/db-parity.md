@@ -29,9 +29,14 @@ The SQL flavour is determined entirely by `YTVIDEO_DB_URL`. There is no
 | E2E (`tests/e2e/`) | Postgres via real app stack | per-test |
 | Web Playwright (`web/tests/e2e/`) | n/a (frontend smoke) | n/a |
 
-The `db_store` fixture in [tests/conftest.py](../tests/conftest.py) hard-pins
-`postgresql+asyncpg://reelsmith:reelsmith@localhost:5432/reelsmith`. Run
-integration tests after `docker compose up -d postgres`.
+The `db_store` fixture in [tests/conftest.py](../tests/conftest.py) uses
+`YTVIDEO_TEST_DB_URL`, default
+`postgresql+asyncpg://reelsmith:reelsmith@localhost:5432/reelsmith_test`. It
+TRUNCATEs the job tables, so [tests/db_safety.py](../tests/db_safety.py)
+refuses a non-local host and any database whose name does not end in `_test`;
+the app's own database (`reelsmith`) is never used. The fixture creates the
+test database and migrates it to head on first use. Run integration tests
+after `docker compose up -d --wait postgres`.
 
 ## Migration rules (additive-only)
 
