@@ -8,7 +8,7 @@ The 23 original jobs have no stored title or duration (the page says "Processing
 
 ## Requirements
 
-- **FR-001**: For a job with an `http(s)` URL whose title is blank (or `Inbox export …`) or whose duration is unset, the tool MUST fetch the title and duration with `download=False` once per distinct URL and write them into the job's `state`. A title or duration already set MUST NOT be overwritten.
+- **FR-001**: For a job with an `http(s)` URL whose title is blank (or `Inbox export …`) or whose duration is unset, the tool MUST fetch the title and duration of that single video without downloading it, once per distinct URL, and only for a `completed` or `failed` job, and write them into the job's `state`. A title or duration already set MUST NOT be overwritten.
 - **FR-002**: A failed fetch MUST leave the job unchanged, MUST be reported with the job and the reason, and MUST NOT stop the other jobs.
 - **FR-003**: An `upload://` job MUST get its file stem as title and no fetch. An `inbox://` job MUST get the title of the `<SLUG>-<id8>` in its manifest's `thumbnail_path` only when the id matches the job; the export folder MUST only be read.
 - **FR-004**: `--drop-placeholders` MUST delete an `inbox://` job, its chapters and its clips only when it has clips and every clip file exists and is under 8 bytes. A missing file, a real file, a job with no clips and a job with a real URL MUST all be kept.

@@ -25,8 +25,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import csv
+import logging
 import re
-from collections.abc import Callable, Mapping
+import sys
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -35,14 +37,17 @@ from urllib.parse import urlparse
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.bus.job_store import INTERRUPTIBLE_STATUSES
 from app.db.models import ChapterRecord, ClipRecord, JobRecord
+from app.services.yt_dlp_metadata import dump_json
 from app.settings import settings
 from scripts.map_inbox_to_db import MIN_MP4_BYTES
 
 PLACEHOLDER_TITLE = "Inbox export "  # the title map_inbox_to_db gives a job it cannot name
 _SLUG = re.compile(r"/([^/]+)-([0-9a-f]{8})/clips/")  # <download_path>/<title slug>-<job id8>/clips/...
 _JOB_ID = re.compile(r"[0-9a-f]{32}")
-Fetch = Callable[[str], Mapping[str, Any]]
+FETCH_TIMEOUT = 60.0  # seconds per URL; the lookup is a child process that is killed when it runs out
+Fetch = Callable[[str], Awaitable[Mapping[str, Any]]]
 
 
 @dataclass(slots=True)
@@ -52,13 +57,11 @@ class Report:
     dropped: list[str] = field(default_factory=list)
 
 
-def fetch_from_web(url: str) -> dict[str, Any]:
-    """Title and duration of a web page's video, without downloading it."""
-    from yt_dlp import YoutubeDL
-
-    # socket_timeout bounds each network read; this runs in a worker thread no asyncio timeout can stop
-    with YoutubeDL({"quiet": True, "no_warnings": True, "extract_flat": True, "socket_timeout": 10}) as ydl:
-        info = ydl.extract_info(url, download=False)
+async def fetch_from_web(url: str) -> dict[str, Any]:
+    """Title and duration of the one video a URL names, without downloading it (``--no-playlist``)."""
+    info = await dump_json(url, timeout=FETCH_TIMEOUT)
+    if not info.get("title"):
+        raise RuntimeError("yt-dlp found no title: unavailable, private or login needed (see the log)")
     return {"title": info["title"], "duration": info.get("duration")}
 
 
@@ -96,7 +99,13 @@ async def repair_metadata(factory: async_sessionmaker, *, inbox: Path | None, fe
     async with factory() as session:
         jobs = [
             (record.id, record.youtube_url)
-            for record in (await session.execute(select(JobRecord).order_by(JobRecord.created_at))).scalars()
+            for record in (
+                await session.execute(
+                    select(JobRecord)
+                    .where(JobRecord.status.not_in(INTERRUPTIBLE_STATUSES))  # a running job is written by the pipeline
+                    .order_by(JobRecord.created_at)
+                )
+            ).scalars()
             if _needs_title(_state(record)) or _state(record).get("duration") is None
         ]
 
@@ -104,13 +113,15 @@ async def repair_metadata(factory: async_sessionmaker, *, inbox: Path | None, fe
     failed: dict[str, str] = {}
     for url in sorted({url for _, url in jobs if _is_web(url)}):
         try:
-            fetched[url] = await asyncio.to_thread(fetch, url)
+            fetched[url] = await fetch(url)
         except Exception as exc:  # yt-dlp raises its own error types; whatever went wrong, the job stays as it was
             failed[url] = f"{type(exc).__name__}: {(str(exc).splitlines() or [''])[0][:120]}"
 
     async with factory() as session:
         for job_id, url in jobs:
             record = await session.get(JobRecord, job_id)
+            if record is None:  # deleted since it was listed
+                continue
             state = _state(record)
             update: dict[str, Any] = {}
             if _is_web(url):
@@ -118,8 +129,8 @@ async def repair_metadata(factory: async_sessionmaker, *, inbox: Path | None, fe
                     report.skipped.append(f"{job_id[:8]} {url}: {failed[url]}")
                     continue
                 meta = fetched[url]
-                if _needs_title(state):
-                    update["title"] = meta["title"]
+                if _needs_title(state) and str(meta["title"]).strip():
+                    update["title"] = str(meta["title"]).strip()
                 if state.get("duration") is None and meta.get("duration") is not None:
                     update["duration"] = float(meta["duration"])
             elif _needs_title(state):
@@ -149,7 +160,10 @@ def _is_placeholder(raw: str | None) -> bool:
 
 
 async def drop_placeholders(factory: async_sessionmaker, *, apply: bool) -> Report:
-    """Delete the ``inbox://`` jobs that hold nothing but placeholder clips, with their chapters and clips."""
+    """Delete the ``inbox://`` jobs that hold nothing but placeholder clips, with their chapters and clips.
+
+    A dry run only reads: no DELETE is issued, so no row is locked while the files are checked.
+    """
     report = Report()
     async with factory() as session:
         job_ids = (
@@ -160,14 +174,12 @@ async def drop_placeholders(factory: async_sessionmaker, *, apply: bool) -> Repo
         for job_id in job_ids:
             paths = (await session.execute(select(ClipRecord.output_path).where(ClipRecord.job_id == job_id))).all()
             if paths and all(_is_placeholder(path) for (path,) in paths):
-                await session.execute(delete(ClipRecord).where(ClipRecord.job_id == job_id))
-                await session.execute(delete(ChapterRecord).where(ChapterRecord.job_id == job_id))
-                await session.execute(delete(JobRecord).where(JobRecord.id == job_id))
                 report.dropped.append(job_id[:8])
-        if apply:
-            await session.commit()
-        else:
-            await session.rollback()
+                if apply:
+                    await session.execute(delete(ClipRecord).where(ClipRecord.job_id == job_id))
+                    await session.execute(delete(ChapterRecord).where(ChapterRecord.job_id == job_id))
+                    await session.execute(delete(JobRecord).where(JobRecord.id == job_id))
+        await session.commit()
     return report
 
 
@@ -179,7 +191,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--db-url", default=None, help="default: YTVIDEO_DB_URL")
     args = parser.parse_args(argv)
     inbox = args.inbox or (Path(settings.export_base_folder) if settings.export_base_folder else None)
-    inbox = inbox if inbox is not None and inbox.is_dir() else None
+    if inbox is None or not inbox.is_dir():
+        if not args.drop_placeholders:
+            print("export folder not found: titles from manifests are skipped", file=sys.stderr)
+        inbox = None
+    logging.basicConfig(level=logging.INFO, format="  yt-dlp: %(message)s")
 
     async def run() -> Report:
         engine = create_async_engine(args.db_url or settings.db_url, hide_parameters=True)

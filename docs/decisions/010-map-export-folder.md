@@ -31,7 +31,7 @@ The last row decided the order of work. Pointing live clips at the share without
 
 ## Result on the real data
 
-> **Correction ([ADR-011](011-repair-job-metadata.md)):** 48 of the 52 imported folders held a single 1-byte test-run file, not a real video. They were dropped again and the tool now skips such files. The "162 of 163 live clips play" below counted those files; 115 live clips remained afterwards, all with a real file.
+> **Correction ([ADR-011](011-repair-job-metadata.md)):** 48 of the 52 imported folders held a single 1-byte test-run file, not a real video. They were dropped again and the tool now skips such files. The "162 of 163 live clips play" below counted those files; 115 live clips remained afterwards: 114 with a real file (all present) and 1 with no recorded path.
 
 - 55 clips re-pointed (33 live, 22 retired), then 1 more (the enhanced clip, found by playing every clip, not by the counts). 52 folders imported as jobs with 125 clips; 75 jobs in total. A database dump was taken first.
 - 162 of 163 live clips answer a range request with HTTP 206. The one that does not has no recorded path and no file anywhere: its folder holds only a manifest.

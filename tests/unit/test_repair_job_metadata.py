@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.bus.job_store import SqlJobStore
@@ -33,7 +33,7 @@ class Fetcher:
         self.answers = answers
         self.calls: list[str] = []
 
-    def __call__(self, url: str) -> dict[str, Any]:
+    async def __call__(self, url: str) -> dict[str, Any]:
         self.calls.append(url)
         answer = self.answers[url]
         if isinstance(answer, Exception):
@@ -68,7 +68,7 @@ async def _add_job(
     *,
     state: dict | None = None,
     status: str = "completed",
-    clips: tuple[Path, ...] = (),
+    clips: tuple[Path | None, ...] = (),
 ) -> None:
     async with factory() as session:
         session.add(JobRecord(id=job_id, youtube_url=url, status=status, state=state))
@@ -80,7 +80,7 @@ async def _add_job(
                     id=chapter_id, job_id=job_id, chapter_index=index, title="c", start_time=0.0, end_time=1.0
                 )
             )
-            session.add(ClipRecord(job_id=job_id, chapter_id=chapter_id, output_path=str(path)))
+            session.add(ClipRecord(job_id=job_id, chapter_id=chapter_id, output_path=str(path) if path else None))
         await session.commit()
 
 
@@ -297,3 +297,97 @@ async def test_only_a_job_that_is_nothing_but_placeholders_is_dropped(db, tmp_pa
     assert await _count(factory, JobRecord) == 5, (
         "a real file, a mix, a real URL, a merely missing file (an unmounted share) and no clips all stay"
     )
+
+
+# -- review fixes ---------------------------------------------------------------
+
+
+async def test_a_job_that_is_still_running_is_left_to_the_pipeline(db):
+    factory, new_store = db
+    running, pending = _job_id(), _job_id()
+    await _add_job(factory, running, YT, status="running")
+    await _add_job(factory, pending, YT, status="pending")
+    fetch = Fetcher({YT: {"title": "Too early", "duration": 1}})
+
+    await repair.repair_metadata(factory, inbox=None, fetch=fetch, apply=True)
+
+    assert [(await new_store().get(j)).title for j in (running, pending)] == [None, None]
+    assert fetch.calls == []
+
+
+async def test_the_fetched_title_is_trimmed(db):
+    factory, new_store = db
+    job = _job_id()
+    await _add_job(factory, job, YT)
+
+    await repair.repair_metadata(
+        factory, inbox=None, fetch=Fetcher({YT: {"title": "  3 layer ai stack \n", "duration": 1}}), apply=True
+    )
+
+    assert (await new_store().get(job)).title == "3 layer ai stack"
+
+
+async def test_a_job_deleted_after_it_was_listed_is_skipped_not_fatal(db):
+    factory, new_store = db
+    gone, kept = _job_id(), _job_id()
+    await _add_job(factory, gone, YT)
+    await _add_job(factory, kept, "https://www.youtube.com/watch?v=kept")
+
+    async def fetch(url: str) -> dict[str, Any]:
+        async with factory() as session:  # the job disappears while the metadata is being fetched
+            await session.execute(JobRecord.__table__.delete().where(JobRecord.id == gone))
+            await session.commit()
+        return {"title": "T", "duration": 1}
+
+    await repair.repair_metadata(factory, inbox=None, fetch=fetch, apply=True)
+
+    assert (await new_store().get(kept)).title == "T"
+
+
+async def test_fetch_from_web_returns_title_and_duration_and_rejects_an_empty_answer(monkeypatch):
+    answers: list[dict[str, Any]] = [{"title": "A Talk", "duration": 61, "id": "x"}, {}]
+
+    async def dump_json(url: str, *, timeout: float) -> dict[str, Any]:
+        assert timeout == repair.FETCH_TIMEOUT
+        return answers.pop(0)
+
+    monkeypatch.setattr(repair, "dump_json", dump_json)
+
+    assert await repair.fetch_from_web(YT) == {"title": "A Talk", "duration": 61}
+    with pytest.raises(RuntimeError, match="no title"):
+        await repair.fetch_from_web(YT)
+
+
+async def test_the_drop_dry_run_issues_no_delete(db, tmp_path):
+    factory, _ = db
+    job = _job_id()
+    await _add_job(factory, job, f"inbox://{job}", clips=(_file(tmp_path / "a.mp4", 1),))
+    statements: list[str] = []
+    engine = factory.kw["bind"].sync_engine
+    event.listen(engine, "before_cursor_execute", lambda c, cur, stmt, *a: statements.append(stmt.lstrip()[:6].upper()))
+
+    report = await repair.drop_placeholders(factory, apply=False)
+
+    assert report.dropped == [job[:8]]
+    assert "DELETE" not in statements
+
+
+async def test_the_placeholder_boundary_is_eight_bytes(db, tmp_path):
+    factory, _ = db
+    seven, eight = _job_id(), _job_id()
+    await _add_job(factory, seven, f"inbox://{seven}", clips=(_file(tmp_path / "7.mp4", repair.MIN_MP4_BYTES - 1),))
+    await _add_job(factory, eight, f"inbox://{eight}", clips=(_file(tmp_path / "8.mp4", repair.MIN_MP4_BYTES),))
+
+    report = await repair.drop_placeholders(factory, apply=True)
+
+    assert report.dropped == [seven[:8]]
+
+
+async def test_a_job_with_a_clip_that_has_no_path_is_kept_even_beside_placeholders(db, tmp_path):
+    factory, _ = db
+    job = _job_id()
+    await _add_job(factory, job, f"inbox://{job}", clips=(_file(tmp_path / "a.mp4", 1), None))
+
+    report = await repair.drop_placeholders(factory, apply=True)
+
+    assert report.dropped == [] and await _count(factory, JobRecord) == 1
