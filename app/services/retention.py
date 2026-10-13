@@ -19,7 +19,7 @@ folders (T030) can share one path across jobs. A file or folder that cannot
 be deleted is logged and skipped; a database error propagates. ``exports/``
 copies and manifests, and ``_tmp`` leftovers, are not swept.
 
-Safety of sweeps 2 and 3. Paths read from the database are untrusted: a value
+Safety of every sweep. Paths read from the database are untrusted: a value
 with a NUL byte, a relative path or a ``..`` component is never used to
 delete anything (``_checked``) and no filesystem call is made for it. The
 others are resolved and must lie below a managed root (``managed_roots``).
@@ -75,14 +75,19 @@ async def sweep_expired_clips(
     *,
     retention_days: int,
     now: datetime,
+    roots: Sequence[Path] | None = None,
 ) -> list[str]:
     """Retire expired live clips, then delete their files.
 
     ``now`` must be timezone-aware; it is converted to UTC because SQLite
     stores timestamps as naive wall-clock strings. Returns the retired clip
-    ids. A file that cannot be deleted is logged and skipped; a database
-    error propagates (nothing has been deleted at that point).
+    ids. A file is deleted only below a managed root (``roots``, default
+    ``managed_roots()``): a clip may point at a copy the app does not own, such
+    as one in ``export_base_folder``, and that is retired but never deleted.
+    A file that cannot be deleted is logged and skipped; a database error
+    propagates (nothing has been deleted at that point).
     """
+    roots = managed_roots() if roots is None else roots
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
     cutoff = now.astimezone(UTC) - timedelta(days=retention_days)
@@ -121,10 +126,14 @@ async def sweep_expired_clips(
                     "retention: kept %s (clip %s): a live clip still uses it", raw, clip_id
                 )
                 continue
-            try:
-                Path(raw).unlink(missing_ok=True)
-            except OSError:
-                log.exception("retention: could not delete %s (clip %s)", raw, clip_id)
+            path = _checked(raw)
+            if path is None:
+                log.warning("retention: kept %s (clip %s): not a safe path", raw, clip_id)
+                continue
+            if os.path.islink(raw):  # `path` is its target, which a live clip may use
+                log.warning("retention: kept %s (clip %s): it is a symlink", raw, clip_id)
+                continue
+            delete_below_root(path, roots, owner=f"expired clip {clip_id}")
     return [row[0] for row in rows]
 
 
@@ -178,6 +187,13 @@ def _aliases(raw: str) -> set[str]:
 def _is_managed(path: Path, roots: Sequence[Path]) -> bool:
     """True when the resolved ``path`` lies below a root and is not a root."""
     return path not in roots and any(path.is_relative_to(root) for root in roots)
+
+
+def is_managed_file(raw: str | None) -> bool:
+    """True when a database path lies below a managed root: a file the app may
+    write beside and the janitor may delete. False for an export copy."""
+    path = _checked(raw)
+    return path is not None and _is_managed(path, managed_roots())
 
 
 # ── Deleting, re-validated at the moment of deletion ──────────────────────────
@@ -686,7 +702,7 @@ async def run_retention_sweeps(
     roots = managed_roots()
     report = RetentionReport(
         retired_clip_ids=await sweep_expired_clips(
-            factory, retention_days=settings.retention_days, now=now
+            factory, retention_days=settings.retention_days, now=now, roots=roots
         ),
         cleaned_job_ids=await sweep_unused_sources(
             factory,

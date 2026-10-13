@@ -19,7 +19,8 @@ from app.db.base import Base
 from app.db.models import ClipRecord, JobRecord
 from app.domain.ids import new_job_id
 from app.services.folder_service import create_video_subfolder
-from app.services.retention import sweep_expired_clips
+from app.services.retention import run_retention_sweeps, sweep_expired_clips
+from app.settings import settings
 
 RETENTION_DAYS = 30
 NOW = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
@@ -30,6 +31,13 @@ NEW = NOW - timedelta(days=RETENTION_DAYS) + timedelta(hours=1)
 def _file(path: Path, data: bytes = b"x") -> Path:
     path.write_bytes(data)
     return path
+
+
+@pytest.fixture(autouse=True)
+def _managed_download_root(monkeypatch, tmp_path):
+    """The folder the sweeps may delete below, as in production: the download
+    path. Files these tests expect to be deleted live directly in it."""
+    monkeypatch.setattr(settings, "default_download_path", str(tmp_path))
 
 
 @pytest.fixture
@@ -262,3 +270,99 @@ async def test_a_path_shared_with_a_live_clip_is_not_deleted(factory, tmp_path):
     assert flags[ids["old"]] is True
     assert flags[ids["new"]] is False
     assert shared.read_bytes() == b"newer job"
+
+
+# -- Files outside the managed folders are never deleted -----------------------
+#
+# ``export_base_folder`` (a Syncthing share, say) holds copies the app does not
+# own, and deleting there propagates to other devices. A clip record may point
+# at such a copy, so the expiry sweep must delete only below a managed root,
+# like the other two sweeps.
+
+
+async def _expired_clip_at(factory, mp4: Path, jpg: Path | None = None) -> str:
+    async with factory() as session:
+        job = JobRecord(youtube_url="https://x.test", created_at=OLD)
+        session.add(job)
+        await session.flush()
+        clip = ClipRecord(
+            job_id=job.id,
+            output_path=str(mp4),
+            thumbnail_path=str(jpg) if jpg else None,
+            created_at=OLD,
+        )
+        session.add(clip)
+        await session.commit()
+        return clip.id
+
+
+async def test_expired_clip_outside_the_managed_roots_is_retired_but_its_files_are_kept(
+    factory, tmp_path, monkeypatch
+):
+    managed = tmp_path / "managed"
+    inbox = tmp_path / "inbox"
+    managed.mkdir()
+    inbox.mkdir()
+    monkeypatch.setattr(settings, "default_download_path", str(managed))
+    mp4, jpg = _file(inbox / "00_Clip.mp4"), _file(inbox / "00_Clip.jpg")
+    clip_id = await _expired_clip_at(factory, mp4, jpg)
+
+    swept = await sweep_expired_clips(factory, retention_days=RETENTION_DAYS, now=NOW)
+
+    assert swept == [clip_id], "the clip is still retired"
+    assert (await _retired_flags(factory))[clip_id] is True
+    assert mp4.exists() and jpg.exists(), "a file outside the managed roots must not be deleted"
+
+
+async def test_expired_clip_below_a_managed_root_is_still_deleted(factory, tmp_path, monkeypatch):
+    managed = tmp_path / "managed"
+    (managed / "job").mkdir(parents=True)
+    monkeypatch.setattr(settings, "default_download_path", str(managed))
+    mp4 = _file(managed / "job" / "00_Clip.mp4")
+    await _expired_clip_at(factory, mp4)
+
+    await sweep_expired_clips(factory, retention_days=RETENTION_DAYS, now=NOW)
+
+    assert not mp4.exists()
+
+
+async def test_an_expired_clip_that_is_a_symlink_to_a_live_clips_file_deletes_nothing(
+    factory, tmp_path, monkeypatch
+):
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    monkeypatch.setattr(settings, "default_download_path", str(managed))
+    target = _file(managed / "00_Live.mp4")
+    link = managed / "00_Old.mp4"
+    link.symlink_to(target)
+    await _expired_clip_at(factory, link)
+    async with factory() as session:
+        job = JobRecord(youtube_url="https://y.test", created_at=NOW)
+        session.add(job)
+        await session.flush()
+        session.add(ClipRecord(job_id=job.id, output_path=str(target), created_at=NOW))
+        await session.commit()
+
+    await sweep_expired_clips(factory, retention_days=RETENTION_DAYS, now=NOW)
+
+    assert target.exists()
+
+
+async def test_a_full_janitor_tick_keeps_the_export_folder_and_cleans_the_download_folder(
+    factory, tmp_path, monkeypatch
+):
+    managed = tmp_path / "managed"
+    inbox = tmp_path / "inbox"
+    managed.mkdir()
+    inbox.mkdir()
+    monkeypatch.setattr(settings, "default_download_path", str(managed))
+    monkeypatch.setattr(settings, "retention_days", RETENTION_DAYS)
+    owned = _file(managed / "00_Owned.mp4")
+    exported = _file(inbox / "00_Exported.mp4")
+    await _expired_clip_at(factory, owned)
+    await _expired_clip_at(factory, exported)
+
+    await run_retention_sweeps(factory, now=NOW, in_flight=lambda *_: False)
+
+    assert not owned.exists()
+    assert exported.exists(), "the janitor must never delete from the export folder"
