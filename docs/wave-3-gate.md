@@ -47,7 +47,11 @@ docker compose --profile worker up -d  # scheduler worker (W3.2)
 ```
 
 `docker-compose.yml` profile changes ship in a follow-up
-infrastructure patch alongside the worker entrypoint. The application
+infrastructure patch alongside the worker entrypoint.
+
+> **Note (2026-10-13):** `docker-compose.yml` defines only the `postgres`
+> service; there is no `worker` profile today, and the scheduler worker was
+> dropped (spec 001, T010). `scripts/start.sh` is the way to start the stack. The application
 runs unchanged when the worker is absent — calendar / analytics views
 are read-only.
 

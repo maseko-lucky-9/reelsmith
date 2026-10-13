@@ -197,7 +197,8 @@ function isOuterStageDone(
   events: PipelineEvent[],
 ): boolean {
   // Cold-mount signal per the hydration table. A known chapter total implies the first
-  // three steps ran; the SQL store returns no current_step/destination_folder/chapters.
+  // three steps ran; a job stored before spec 009 returns no current_step/destination_folder/chapters
+  // (the SQL store kept no per-job step, folder or chapter state then).
   const chaptersKnown = job.chapters_total > 0
   switch (stage.id) {
     case 'folder':
