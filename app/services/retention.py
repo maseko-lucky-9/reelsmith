@@ -19,7 +19,7 @@ folders (T030) can share one path across jobs. A file or folder that cannot
 be deleted is logged and skipped; a database error propagates. ``exports/``
 copies and manifests, and ``_tmp`` leftovers, are not swept.
 
-Safety of sweeps 2 and 3. Paths read from the database are untrusted: a value
+Safety of every sweep. Paths read from the database are untrusted: a value
 with a NUL byte, a relative path or a ``..`` component is never used to
 delete anything (``_checked``) and no filesystem call is made for it. The
 others are resolved and must lie below a managed root (``managed_roots``).
@@ -130,6 +130,9 @@ async def sweep_expired_clips(
             if path is None:
                 log.warning("retention: kept %s (clip %s): not a safe path", raw, clip_id)
                 continue
+            if os.path.islink(raw):  # `path` is its target, which a live clip may use
+                log.warning("retention: kept %s (clip %s): it is a symlink", raw, clip_id)
+                continue
             delete_below_root(path, roots, owner=f"expired clip {clip_id}")
     return [row[0] for row in rows]
 
@@ -184,6 +187,13 @@ def _aliases(raw: str) -> set[str]:
 def _is_managed(path: Path, roots: Sequence[Path]) -> bool:
     """True when the resolved ``path`` lies below a root and is not a root."""
     return path not in roots and any(path.is_relative_to(root) for root in roots)
+
+
+def is_managed_file(raw: str | None) -> bool:
+    """True when a database path lies below a managed root: a file the app may
+    write beside and the janitor may delete. False for an export copy."""
+    path = _checked(raw)
+    return path is not None and _is_managed(path, managed_roots())
 
 
 # ── Deleting, re-validated at the moment of deletion ──────────────────────────

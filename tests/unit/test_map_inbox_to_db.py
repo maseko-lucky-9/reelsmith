@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import os
+import unicodedata
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -20,11 +21,13 @@ from typing import Any
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.bus.job_store import SqlJobStore
 from app.db.migrate import upgrade_to_head
 from app.db.models import ClipRecord, JobRecord
+from app.settings import settings
 from scripts import map_inbox_to_db as mapper
 
 HEADER = [
@@ -369,3 +372,172 @@ async def test_nothing_in_the_inbox_is_ever_modified(inbox, db):
     await mapper.map_inbox(factory, inbox, apply=True)
 
     assert _snapshot(inbox) == before
+
+
+# -- review fixes: the inbox is a share the app must not damage or mis-read ----
+
+
+def test_a_row_listed_twice_is_imported_once_and_reported(inbox):
+    _make_job_folder(
+        inbox, _job_id(), [{"filename": "00_A.mp4", "title": "A"}, {"filename": "00_A.mp4", "title": "A2"}]
+    )
+
+    (found,) = mapper.read_inbox(inbox)
+
+    assert [c.title for c in found.clips] == ["A"]
+    assert any("listed twice" in reason for reason in found.skipped)
+
+
+async def test_a_dry_run_fails_where_apply_would_fail(inbox, db):
+    """The dry run flushes, so a database constraint shows before --apply, not during it."""
+    factory, _ = db
+    job = _job_id()
+    _make_job_folder(inbox, job, [{"filename": "00_A.mp4", "title": "A"}])
+    async with factory() as session:  # another job already owns the id this clip would get
+        session.add(JobRecord(id="other", youtube_url="https://yt.test/o"))
+        await session.flush()
+        session.add(ClipRecord(id=mapper._id(job, "00_A.mp4", "clip"), job_id="other"))
+        await session.commit()
+
+    with pytest.raises(IntegrityError):
+        await mapper.map_inbox(factory, inbox, apply=False)
+
+
+async def test_a_relative_inbox_is_stored_as_an_absolute_path(inbox, db, tmp_path, monkeypatch):
+    factory, new_store = db
+    job = _job_id()
+    _make_job_folder(inbox, job, [{"filename": "00_A.mp4", "title": "A"}])
+    monkeypatch.chdir(tmp_path)
+
+    await mapper.map_inbox(factory, Path("inbox"), apply=True)
+
+    (clip,) = await new_store().list_clips(job_id=job)
+    assert Path(clip["output_path"]).is_absolute() and Path(clip["output_path"]).is_file()
+
+
+async def test_an_inbox_below_a_managed_folder_is_refused(inbox, db, monkeypatch):
+    """The janitor deletes below the download folder; mapped clips there would be its to delete."""
+    factory, _ = db
+    _make_job_folder(inbox, _job_id(), [{"filename": "00_A.mp4", "title": "A"}])
+    monkeypatch.setattr(settings, "default_download_path", str(inbox.parent))
+
+    with pytest.raises(mapper.InboxRefused, match="retention janitor"):
+        await mapper.map_inbox(factory, inbox, apply=True)
+
+    async with factory() as session:
+        assert (await session.execute(select(JobRecord))).first() is None
+
+
+def test_the_command_exits_2_for_an_inbox_below_a_managed_folder(inbox, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(settings, "default_download_path", str(inbox.parent))
+
+    code = mapper.main(["--inbox", str(inbox), "--db-url", f"sqlite+aiosqlite:///{tmp_path / 'never-opened.db'}"])
+
+    assert code == 2
+    assert "retention janitor" in capsys.readouterr().err
+
+
+async def test_a_file_name_matches_whichever_unicode_form_the_disk_manifest_or_database_uses(inbox, db):
+    """macOS can keep 'é' as e + U+0301 on disk while the manifest or the database has it composed, or the reverse."""
+    factory, new_store = db
+    nfc = "13_Alizé Umbrella.mp4"
+    nfd = unicodedata.normalize("NFD", nfc)
+    assert nfc != nfd
+    disk_nfd, manifest_nfd, known = _job_id(), _job_id(), _job_id()
+    for job, in_manifest, on_disk in [(disk_nfd, nfc, nfd), (manifest_nfd, nfd, nfc), (known, nfc, nfc)]:
+        folder = _make_job_folder(inbox, job, [{"filename": in_manifest, "title": "Alizé"}], with_files=False)
+        for stale in folder.glob("*.mp4"):
+            stale.unlink()  # macOS treats both spellings as one file; leave only the one meant for the disk
+        (folder / on_disk).write_bytes(b"mp4")
+    async with factory() as session:
+        session.add(JobRecord(id=known, youtube_url="https://yt.test/k", status="completed"))
+        await session.flush()
+        session.add(ClipRecord(job_id=known, title="Alizé", output_path=f"/tmp/yt/gone/{nfd}"))
+        await session.commit()
+
+    report = await mapper.map_inbox(factory, inbox, apply=True)
+
+    assert (report.imported_clips, report.repointed) == (2, 1)
+    assert not [r for r in report.skipped if "no manifest row" in r or "not in the folder" in r], report.skipped
+    for job in (disk_nfd, manifest_nfd, known):
+        (clip,) = await new_store().list_clips(job_id=job)
+        assert Path(clip["output_path"]).is_file()
+        assert unicodedata.normalize("NFC", Path(clip["output_path"]).name) == nfc
+
+
+async def test_an_exact_decomposed_name_still_beats_the_pre_enhancement_fallback(inbox, db):
+    factory, _ = db
+    job = _job_id()
+    enhanced = "04_Alizé.enhanced.mp4"
+    folder = _make_job_folder(inbox, job, [{"filename": enhanced, "title": "E"}, {"filename": "04_Alizé.mp4"}])
+    async with factory() as session:
+        session.add(JobRecord(id=job, youtube_url="https://yt.test/x", status="completed"))
+        await session.flush()
+        session.add(ClipRecord(job_id=job, output_path="/tmp/yt/gone/" + unicodedata.normalize("NFD", enhanced)))
+        await session.commit()
+
+    await mapper.map_inbox(factory, inbox, apply=True)
+
+    async with factory() as session:
+        (path,) = (await session.execute(select(ClipRecord.output_path))).scalars()
+    assert unicodedata.normalize("NFC", Path(path).name) == enhanced
+    assert (folder / "04_Alizé.mp4").exists()
+
+
+async def test_a_manifest_that_cannot_be_read_is_reported_and_the_rest_still_maps(inbox, db):
+    factory, _ = db
+    broken, fine = _job_id(), _job_id()
+    _make_job_folder(inbox, broken, [{"filename": "00_A.mp4", "title": "A"}])
+    (inbox / broken / "manifest.csv").write_bytes(b"filename,title\n00_A.mp4,\xff\xfe not utf-8\n")
+    _make_job_folder(inbox, fine, [{"filename": "00_B.mp4", "title": "B"}])
+
+    report = await mapper.map_inbox(factory, inbox, apply=True)
+
+    assert (report.imported_jobs, report.imported_clips) == (1, 1)
+    assert any(broken[:8] in r and "unreadable" in r for r in report.skipped), report.skipped
+
+
+def test_a_symlinked_mp4_is_never_listed_or_served(inbox, tmp_path):
+    job = _job_id()
+    folder = _make_job_folder(inbox, job, [{"filename": "00_Link.mp4", "title": "Link"}], with_files=False)
+    outside = tmp_path / "outside.mp4"
+    outside.write_bytes(b"not ours")
+    (folder / "00_Link.mp4").symlink_to(outside)
+
+    (found,) = mapper.read_inbox(inbox)
+
+    assert found.clips == () and found.mp4s == {}
+    assert any("not in the folder" in reason for reason in found.skipped)
+
+
+async def test_a_live_clip_with_no_file_anywhere_is_reported_and_a_retired_one_is_not(inbox, db):
+    factory, _ = db
+    job = _job_id()
+    _make_job_folder(inbox, job, [{"filename": "00_Here.mp4", "title": "Here"}])
+    async with factory() as session:
+        session.add(JobRecord(id=job, youtube_url="https://yt.test/x", status="completed"))
+        await session.flush()
+        session.add(ClipRecord(job_id=job, title="Live", output_path="/tmp/yt/gone/07_Live.mp4"))
+        session.add(ClipRecord(job_id=job, title="NoPath"))
+        session.add(ClipRecord(job_id=job, title="Old", output_path="/tmp/yt/gone/08_Old.mp4", retired=True))
+        await session.commit()
+
+    report = await mapper.map_inbox(factory, inbox, apply=True)
+
+    reported = " | ".join(report.skipped)
+    assert "07_Live.mp4" in reported and "no file recorded" in reported
+    assert "08_Old.mp4" not in reported
+
+
+async def test_an_inbox_job_whose_stored_state_is_not_a_dict_is_still_titled(inbox, db):
+    factory, new_store = db
+    job = _job_id()
+    _make_job_folder(inbox, job, [{"filename": "00_A.mp4", "title": "A"}])
+    async with factory() as session:
+        session.add(JobRecord(id=job, youtube_url=f"inbox://{job}", status="completed", state=["oops"]))
+        await session.commit()
+
+    report = await mapper.map_inbox(factory, inbox, apply=True)
+
+    assert report.retitled == 1
+    assert (await new_store().get(job)).title == f"Inbox export {job[:8]}"

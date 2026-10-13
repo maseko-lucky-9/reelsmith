@@ -13,11 +13,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import ClipRecord
 from app.db.session import get_session
 from app.services import audio_enhance_service
+from app.services.retention import is_managed_file
 from app.settings import settings
 
 router = APIRouter(prefix="/clips", tags=["enhance-speech"])
 
 _AUDIO_PROVIDERS = ("loudnorm", "rnnoise", "passthrough")
+
+
+def _require_own_file(clip: ClipRecord) -> None:
+    """Enhancing writes a new file beside the clip's file. A clip that points at
+    an export copy (``export_base_folder``, a synced share) must not get one."""
+    if not is_managed_file(clip.output_path):
+        raise HTTPException(
+            status_code=409,
+            detail="clip file is outside the download folder (an export copy); not enhancing it",
+        )
 
 
 class EnhanceResponse(BaseModel):
@@ -46,6 +57,7 @@ async def enhance_speech(
         raise HTTPException(status_code=404, detail="clip not found")
     if not clip.output_path:
         raise HTTPException(status_code=409, detail="clip not rendered yet")
+    _require_own_file(clip)
 
     src = Path(clip.output_path)
     out = src.with_name(src.stem + ".enhanced" + src.suffix)
@@ -80,6 +92,7 @@ async def enhance_audio(
         raise HTTPException(status_code=404, detail="clip not found")
     if not clip.output_path:
         raise HTTPException(status_code=409, detail="clip not rendered yet")
+    _require_own_file(clip)
 
     src = Path(clip.output_path)
     out = src.with_name(src.stem + ".enhanced-audio" + src.suffix)

@@ -11,7 +11,8 @@ completed job with one chapter and one clip per manifest row, dated from the
 manifest's modification time and labelled ``inbox://<job_id>``.
 
 Nothing in the inbox is written: it is a synced share, and an edit there would
-reach other devices. Run it after the app has started once (it migrates the
+reach other devices. The inbox must lie outside the download folder, or the
+retention janitor would own its files. Run it after the app has started once (it migrates the
 schema); one transaction, and a second run changes nothing.
 """
 
@@ -23,6 +24,7 @@ import csv
 import json
 import re
 import sys
+import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -34,7 +36,13 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.bus.job_store import _STATE_FIELDS
 from app.db.models import ChapterRecord, ClipRecord, JobRecord
 from app.domain.models import ChapterArtifacts, JobState, PipelineOptions
+from app.services.retention import managed_roots
 from app.settings import settings
+
+
+class InboxRefused(ValueError):
+    """The inbox cannot be mapped safely."""
+
 
 _JOB_FOLDER = re.compile(r"[0-9a-f]{32}")
 _INDEX_PREFIX = re.compile(r"^(\d+)_")
@@ -59,7 +67,7 @@ class InboxJob:
     folder: Path
     exported_at: datetime
     clips: tuple[InboxClip, ...]
-    mp4s: dict[str, Path]  # every mp4 in the folder, by name: a manifest row can lack its filename
+    mp4s: dict[str, Path]  # every mp4 in the folder, by NFC name
     skipped: tuple[str, ...]
 
 
@@ -70,6 +78,11 @@ class Report:
     imported_jobs: int = 0
     imported_clips: int = 0
     skipped: list[str] = field(default_factory=list)
+
+
+def _nfc(name: str) -> str:
+    """macOS may store a name decomposed (NFD) where the manifest has it composed (NFC)."""
+    return unicodedata.normalize("NFC", name)
 
 
 def _float(raw: str | None) -> float | None:
@@ -91,19 +104,29 @@ def _read_job(folder: Path) -> InboxJob | None:
     manifest = folder / "manifest.csv"
     if not manifest.is_file():
         return None
+    exported_at = datetime.fromtimestamp(manifest.stat().st_mtime, UTC)
+    # every mp4 in the folder by NFC name (a manifest row can lack its filename); a symlink is not ours to serve
+    mp4s = {_nfc(p.name): p for p in sorted(folder.glob("*.mp4")) if p.is_file() and not p.is_symlink()}
     rows: list[dict[str, str]] = []
     skipped: list[str] = []
-    with manifest.open(encoding="utf-8", newline="") as handle:
-        for position, row in enumerate(csv.DictReader(handle)):
-            filename = (row.get("filename") or "").strip()
-            if not filename:
-                skipped.append(f"row {position + 1}: no filename")
-            elif Path(filename).name != filename:
-                skipped.append(f"{filename!r}: not a plain file name")
-            elif not (folder / filename).is_file():
-                skipped.append(f"{filename}: file is not in the folder")
-            else:
-                rows.append(row | {"filename": filename})
+    seen: set[str] = set()
+    try:
+        with manifest.open(encoding="utf-8", newline="") as handle:
+            for position, row in enumerate(csv.DictReader(handle)):
+                filename = _nfc((row.get("filename") or "").strip())
+                if not filename:
+                    skipped.append(f"row {position + 1}: no filename")
+                elif Path(filename).name != filename:
+                    skipped.append(f"{filename!r}: not a plain file name")
+                elif filename in seen:
+                    skipped.append(f"{filename}: listed twice")
+                elif filename not in mp4s:
+                    skipped.append(f"{filename}: file is not in the folder")
+                else:
+                    seen.add(filename)
+                    rows.append(row | {"filename": filename})
+    except (UnicodeDecodeError, csv.Error) as exc:
+        return InboxJob(folder.name, folder, exported_at, (), mp4s, (f"manifest.csv is unreadable: {exc}",))
     indexes = [int(m.group(1)) if (m := _INDEX_PREFIX.match(r["filename"])) else -1 for r in rows]
     if len(set(indexes)) != len(indexes) or -1 in indexes:
         indexes = list(range(len(rows)))  # chapter indexes must be unique within a job
@@ -115,12 +138,10 @@ def _read_job(folder: Path) -> InboxJob | None:
             duration=_float(row.get("duration_seconds")),
             summary=row.get("description") or "",
             hashtags=_hashtags(row.get("hashtags")),
-            path=folder / row["filename"],
+            path=mp4s[row["filename"]],
         )
         for index, row in zip(indexes, rows, strict=True)
     )
-    exported_at = datetime.fromtimestamp(manifest.stat().st_mtime, UTC)
-    mp4s = {p.name: p for p in sorted(folder.glob("*.mp4")) if p.is_file()}
     return InboxJob(folder.name, folder, exported_at, clips, mp4s, tuple(skipped))
 
 
@@ -140,16 +161,19 @@ def _id(job_id: str, filename: str, kind: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"reelsmith-inbox:{job_id}/{filename}/{kind}"))
 
 
-async def _repoint(session, job: InboxJob) -> int:
-    changed = 0
+async def _repoint(session, job: InboxJob, report: Report) -> None:
     for clip in (await session.execute(select(ClipRecord).where(ClipRecord.job_id == job.job_id))).scalars():
-        if not clip.output_path or Path(clip.output_path).is_file():
-            continue  # nothing recorded, or the recorded file still exists: not ours to change
-        name = Path(clip.output_path).name
-        if copy := job.mp4s.get(name) or job.mp4s.get(_ENHANCED.sub("", name)):
+        if clip.output_path and Path(clip.output_path).is_file():
+            continue  # the recorded file still exists: not ours to change
+        name = _nfc(Path(clip.output_path or "").name)
+        if copy := job.mp4s.get(name) or job.mp4s.get(_nfc(_ENHANCED.sub("", name))):
             clip.output_path = str(copy)
-            changed += 1
-    return changed
+            report.repointed += 1
+        elif not clip.retired:  # a retired clip is expected to have lost its file
+            report.skipped.append(
+                f"{job.job_id[:8]} clip {clip.id[:8]} ({name or 'no file recorded'}): "
+                "no file on disk and none in the folder"
+            )
 
 
 def _import(session, job: InboxJob) -> None:
@@ -219,16 +243,21 @@ async def map_inbox(factory: async_sessionmaker, inbox: Path, *, apply: bool) ->
 
     One transaction: committed only with ``apply``, rolled back otherwise.
     """
+    inbox = inbox.resolve()
+    if any(inbox.is_relative_to(root) for root in managed_roots()):
+        # the janitor deletes below a managed root, and the clips would then be its to delete
+        raise InboxRefused(f"{inbox} is below a folder the retention janitor manages; point the inbox elsewhere")
     report = Report()
     async with factory() as session:
         known = set((await session.execute(select(JobRecord.id))).scalars())
         for job in read_inbox(inbox):
             report.skipped += [f"{job.job_id[:8]} {reason}" for reason in job.skipped]
             if job.job_id in known:
-                report.repointed += await _repoint(session, job)
+                await _repoint(session, job, report)
                 record = await session.get(JobRecord, job.job_id)
-                if record.youtube_url == f"inbox://{job.job_id}" and not (record.state or {}).get("title"):
-                    record.state = {**(record.state or {}), "title": _label(job.job_id)}
+                state = record.state if isinstance(record.state, dict) else {}
+                if record.youtube_url == f"inbox://{job.job_id}" and not state.get("title"):
+                    record.state = {**state, "title": _label(job.job_id)}
                     report.retitled += 1
             elif job.clips:
                 _import(session, job)
@@ -240,6 +269,7 @@ async def map_inbox(factory: async_sessionmaker, inbox: Path, *, apply: bool) ->
                 ]
             else:
                 report.skipped.append(f"{job.job_id[:8]} nothing to import: no manifest row has its file")
+        await session.flush()  # a dry run must hit the same constraints --apply would
         if apply:
             await session.commit()
         else:
@@ -265,7 +295,11 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             await engine.dispose()
 
-    report = asyncio.run(run())
+    try:
+        report = asyncio.run(run())
+    except InboxRefused as exc:
+        print(exc, file=sys.stderr)
+        return 2
     mode = "applied" if args.apply else "dry run, nothing written"
     print(f"inbox: {inbox}  ({mode})")
     print(f"  clips re-pointed at their inbox copy: {report.repointed}")

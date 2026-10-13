@@ -78,7 +78,7 @@ pip install pre-commit && pre-commit install
 
 `scripts/start.sh` starts Docker Desktop if it is stopped (macOS), brings up the `postgres` container (only the database runs in Docker), waits until it is healthy, then starts the API on <http://127.0.0.1:8000> and the UI on <http://127.0.0.1:5173>. Ctrl-C stops the API and the UI; the database keeps running, and so does your job history. Stop it with `docker compose stop postgres`. Data lives in the `reelsmith_postgres_data` Docker volume, so it survives restarts, `docker compose down` and reboots (not `down -v`).
 
-`start.sh` always uses the Docker Postgres: it exports `YTVIDEO_DB_URL` (and `YTVIDEO_JOB_STORE=sql`), which beats a `YTVIDEO_DB_URL` in `.env`, unless you already set one in your shell. The API migrates the schema itself on every start, so a restart never needs a manual step. Reels and downloads go to `data/downloads`. The retention janitor retires clips and deletes their files after `YTVIDEO_RETENTION_DAYS`: the code default is 30, and `.env.example` sets 365, so copy it (step 2) to keep your history.
+`start.sh` always uses the Docker Postgres: it exports `YTVIDEO_DB_URL` (and `YTVIDEO_JOB_STORE=sql`), which beats a `YTVIDEO_DB_URL` in `.env`, unless you already set one in your shell. The API migrates the schema itself on every start, so a restart never needs a manual step. Reels and downloads go to `data/downloads`. The retention janitor retires clips and deletes their files (only below `data/downloads`) after `YTVIDEO_RETENTION_DAYS`: the code default is 30, and `.env.example` sets 365, so copy it (step 2) to keep your history.
 
 Running the pieces by hand: `docker compose up -d --wait postgres`, then `uvicorn app.main:app --reload` and `cd web && pnpm install && pnpm dev`. With `YTVIDEO_JOB_STORE=memory` nothing is kept across restarts.
 
@@ -121,8 +121,8 @@ python -m scripts.map_inbox_to_db --apply    # write it (take a dump first, see 
 
 - A job the database knows: each clip whose recorded file is gone is re-pointed at its copy in the folder (an `.enhanced` or `.enhanced-audio` clip falls back to its pre-enhancement export). A path that still resolves is never replaced.
 - A folder the database has never seen: imported as a completed job (`inbox://<job_id>`, titled `Inbox export <id>`, dated from the export) with a chapter and a clip per manifest row: title, description, hashtags and duration. Start is 0 and there is no score, transcript or thumbnail, and no source video, so re-render and reprompt answer 409 "source video not retained".
-- It never writes to the folder, because Syncthing would carry the edit to your other devices. It is safe to run again, and it lists every row or file it skipped.
-- The retention janitor never deletes below the export folder: it removes clip files only under the download path (`data/downloads`), so a clip that points at an export copy is retired when it expires but its file stays.
+- It never writes to the folder, because Syncthing would carry the edit to your other devices. It is safe to run again, and it lists every row or file it skipped and every live clip it found no file for. It refuses an export folder that lies inside the download folder, where the janitor would own its files.
+- The retention janitor never deletes below the export folder: it removes clip files only under the download path (`data/downloads`), so a clip that points at an export copy is retired when it expires but its file stays. For the same reason "Enhance speech" answers 409 for such a clip: it writes a new file beside the original, and that would sync to your other devices.
 
 To replace the live history, stop the API first, `DROP DATABASE reelsmith` and `CREATE DATABASE reelsmith` through the `postgres` database as above, then restore into `reelsmith`. That deletes the current history, so take a dump first. `docker compose down -v` or `docker volume rm reelsmith_postgres_data` also deletes it (plain `docker compose down` and reboots do not), and the next `scripts/start.sh` then starts a new, empty database. If the volume is lost, restore the latest dump as above, or re-run `python -m scripts.migrate_sqlite_to_postgres`: it copies from your old SQLite file, which the app never modifies, so it brings back every job stored before the move to Postgres (not later ones). `scripts/deploy.sh` tar-snapshots the volume to `data/backups/` before it changes anything.
 
@@ -185,7 +185,7 @@ See `.env.example` for the full list. Key settings:
 | `YTVIDEO_JOB_STORE` | `sql` | `sql` or `memory` (`memory` keeps nothing across restarts) |
 | `YTVIDEO_DB_URL` | `sqlite+aiosqlite:///./reelsmith.db` | Database URL. `.env.example` points it at the docker-compose Postgres, and `scripts/start.sh` exports that URL itself unless your shell already sets one |
 | `YTVIDEO_EXPORT_BASE_FOLDER` | empty | Each job also exports its clips and a `manifest.csv` to `<folder>/<job_id>/`; empty means `<download_path>/<video>/exports`. Never swept by the janitor; `scripts/map_inbox_to_db.py` maps it into the database |
-| `YTVIDEO_RETENTION_DAYS` | `30` | The janitor retires clips older than this and deletes their files. `.env.example` sets `365` |
+| `YTVIDEO_RETENTION_DAYS` | `30` | The janitor retires clips older than this and deletes their files below the download folder. `.env.example` sets `365` |
 | `YTVIDEO_TEST_DB_URL` | `postgresql+asyncpg://reelsmith:reelsmith@localhost:5432/reelsmith_test` | Tests only: the database `pytest -m integration` TRUNCATEs. Must be local and named `*_test`; never your app database |
 | `YTVIDEO_MAX_CONCURRENT_JOBS` | `1` | Pipelines running at once; extra jobs wait as `pending` |
 | `YTVIDEO_MAX_PARALLEL_CHAPTERS` | `1` | Chapters processed concurrently within a job |

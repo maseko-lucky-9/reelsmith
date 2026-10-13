@@ -4,7 +4,7 @@
 
 ## Problem
 
-The export folder (`YTVIDEO_EXPORT_BASE_FOLDER`, a Syncthing share) holds the clips and manifests of 66 jobs, but the database knew 11 of them, and every clip path in it pointed at `/tmp/yt`, which macOS had cleared. The jobs' history and their playable files were out of sync.
+The export folder (`YTVIDEO_EXPORT_BASE_FOLDER`, a Syncthing share) holds the clips and manifests of 63 jobs, but the database knew 11 of them, and every clip path in it pointed at `/tmp/yt`, which macOS had cleared. The jobs' history and their playable files were out of sync.
 
 ## Requirements
 
@@ -14,6 +14,7 @@ The export folder (`YTVIDEO_EXPORT_BASE_FOLDER`, a Syncthing share) holds the cl
 - **FR-004**: The tool MUST be a dry run unless `--apply`, MUST be idempotent, MUST report every row or file it skips, and MUST NEVER write to the export folder.
 - **FR-005**: The manifest is untrusted: a filename that is not a plain file name MUST be skipped, and chapter indexes MUST be unique within a job.
 - **FR-006**: An imported job MUST carry a title (`Inbox export <id>`), because the job page shows `Processing…` for a job without one; a title already set MUST NOT be overwritten and a job that is not an inbox import MUST NOT be retitled.
+- **FR-007**: Nothing the app does MUST write a file into the export folder: enhance-speech and enhance-audio MUST answer 409 for a clip whose file is not below a managed root, and the script MUST refuse an inbox below one.
 
 ## Out of scope
 
@@ -31,3 +32,4 @@ The export folder (`YTVIDEO_EXPORT_BASE_FOLDER`, a Syncthing share) holds the cl
 | FR-004 | Done | `test_a_dry_run_reports_and_writes_nothing`, `test_a_second_run_changes_nothing`, `test_nothing_in_the_inbox_is_ever_modified` |
 | FR-005 | Done | `test_a_filename_that_is_not_a_plain_file_name_is_skipped`, `test_duplicate_or_missing_number_prefixes_still_give_unique_chapter_indexes` |
 | FR-006 | Done | `test_an_inbox_job_imported_without_a_title_gets_one_and_a_chosen_title_is_kept` |
+| FR-007 | Done | `tests/contract/test_enhance_speech_router.py::test_a_clip_that_points_at_an_export_copy_is_not_enhanced`, `test_map_inbox_to_db.py::test_an_inbox_below_a_managed_folder_is_refused` |

@@ -326,6 +326,28 @@ async def test_expired_clip_below_a_managed_root_is_still_deleted(factory, tmp_p
     assert not mp4.exists()
 
 
+async def test_an_expired_clip_that_is_a_symlink_to_a_live_clips_file_deletes_nothing(
+    factory, tmp_path, monkeypatch
+):
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    monkeypatch.setattr(settings, "default_download_path", str(managed))
+    target = _file(managed / "00_Live.mp4")
+    link = managed / "00_Old.mp4"
+    link.symlink_to(target)
+    await _expired_clip_at(factory, link)
+    async with factory() as session:
+        job = JobRecord(youtube_url="https://y.test", created_at=NOW)
+        session.add(job)
+        await session.flush()
+        session.add(ClipRecord(job_id=job.id, output_path=str(target), created_at=NOW))
+        await session.commit()
+
+    await sweep_expired_clips(factory, retention_days=RETENTION_DAYS, now=NOW)
+
+    assert target.exists()
+
+
 async def test_a_full_janitor_tick_keeps_the_export_folder_and_cleans_the_download_folder(
     factory, tmp_path, monkeypatch
 ):
