@@ -22,7 +22,7 @@ export function AnnouncementBanner() {
   }
 
   return (
-    <div className="flex items-center justify-center gap-3 px-4 py-2 text-xs text-zinc-300 bg-zinc-900 border-b border-white/8 relative">
+    <div className="flex items-center justify-center gap-3 pl-4 pr-10 py-2 text-xs text-zinc-300 bg-zinc-900 border-b border-white/8 relative">
       <span>
         Reelsmith is open source. Star it on{' '}
         <a

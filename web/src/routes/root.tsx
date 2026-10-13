@@ -15,7 +15,7 @@ function RootLayout() {
       <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
         <AnnouncementBanner />
         <TopBar />
-        <main className="flex-1 overflow-y-auto px-6 py-6">
+        <main className="flex-1 overflow-y-auto px-3 py-4 sm:px-6 sm:py-6">
           <Outlet />
         </main>
       </div>

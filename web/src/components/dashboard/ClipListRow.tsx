@@ -36,9 +36,9 @@ export function ClipListRow({ clip, rank, jobId }: ClipListRowProps) {
   const transcriptText = words.map((w) => w.word).join(' ')
 
   return (
-    <div className="flex items-start gap-6 py-6 border-b border-[#1f1f1f]">
+    <div className="flex flex-col md:flex-row md:items-start gap-4 md:gap-6 py-6 border-b border-[#1f1f1f]">
       {/* Left col */}
-      <div className="w-44 flex-shrink-0 space-y-2">
+      <div className="w-full md:w-44 flex-shrink-0 space-y-2">
         <div className="flex items-baseline gap-1">
           <span className="text-2xl font-bold text-zinc-600">#{rank}</span>
         </div>
@@ -159,7 +159,7 @@ function ClipActionMenu({ clip, jobId }: { clip: ClipRecord; jobId: string }) {
     'w-full text-left text-xs px-2.5 py-1.5 rounded-md border border-white/20 text-zinc-200 hover:text-white hover:border-white/40 transition-colors disabled:opacity-50 disabled:cursor-wait'
 
   return (
-    <div className="w-36 flex-shrink-0 flex flex-col gap-1.5">
+    <div className="w-full md:w-36 flex-shrink-0 grid grid-cols-2 gap-1.5 md:flex md:flex-col">
       <Link
         to="/clips/$clipId/publish"
         params={{ clipId: clip.clip_id }}

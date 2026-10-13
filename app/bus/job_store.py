@@ -246,6 +246,8 @@ class SqlJobStore:
                 pipeline_options=state.pipeline_options.model_dump(),
                 video_path=state.video_path,
                 chapters_total=state.chapters_total,
+                title=state.title,
+                duration=state.duration,
             )
             session.add(record)
             await session.commit()
@@ -298,6 +300,8 @@ class SqlJobStore:
             # Not chapters_done: this snapshot may predate a concurrent
             # increment_chapters_done, and writing it back would undo that.
             record.chapters_total = state.chapters_total
+            record.title = state.title
+            record.duration = state.duration
             await session.commit()
         return state
 
@@ -561,6 +565,8 @@ def _record_to_state(record: Any) -> JobState:
         video_path=getattr(record, "video_path", None),
         chapters_total=getattr(record, "chapters_total", None) or 0,
         chapters_done=getattr(record, "chapters_done", None) or 0,
+        title=getattr(record, "title", None),
+        duration=getattr(record, "duration", None),
     )
 
 

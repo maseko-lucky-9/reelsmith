@@ -56,6 +56,8 @@ class JobRecord(Base):
     chapters_done: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0")
     )
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    duration: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_now
     )
