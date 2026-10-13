@@ -18,6 +18,7 @@ Spec numbers and ADR numbers (`docs/decisions/NNN-*.md`) are separate sequences.
 | 008 render-speed | Implemented (T053-T055; T056 decision and T057 open) | [spec](008-render-speed/spec.md) · [plan](008-render-speed/plan.md) · [tasks](008-render-speed/tasks.md) |
 | 009 durable-job-history | Implemented (T058-T063) | [spec](009-durable-job-history/spec.md) · [tasks](009-durable-job-history/tasks.md) |
 | 010 map-export-folder | Implemented (T064-T067) | [spec](010-map-export-folder/spec.md) · [tasks](010-map-export-folder/tasks.md) |
+| 011 repair-job-metadata | Implemented (T068-T070) | [spec](011-repair-job-metadata/spec.md) · [tasks](011-repair-job-metadata/tasks.md) |
 
 ## Roadmap stubs
 

@@ -39,6 +39,9 @@ from app.domain.models import ChapterArtifacts, JobState, PipelineOptions
 from app.services.retention import managed_roots
 from app.settings import settings
 
+# An mp4 starts with a box header of at least 8 bytes, so anything smaller is a stand-in a test run left behind.
+MIN_MP4_BYTES = 8
+
 
 class InboxRefused(ValueError):
     """The inbox cannot be mapped safely."""
@@ -106,7 +109,9 @@ def _read_job(folder: Path) -> InboxJob | None:
         return None
     exported_at = datetime.fromtimestamp(manifest.stat().st_mtime, UTC)
     # every mp4 in the folder by NFC name (a manifest row can lack its filename); a symlink is not ours to serve
-    mp4s = {_nfc(p.name): p for p in sorted(folder.glob("*.mp4")) if p.is_file() and not p.is_symlink()}
+    candidates = {_nfc(p.name): p for p in sorted(folder.glob("*.mp4")) if p.is_file() and not p.is_symlink()}
+    placeholders = {name for name, p in candidates.items() if p.stat().st_size < MIN_MP4_BYTES}
+    mp4s = {name: p for name, p in candidates.items() if name not in placeholders}
     rows: list[dict[str, str]] = []
     skipped: list[str] = []
     seen: set[str] = set()
@@ -120,6 +125,8 @@ def _read_job(folder: Path) -> InboxJob | None:
                     skipped.append(f"{filename!r}: not a plain file name")
                 elif filename in seen:
                     skipped.append(f"{filename}: listed twice")
+                elif filename in placeholders:
+                    skipped.append(f"{filename}: placeholder, under {MIN_MP4_BYTES} bytes")
                 elif filename not in mp4s:
                     skipped.append(f"{filename}: file is not in the folder")
                 else:

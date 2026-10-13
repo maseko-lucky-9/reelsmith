@@ -318,7 +318,7 @@ async def test_an_imported_folder_reports_mp4_files_that_have_no_manifest_row(in
     factory, _ = db
     job = _job_id()
     folder = _make_job_folder(inbox, job, [{"filename": "00_A.mp4", "title": "A"}])
-    (folder / "01_Unlisted.mp4").write_bytes(b"x")
+    (folder / "01_Unlisted.mp4").write_bytes(b"unlisted clip")
 
     report = await mapper.map_inbox(factory, inbox, apply=True)
 
@@ -448,7 +448,7 @@ async def test_a_file_name_matches_whichever_unicode_form_the_disk_manifest_or_d
         folder = _make_job_folder(inbox, job, [{"filename": in_manifest, "title": "Alizé"}], with_files=False)
         for stale in folder.glob("*.mp4"):
             stale.unlink()  # macOS treats both spellings as one file; leave only the one meant for the disk
-        (folder / on_disk).write_bytes(b"mp4")
+        (folder / on_disk).write_bytes(b"mp4 bytes")
     async with factory() as session:
         session.add(JobRecord(id=known, youtube_url="https://yt.test/k", status="completed"))
         await session.flush()
@@ -541,3 +541,27 @@ async def test_an_inbox_job_whose_stored_state_is_not_a_dict_is_still_titled(inb
 
     assert report.retitled == 1
     assert (await new_store().get(job)).title == f"Inbox export {job[:8]}"
+
+
+async def test_a_one_byte_placeholder_mp4_is_reported_and_never_imported_or_used_as_a_copy(inbox, db):
+    """Test runs left 1-byte 'clips' in the share; importing them made fake jobs (and would again after a clean-up)."""
+    factory, _ = db
+    job, known = _job_id(), _job_id()
+    _make_job_folder(inbox, job, [{"filename": "00_Only.mp4", "title": "Only"}])
+    (inbox / job / "00_Only.mp4").write_bytes(b"x")
+    _make_job_folder(inbox, known, [{"filename": "00_Dead.mp4", "title": "Dead"}])
+    (inbox / known / "00_Dead.mp4").write_bytes(b"x")
+    async with factory() as session:
+        session.add(JobRecord(id=known, youtube_url="https://yt.test/k", status="completed"))
+        await session.flush()
+        session.add(ClipRecord(job_id=known, title="Dead", output_path="/tmp/yt/gone/00_Dead.mp4"))
+        await session.commit()
+
+    report = await mapper.map_inbox(factory, inbox, apply=True)
+
+    assert (report.imported_jobs, report.imported_clips, report.repointed) == (0, 0, 0)
+    reported = " | ".join(report.skipped)
+    assert "00_Only.mp4" in reported and "placeholder" in reported and "nothing to import" in reported
+    async with factory() as session:
+        assert (await session.execute(select(JobRecord.id))).scalars().all() == [known]
+        assert (await session.execute(select(ClipRecord.output_path))).scalar_one() == "/tmp/yt/gone/00_Dead.mp4"
