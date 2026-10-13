@@ -59,22 +59,28 @@ Both groups are roadmap specs in [`specs/README.md`](specs/README.md).
 ## Quick Start
 
 ```bash
-# 1. Optional: Postgres (the default `sql` store is SQLite, ./reelsmith.db; step 3 uses the in-memory store)
-docker compose up -d postgres
-
-# 2. Install Python deps (Python 3.14 required; 3.12 is unsupported, see CLAUDE.md)
-python3.14 -m venv .venv-mac && source .venv-mac/bin/activate
+# 1. Install Python deps (Python 3.14 required; 3.12 is unsupported, see CLAUDE.md)
+python3.14 -m venv .venv-314 && source .venv-314/bin/activate
 pip install -r requirements.txt
 
-# 3. Start API (memory store for dev)
-YTVIDEO_JOB_STORE=memory uvicorn app.main:app --reload
+# 2. Settings: Postgres URL, media under data/downloads, 365-day retention (skips an existing .env)
+cp -n .env.example .env
 
-# 4. Start React dev server (separate terminal)
-cd web && pnpm install && pnpm dev
+# 3. Start everything: Postgres in Docker, the API and the React UI
+scripts/start.sh
+
+# 4. Once, if you have jobs in the old SQLite file (./reelsmith.db): copy them to Postgres
+python -m scripts.migrate_sqlite_to_postgres
 
 # 5. Install the git hooks (once per clone)
 pip install pre-commit && pre-commit install
 ```
+
+`scripts/start.sh` starts Docker Desktop if it is stopped (macOS), brings up the `postgres` container (only the database runs in Docker), waits until it is healthy, then starts the API on <http://127.0.0.1:8000> and the UI on <http://127.0.0.1:5173>. Ctrl-C stops the API and the UI; the database keeps running, and so does your job history. Stop it with `docker compose stop postgres`. Data lives in the `reelsmith_postgres_data` Docker volume, so it survives restarts, `docker compose down` and reboots (not `down -v`).
+
+`start.sh` always uses the Docker Postgres: it exports `YTVIDEO_DB_URL` (and `YTVIDEO_JOB_STORE=sql`), which beats a `YTVIDEO_DB_URL` in `.env`, unless you already set one in your shell. The API migrates the schema itself on every start, so a restart never needs a manual step. Reels and downloads go to `data/downloads`. The retention janitor retires clips and deletes their files after `YTVIDEO_RETENTION_DAYS`: the code default is 30, and `.env.example` sets 365, so copy it (step 2) to keep your history.
+
+Running the pieces by hand: `docker compose up -d --wait postgres`, then `uvicorn app.main:app --reload` and `cd web && pnpm install && pnpm dev`. With `YTVIDEO_JOB_STORE=memory` nothing is kept across restarts.
 
 `pre-commit install` wires `.pre-commit-config.yaml` into `.git/hooks/pre-commit`, so every commit runs gitleaks on the staged changes (using `.gitleaks.toml`) plus basic hygiene checks (large files, merge markers, YAML, private keys). A detected secret blocks the commit. CI runs the same gitleaks scan in the `secrets` job.
 
@@ -159,8 +165,9 @@ See `.env.example` for the full list. Key settings:
 # Unit + contract tests (no network, no Postgres)
 pytest
 
-# Integration tests (requires Postgres)
-YTVIDEO_DB_URL=postgresql+asyncpg://reelsmith:reelsmith@localhost:5432/reelsmith pytest -m integration
+# Integration tests (requires `docker compose up -d --wait postgres`). They use their own
+# database, reelsmith_test (created on first use), and never touch your job history.
+pytest -m integration
 
 # Frontend tests
 cd web && pnpm test
@@ -194,3 +201,5 @@ Reloading a client route such as `/uploads/new` or `/jobs/<id>` serves the UI (`
 | [005](docs/decisions/005-api-route-prefix.md) | Serve the API at both `/x` and `/api/x` |
 | [006](docs/decisions/006-face-track-reframe.md) | Face-tracked reframe with YuNet on onnxruntime |
 | [007](docs/decisions/007-clip-discovery-and-reprompt.md) | Clip discovery in chapterless sources, and reprompt |
+| [008](docs/decisions/008-no-gpu-encode.md) | No GPU encode on Apple Silicon; cap the reel canvas and prefer H.264 |
+| [009](docs/decisions/009-postgres-default-store.md) | Postgres in Docker is the default job store; one launcher starts the stack |

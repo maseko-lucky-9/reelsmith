@@ -18,6 +18,8 @@ Learning project: YouTube-to-reels pipeline. FastAPI backend + React UI (`web/`)
 
 | What | Command |
 |---|---|
+| Everything (Postgres in Docker + API + UI) | `scripts/start.sh` |
+| One-off SQLite to Postgres copy | `python -m scripts.migrate_sqlite_to_postgres` |
 | API server | `uvicorn app.main:app --reload` |
 | UI | `cd web && pnpm dev` (legacy: `streamlit run ui/_legacy/streamlit_app.py`) |
 | Tests | `pytest` |

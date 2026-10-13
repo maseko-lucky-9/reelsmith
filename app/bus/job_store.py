@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from collections.abc import Awaitable, Callable, Collection, Sequence
 from typing import Any, Protocol, runtime_checkable
 
+from pydantic import ValidationError
+
 from app.domain.models import ChapterArtifacts, JobState, PipelineOptions
+
+log = logging.getLogger(__name__)
 
 
 class JobNotFoundError(KeyError):
@@ -221,6 +226,20 @@ class InMemoryJobStore:
 JobStore = InMemoryJobStore
 
 
+# JobState fields that live in a column of ``jobs`` / ``chapters`` / ``clips``.
+# Everything else (title, duration, current_step, the folders, the request's
+# caption format and aspect ratio, ...) is stored in ``jobs.state``; deriving
+# the set means a field added to JobState persists without touching the store.
+_NOT_IN_STATE = frozenset({
+    "job_id", "url", "source", "status", "error", "segment_mode", "language",
+    "prompt", "auto_hook", "brand_template_id", "pipeline_options", "video_path",
+    "chapters_total", "chapters_done", "chapters", "output_paths",
+})
+_STATE_FIELDS = frozenset(JobState.model_fields) - _NOT_IN_STATE
+# Required JobState fields for a row that predates jobs.state (never stored).
+_LEGACY_DEFAULTS: dict[str, Any] = {"download_path": "/tmp/yt"}
+
+
 class SqlJobStore:
     """Postgres-backed store using SQLAlchemy async sessions."""
 
@@ -246,6 +265,7 @@ class SqlJobStore:
                 pipeline_options=state.pipeline_options.model_dump(),
                 video_path=state.video_path,
                 chapters_total=state.chapters_total,
+                state=state.model_dump(mode="json", include=_STATE_FIELDS),
             )
             session.add(record)
             await session.commit()
@@ -260,7 +280,7 @@ class SqlJobStore:
         async with self._factory() as session:
             result = await session.execute(
                 select(JobRecord)
-                .options(selectinload(JobRecord.clips))
+                .options(selectinload(JobRecord.clips), selectinload(JobRecord.chapters))
                 .where(JobRecord.id == job_id)
             )
             record = result.scalar_one_or_none()
@@ -269,21 +289,22 @@ class SqlJobStore:
         return _record_to_state(record)
 
     async def update(self, job_id: str, mutator: Callable[[JobState], None]) -> JobState:
-        from sqlalchemy import select
+        from sqlalchemy import delete, select
         from sqlalchemy.orm import selectinload
 
-        from app.db.models import JobRecord
+        from app.db.models import ChapterRecord, JobRecord
 
         async with self._factory() as session:
             result = await session.execute(
                 select(JobRecord)
-                .options(selectinload(JobRecord.clips))
+                .options(selectinload(JobRecord.clips), selectinload(JobRecord.chapters))
                 .where(JobRecord.id == job_id)
             )
             record = result.scalar_one_or_none()
             if record is None:
                 raise JobNotFoundError(job_id)
             state = _record_to_state(record)
+            chapters_before = set(state.chapters)
             mutator(state)
             record.status = state.status
             record.error = state.error
@@ -298,6 +319,17 @@ class SqlJobStore:
             # Not chapters_done: this snapshot may predate a concurrent
             # increment_chapters_done, and writing it back would undo that.
             record.chapters_total = state.chapters_total
+            record.state = state.model_dump(mode="json", include=_STATE_FIELDS)
+            # Only pruning is honoured: reprompt drops replaced chapters through
+            # here. Chapter artifacts are written by upsert_chapter alone, so a
+            # stale snapshot here cannot undo a concurrent chapter write.
+            pruned = chapters_before - set(state.chapters)
+            if pruned:
+                await session.execute(
+                    delete(ChapterRecord)
+                    .where(ChapterRecord.job_id == job_id)
+                    .where(ChapterRecord.chapter_index.in_(pruned))
+                )
             await session.commit()
         return state
 
@@ -341,8 +373,9 @@ class SqlJobStore:
             if record is None:
                 record = ChapterRecord(job_id=job_id, chapter_index=chapter_index)
                 session.add(record)
-            chapter = ChapterArtifacts(chapter_index=chapter_index)
+            chapter = _chapter_from_record(record) or ChapterArtifacts(chapter_index=chapter_index)
             mutator(chapter)
+            record.artifacts = chapter.model_dump(mode="json")
             record.title = chapter.clip_path or ""
             await session.commit()
         return chapter
@@ -464,7 +497,8 @@ class SqlJobStore:
                 q = q.where(JobRecord.youtube_url.ilike(f"%{search}%"))
             q = q.offset(offset).limit(limit)
             result = await session.execute(q)
-            return [_record_to_state(r) for r in result.scalars().all()]
+            # No chapters: the home page and the badge poll this and never read them.
+            return [_record_to_state(r, with_chapters=False) for r in result.scalars().all()]
 
     async def find_job_by_url(
         self, url: str, statuses: Collection[str]
@@ -486,7 +520,7 @@ class SqlJobStore:
                 .limit(1)
             )
             record = result.scalar_one_or_none()
-        return _record_to_state(record) if record is not None else None
+        return _record_to_state(record, with_chapters=False) if record is not None else None
 
     async def fail_interrupted_jobs(self) -> list[str]:
         """Mark every pending/running job failed (one UPDATE); return their ids.
@@ -533,35 +567,69 @@ class SqlJobStore:
             return [_clip_record_to_dict(r) for r in result.scalars().all()]
 
 
-def _record_to_state(record: Any) -> JobState:
+def _chapter_from_record(record: Any) -> ChapterArtifacts | None:
+    """The chapter's stored artifacts; None for a row that has none (written
+    before they were stored) or whose JSON no longer fits the model."""
+    artifacts = getattr(record, "artifacts", None)
+    if not isinstance(artifacts, dict):
+        return None
+    try:
+        return ChapterArtifacts(**artifacts)
+    except ValidationError:
+        log.warning("Ignoring unreadable artifacts of chapter %s", record.id)
+        return None
+
+
+def _record_to_state(record: Any, *, with_chapters: bool = True) -> JobState:
     loaded_clips = getattr(record, "clips", None) or []
     output_paths = [c.output_path for c in loaded_clips if c.output_path and not c.retired]
 
-    # Coerce None/missing pipeline_options → defaults (G4: old rows must not crash)
+    # Coerce None/missing/unreadable pipeline_options → defaults (G4: old rows must not crash)
+    pipeline_opts = PipelineOptions()
     raw_opts = getattr(record, "pipeline_options", None)
     if raw_opts and isinstance(raw_opts, dict):
-        pipeline_opts = PipelineOptions(**raw_opts)
-    else:
-        pipeline_opts = PipelineOptions()
+        try:
+            pipeline_opts = PipelineOptions(**raw_opts)
+        except ValidationError:
+            log.warning("Ignoring unreadable pipeline_options of job %s", record.id)
 
-    return JobState(
-        job_id=record.id,
-        url=record.youtube_url,
-        source=getattr(record, "source", None),
-        status=record.status,
-        error=record.error,
-        download_path="/tmp/yt",
-        output_paths=output_paths,
-        segment_mode=getattr(record, "segment_mode", None) or "auto",
-        language=getattr(record, "language", None) or "en-US",
-        prompt=getattr(record, "prompt", None),
-        auto_hook=getattr(record, "auto_hook", None) if getattr(record, "auto_hook", None) is not None else True,
-        brand_template_id=getattr(record, "brand_template_id", None),
-        pipeline_options=pipeline_opts,
-        video_path=getattr(record, "video_path", None),
-        chapters_total=getattr(record, "chapters_total", None) or 0,
-        chapters_done=getattr(record, "chapters_done", None) or 0,
-    )
+    columns: dict[str, Any] = {
+        "job_id": record.id,
+        "url": record.youtube_url,
+        "source": getattr(record, "source", None),
+        "status": record.status,
+        "error": record.error,
+        "output_paths": output_paths,
+        "segment_mode": getattr(record, "segment_mode", None) or "auto",
+        "language": getattr(record, "language", None) or "en-US",
+        "prompt": getattr(record, "prompt", None),
+        "auto_hook": getattr(record, "auto_hook", None) if getattr(record, "auto_hook", None) is not None else True,
+        "brand_template_id": getattr(record, "brand_template_id", None),
+        "pipeline_options": pipeline_opts,
+        "video_path": getattr(record, "video_path", None),
+        "chapters_total": getattr(record, "chapters_total", None) or 0,
+        "chapters_done": getattr(record, "chapters_done", None) or 0,
+    }
+    stored = getattr(record, "state", None)
+    if not isinstance(stored, dict):
+        stored = {}
+    chapters = {}
+    if with_chapters:
+        chapters = {
+            c.chapter_index: artifacts
+            for c in getattr(record, "chapters", None) or []
+            if (artifacts := _chapter_from_record(c)) is not None
+        }
+    # Columns last: they are the source of truth for the fields they hold.
+    data = {**_LEGACY_DEFAULTS, **stored, **columns, "chapters": chapters}
+    try:
+        return JobState(**data)
+    except ValidationError as exc:
+        # One unreadable stored field must not fail a whole listing, nor cost
+        # the job its other fields (the next update() would save the loss).
+        bad = {e["loc"][0] for e in exc.errors() if e["loc"]} & (set(stored) - set(columns))
+        log.warning("Dropping unreadable stored field(s) %s of job %s", sorted(bad), record.id)
+        return JobState(**{k: v for k, v in data.items() if k not in bad})
 
 
 def _clip_record_to_dict(record: Any) -> dict[str, Any]:

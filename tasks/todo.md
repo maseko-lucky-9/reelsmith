@@ -12,6 +12,7 @@ Open work is tracked per feature in `specs/*/tasks.md`; this file keeps the fini
 |---|---|---|
 | [001 Reelsmith baseline](../specs/001-reelsmith-baseline/spec.md) | [tasks.md](../specs/001-reelsmith-baseline/tasks.md) | 5 open: T040, T046, T049, T050, T051 (owner decisions: ranking, the G2 face-track sign-off; T049 investigated and the crowd-hold attempt dropped, T050 on hold as draft PR #72) |
 | [008 Render speed](../specs/008-render-speed/spec.md) | [tasks.md](../specs/008-render-speed/tasks.md) | 2 open: T056 (owner decision: caption size on the capped canvas), T057 (caption drawing cost) |
+| [009 Durable job history](../specs/009-durable-job-history/spec.md) | [tasks.md](../specs/009-durable-job-history/tasks.md) | 0 open: T058-T063 done (Postgres in Docker, full job state persisted, SQLite copy, `scripts/start.sh`) |
 | [002-007 roadmap stubs](../specs/README.md) | none yet | stubs only: caption/brand pipeline, analytics, share links, webhooks, API tokens, workspaces |
 
 Constitution: [.specify/memory/constitution.md](../.specify/memory/constitution.md)

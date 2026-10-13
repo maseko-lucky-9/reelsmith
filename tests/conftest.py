@@ -31,15 +31,21 @@ def sync_fixture_720():
 async def db_store(monkeypatch):
     """SqlJobStore on the local test Postgres, with its tables TRUNCATEd.
 
-    The database is ``YTVIDEO_TEST_DB_URL`` (default: the local docker-compose
-    / CI Postgres), never the app's ``YTVIDEO_DB_URL``, and must be on this
-    machine — see ``tests/db_safety.py``. It is forced onto both the env var
-    and the already-loaded settings. Resets the engine per test.
+    The database is ``YTVIDEO_TEST_DB_URL`` (default: ``reelsmith_test`` on the
+    local docker-compose / CI Postgres), never the app's ``YTVIDEO_DB_URL``,
+    must be on this machine and named ``*_test`` — see ``tests/db_safety.py``.
+    It is created and migrated to head if missing, then forced onto both the
+    env var and the already-loaded settings. Resets the engine per test.
     """
+    import asyncio
+
+    from app.db.migrate import upgrade_to_head
     from app.settings import settings
-    from tests.db_safety import resolve_test_db_url
+    from tests.db_safety import ensure_test_database, resolve_test_db_url
 
     url = resolve_test_db_url(os.environ)
+    await ensure_test_database(url)
+    await asyncio.to_thread(upgrade_to_head, url)
     monkeypatch.setenv("YTVIDEO_DB_URL", url)
     monkeypatch.setattr(settings, "db_url", url)
 

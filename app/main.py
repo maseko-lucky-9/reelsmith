@@ -76,13 +76,9 @@ async def lifespan(app: FastAPI):
 
     # Run DB migrations on startup when using the SQL store.
     if settings.job_store == "sql" and not settings.skip_alembic:
-        from alembic import command as alembic_command
-        from alembic.config import Config as AlembicConfig
+        from app.db.migrate import upgrade_to_head
 
-        cfg_path = Path(__file__).parents[1] / "alembic.ini"
-        if cfg_path.exists():
-            alembic_cfg = AlembicConfig(str(cfg_path))
-            await asyncio.to_thread(alembic_command.upgrade, alembic_cfg, "head")
+        await asyncio.to_thread(upgrade_to_head, settings.db_url)
 
     app.state.event_bus = AsyncEventBus()
     app.state.job_store = _make_store()
