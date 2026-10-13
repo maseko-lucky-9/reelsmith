@@ -19,6 +19,14 @@ honours these rules; deviations from this audit must be flagged in the PR.
 The SQL flavour is determined entirely by `YTVIDEO_DB_URL`. There is no
 `postgres` token; we recognise dialects from the URL scheme.
 
+`scripts/start.sh` runs the stack on the docker-compose Postgres and exports
+its URL; the code default stays SQLite ([ADR-009](decisions/009-postgres-default-store.md)).
+The two JSON columns added by spec 009, `jobs.state` and `chapters.artifacts`,
+are plain `JSON` on both engines. SQLAlchemy writes a Python `None` as JSON
+`null` rather than SQL `NULL`, so rows copied by
+`scripts/migrate_sqlite_to_postgres.py` hold `null` where a fresh SQLite row
+holds `NULL`; readers check the type, and a backfill must match both.
+
 ## Test tier mapping
 
 | Test class | DB | Source |

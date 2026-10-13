@@ -30,6 +30,7 @@ Learning project: YouTube-to-reels pipeline. FastAPI backend + React UI (`web/`)
 - Domain events live in `app/domain/events.py`; job lifecycle and progress are reported through `app/bus/event_bus.py`. The orchestrator sequences stages; services are plain functions called directly.
 - Services are stateless functions — state lives in `JobStore` on `app.state`.
 - Run ffmpeg only through `app/services/ffmpeg_tools.run` (bundled binary, killed on timeout/cancel); never a system ffmpeg/ffprobe. MoviePy is not a dependency.
+- Integration tests run on the compose Postgres in their own database, `reelsmith_test` (`YTVIDEO_TEST_DB_URL`); `tests/db_safety.py` refuses any database not named `*_test`, because the fixture TRUNCATEs the job tables. Never point it at the app database.
 - Test markers: `integration` (real network), `live` (real YouTube), `e2e` (fixtures), `playwright` (UI). Default run excludes `integration`, `live`, `playwright`.
 
 ## Build & Test
@@ -41,7 +42,7 @@ pip install -r requirements.txt
 # Run all fast tests
 pytest
 
-# Run with integration tests
+# Run with integration tests (needs `docker compose up -d --wait postgres`)
 pytest -m integration
 ```
 

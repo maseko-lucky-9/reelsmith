@@ -84,11 +84,35 @@ Running the pieces by hand: `docker compose up -d --wait postgres`, then `uvicor
 
 `pre-commit install` wires `.pre-commit-config.yaml` into `.git/hooks/pre-commit`, so every commit runs gitleaks on the staged changes (using `.gitleaks.toml`) plus basic hygiene checks (large files, merge markers, YAML, private keys). A detected secret blocks the commit. CI runs the same gitleaks scan in the `secrets` job.
 
-Open **<http://localhost:5173>** in your browser.
+Open **<http://127.0.0.1:5173>** in your browser.
 
 Settings come from `YTVIDEO_*` environment variables or a `.env` file in the project root. `.env.example` lists them all; note that it points `YTVIDEO_DB_URL` at the docker-compose Postgres. To try the opt-in stages, set the variables listed under [What It Does Today](#what-it-does-today).
 
 > **Note:** Only process videos you have the right to use. Check the platform's terms of service before downloading.
+
+## Job History and Backups
+
+**A restart keeps** every job with its status, title, duration, folders and request options (caption format, aspect ratio, language, prompt, pipeline options), each chapter's stored artifacts (status, paths, transcript) and every clip row (scores, likes, retired flag, hooks, B-roll, caption style). The home page lists up to 500 projects.
+
+**A restart does not keep**
+- A job that was running when the app stopped. It is marked `failed` ("interrupted by restart") with whatever it had finished; it is not resumed.
+- Media that is gone from disk. Files live under `data/downloads` until the retention janitor removes them (`YTVIDEO_RETENTION_DAYS`).
+- The title, duration and chapter details of jobs stored before [ADR-009](docs/decisions/009-postgres-default-store.md): those were never saved.
+- Live progress history and the in-memory job queue. The job page refetches the job when it reconnects.
+
+**Back up and restore.** The database lives in the `reelsmith_postgres_data` Docker volume. A dump covers every table, not the media files, so back up `data/downloads` separately.
+
+```bash
+# Back up (the stack can keep running). data/backups/ is gitignored: a dump holds encrypted OAuth tokens
+mkdir -p data/backups
+docker compose exec -T postgres pg_dump -U reelsmith reelsmith > data/backups/reelsmith.sql
+
+# Restore into an empty database, here a scratch one
+docker compose exec -T postgres psql -U reelsmith -d postgres -c "CREATE DATABASE restore_check"
+docker compose exec -T postgres psql -U reelsmith -d restore_check < data/backups/reelsmith.sql
+```
+
+To replace the live history, stop the API first, `DROP DATABASE reelsmith` and `CREATE DATABASE reelsmith` through the `postgres` database as above, then restore into `reelsmith`. That deletes the current history, so take a dump first. `docker compose down -v` or `docker volume rm reelsmith_postgres_data` also deletes it (plain `docker compose down` and reboots do not), and the next `scripts/start.sh` then starts a new, empty database. If the volume is lost, restore the latest dump as above, or re-run `python -m scripts.migrate_sqlite_to_postgres`: it copies from your old SQLite file, which the app never modifies, so it brings back every job stored before the move to Postgres (not later ones). `scripts/deploy.sh` tar-snapshots the volume to `data/backups/` before it changes anything.
 
 ## Architecture
 
@@ -106,7 +130,9 @@ app/services/download_service.py — backward-compat shim (delegates to YouTube 
 app/workers/orchestrator — async pipeline runner (resolves adapter per URL)
 app/domain/              — events, models (incl. JobState.source), IDs
 app/bus/                 — async event bus + job store (memory / SQL: SQLite or Postgres)
-app/db/                  — SQLAlchemy ORM models + alembic migrations
+app/db/                  — SQLAlchemy ORM models, alembic migrations, `migrate.py` (`upgrade_to_head(url)`)
+scripts/start.sh         — one command: Postgres in Docker + API + UI
+scripts/migrate_sqlite_to_postgres.py — one-off copy of the SQLite history into Postgres
 ```
 
 ## Live Progress Timeline
@@ -123,7 +149,7 @@ The `/jobs/$jobId` page renders a per-stage timeline while the pipeline runs. St
 | Layer | Library |
 |---|---|
 | API | FastAPI + Uvicorn |
-| Database | SQLite (default) or Postgres 16 + SQLAlchemy 2 async + Alembic |
+| Database | Postgres 16 in Docker (what `scripts/start.sh` runs) or SQLite for a Docker-free run, through SQLAlchemy 2 async + Alembic |
 | Video download | yt-dlp (YouTube / Facebook / TikTok / Instagram via PlatformAdapter registry) |
 | Video editing | ffmpeg (bundled via imageio-ffmpeg) + PyAV |
 | Transcription | faster-whisper (word-level) |
@@ -143,8 +169,10 @@ See `.env.example` for the full list. Key settings:
 
 | Variable | Default | Description |
 |---|---|---|
-| `YTVIDEO_JOB_STORE` | `sql` | `sql` or `memory` |
-| `YTVIDEO_DB_URL` | `sqlite+aiosqlite:///./reelsmith.db` | Database URL (`.env.example` points it at the docker-compose Postgres) |
+| `YTVIDEO_JOB_STORE` | `sql` | `sql` or `memory` (`memory` keeps nothing across restarts) |
+| `YTVIDEO_DB_URL` | `sqlite+aiosqlite:///./reelsmith.db` | Database URL. `.env.example` points it at the docker-compose Postgres, and `scripts/start.sh` exports that URL itself unless your shell already sets one |
+| `YTVIDEO_RETENTION_DAYS` | `30` | The janitor retires clips older than this and deletes their files. `.env.example` sets `365` |
+| `YTVIDEO_TEST_DB_URL` | `postgresql+asyncpg://reelsmith:reelsmith@localhost:5432/reelsmith_test` | Tests only: the database `pytest -m integration` TRUNCATEs. Must be local and named `*_test`; never your app database |
 | `YTVIDEO_MAX_CONCURRENT_JOBS` | `1` | Pipelines running at once; extra jobs wait as `pending` |
 | `YTVIDEO_MAX_PARALLEL_CHAPTERS` | `1` | Chapters processed concurrently within a job |
 | `YTVIDEO_DEFAULT_DOWNLOAD_PATH` | `<project>/data/downloads` | Where each job's source video (kept for re-render and reprompt), its output folder and uploads (`uploads/`) live; gitignored. Do not point it at `/tmp`: the OS clears it, the sources are lost and re-render and reprompt answer 409 "source video not retained" |
