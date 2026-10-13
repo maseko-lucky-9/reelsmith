@@ -112,6 +112,18 @@ docker compose exec -T postgres psql -U reelsmith -d postgres -c "CREATE DATABAS
 docker compose exec -T postgres psql -U reelsmith -d restore_check < data/backups/reelsmith.sql
 ```
 
+**Mapping the export folder.** With `YTVIDEO_EXPORT_BASE_FOLDER` set (a Syncthing share, say), every job also exports its clips and a `manifest.csv` to `<folder>/<job_id>/`. Runs on the old in-memory store left such folders with no database record, and the database's clip paths (`/tmp/yt/...`) point at files macOS has since cleared. `python -m scripts.map_inbox_to_db` repairs both; it is a dry run until you pass `--apply`:
+
+```bash
+python -m scripts.map_inbox_to_db            # report only: what would change
+python -m scripts.map_inbox_to_db --apply    # write it (take a dump first, see above)
+```
+
+- A job the database knows: each clip whose recorded file is gone is re-pointed at its copy in the folder (an `.enhanced` or `.enhanced-audio` clip falls back to its pre-enhancement export). A path that still resolves is never replaced.
+- A folder the database has never seen: imported as a completed job (`inbox://<job_id>`, titled `Inbox export <id>`, dated from the export) with a chapter and a clip per manifest row: title, description, hashtags and duration. Start is 0 and there is no score, transcript or thumbnail, and no source video, so re-render and reprompt answer 409 "source video not retained".
+- It never writes to the folder, because Syncthing would carry the edit to your other devices. It is safe to run again, and it lists every row or file it skipped.
+- The retention janitor never deletes below the export folder: it removes clip files only under the download path (`data/downloads`), so a clip that points at an export copy is retired when it expires but its file stays.
+
 To replace the live history, stop the API first, `DROP DATABASE reelsmith` and `CREATE DATABASE reelsmith` through the `postgres` database as above, then restore into `reelsmith`. That deletes the current history, so take a dump first. `docker compose down -v` or `docker volume rm reelsmith_postgres_data` also deletes it (plain `docker compose down` and reboots do not), and the next `scripts/start.sh` then starts a new, empty database. If the volume is lost, restore the latest dump as above, or re-run `python -m scripts.migrate_sqlite_to_postgres`: it copies from your old SQLite file, which the app never modifies, so it brings back every job stored before the move to Postgres (not later ones). `scripts/deploy.sh` tar-snapshots the volume to `data/backups/` before it changes anything.
 
 ## Architecture
@@ -133,6 +145,7 @@ app/bus/                 — async event bus + job store (memory / SQL: SQLite o
 app/db/                  — SQLAlchemy ORM models, alembic migrations, `migrate.py` (`upgrade_to_head(url)`)
 scripts/start.sh         — one command: Postgres in Docker + API + UI
 scripts/migrate_sqlite_to_postgres.py — one-off copy of the SQLite history into Postgres
+scripts/map_inbox_to_db.py — map the export folder's clips and job folders into the database
 ```
 
 ## Live Progress Timeline
@@ -171,6 +184,7 @@ See `.env.example` for the full list. Key settings:
 |---|---|---|
 | `YTVIDEO_JOB_STORE` | `sql` | `sql` or `memory` (`memory` keeps nothing across restarts) |
 | `YTVIDEO_DB_URL` | `sqlite+aiosqlite:///./reelsmith.db` | Database URL. `.env.example` points it at the docker-compose Postgres, and `scripts/start.sh` exports that URL itself unless your shell already sets one |
+| `YTVIDEO_EXPORT_BASE_FOLDER` | empty | Each job also exports its clips and a `manifest.csv` to `<folder>/<job_id>/`; empty means `<download_path>/<video>/exports`. Never swept by the janitor; `scripts/map_inbox_to_db.py` maps it into the database |
 | `YTVIDEO_RETENTION_DAYS` | `30` | The janitor retires clips older than this and deletes their files. `.env.example` sets `365` |
 | `YTVIDEO_TEST_DB_URL` | `postgresql+asyncpg://reelsmith:reelsmith@localhost:5432/reelsmith_test` | Tests only: the database `pytest -m integration` TRUNCATEs. Must be local and named `*_test`; never your app database |
 | `YTVIDEO_MAX_CONCURRENT_JOBS` | `1` | Pipelines running at once; extra jobs wait as `pending` |
@@ -231,3 +245,4 @@ Reloading a client route such as `/uploads/new` or `/jobs/<id>` serves the UI (`
 | [007](docs/decisions/007-clip-discovery-and-reprompt.md) | Clip discovery in chapterless sources, and reprompt |
 | [008](docs/decisions/008-no-gpu-encode.md) | No GPU encode on Apple Silicon; cap the reel canvas and prefer H.264 |
 | [009](docs/decisions/009-postgres-default-store.md) | Postgres in Docker is the default job store; one launcher starts the stack |
+| [010](docs/decisions/010-map-export-folder.md) | Map the export folder into the database; the expiry sweep deletes only below managed roots |

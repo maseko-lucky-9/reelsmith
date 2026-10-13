@@ -75,14 +75,19 @@ async def sweep_expired_clips(
     *,
     retention_days: int,
     now: datetime,
+    roots: Sequence[Path] | None = None,
 ) -> list[str]:
     """Retire expired live clips, then delete their files.
 
     ``now`` must be timezone-aware; it is converted to UTC because SQLite
     stores timestamps as naive wall-clock strings. Returns the retired clip
-    ids. A file that cannot be deleted is logged and skipped; a database
-    error propagates (nothing has been deleted at that point).
+    ids. A file is deleted only below a managed root (``roots``, default
+    ``managed_roots()``): a clip may point at a copy the app does not own, such
+    as one in ``export_base_folder``, and that is retired but never deleted.
+    A file that cannot be deleted is logged and skipped; a database error
+    propagates (nothing has been deleted at that point).
     """
+    roots = managed_roots() if roots is None else roots
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
     cutoff = now.astimezone(UTC) - timedelta(days=retention_days)
@@ -121,10 +126,11 @@ async def sweep_expired_clips(
                     "retention: kept %s (clip %s): a live clip still uses it", raw, clip_id
                 )
                 continue
-            try:
-                Path(raw).unlink(missing_ok=True)
-            except OSError:
-                log.exception("retention: could not delete %s (clip %s)", raw, clip_id)
+            path = _checked(raw)
+            if path is None:
+                log.warning("retention: kept %s (clip %s): not a safe path", raw, clip_id)
+                continue
+            delete_below_root(path, roots, owner=f"expired clip {clip_id}")
     return [row[0] for row in rows]
 
 
@@ -686,7 +692,7 @@ async def run_retention_sweeps(
     roots = managed_roots()
     report = RetentionReport(
         retired_clip_ids=await sweep_expired_clips(
-            factory, retention_days=settings.retention_days, now=now
+            factory, retention_days=settings.retention_days, now=now, roots=roots
         ),
         cleaned_job_ids=await sweep_unused_sources(
             factory,
