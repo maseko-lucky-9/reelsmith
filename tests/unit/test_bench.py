@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -164,3 +167,38 @@ def test_load_chapters_rejects_inverted_span(tmp_path):
     path.write_text(json.dumps([{"title": "x", "start": 3, "end": 1}]))
     with pytest.raises(ValueError, match="end"):
         load_chapters(path)
+
+
+def test_bench_imports_where_the_posix_resource_module_is_missing() -> None:
+    """Windows has no ``resource``: a module-level import broke ``import scripts.bench``."""
+    code = "import sys; sys.modules['resource'] = None; import scripts.bench"
+    root = Path(__file__).resolve().parents[2]
+
+    result = subprocess.run(
+        [sys.executable, "-c", code], cwd=root, capture_output=True, text=True
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_peak_rss_mib_measures_this_process() -> None:
+    from scripts.bench import peak_rss_mib
+
+    value = peak_rss_mib()
+
+    assert isinstance(value, float)
+    assert value > 1.0
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows only")
+def test_peak_rss_of_children_is_unmeasured_on_windows() -> None:
+    from scripts.bench import peak_rss_mib
+
+    assert peak_rss_mib(children=True) is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX only")
+def test_peak_rss_of_children_is_measured_on_posix() -> None:
+    from scripts.bench import peak_rss_mib
+
+    assert isinstance(peak_rss_mib(children=True), float)
