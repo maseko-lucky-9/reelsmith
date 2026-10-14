@@ -123,6 +123,9 @@ python -m scripts.map_inbox_to_db --apply    # write it (take a dump first, see 
 - A folder the database has never seen: imported as a completed job (`inbox://<job_id>`, titled `Inbox export <id>`, dated from the export) with a chapter and a clip per manifest row: title, description, hashtags and duration. Start is 0 and there is no score, transcript or thumbnail, and no source video, so re-render and reprompt answer 409 "source video not retained".
 - It never writes to the folder, because Syncthing would carry the edit to your other devices. It is safe to run again, and it lists every row or file it skipped and every live clip it found no file for. It refuses an export folder that lies inside the download folder, where the janitor would own its files.
 - The retention janitor never deletes below the export folder: it removes clip files only under the download path (`data/downloads`), so a clip that points at an export copy is retired when it expires but its file stays. For the same reason "Enhance speech" answers 409 for such a clip: it writes a new file beside the original, and that would sync to your other devices.
+- An mp4 under 8 bytes is a test-run placeholder: the tool skips it and reports it.
+
+**Repairing job metadata.** Jobs stored before [ADR-009](docs/decisions/009-postgres-default-store.md) have no title or duration, so the job page says "Processing…". Nothing needs re-running and nothing is downloaded: `python -m scripts.repair_job_metadata` asks yt-dlp for the title and duration of each such finished job's URL (single video, no download) and writes them onto the existing job. An `upload://` job gets its file name; a job imported from the export folder gets the title in its manifest when there is one. A title already set is never overwritten, a video that is gone or needs a login is listed and left alone, and it never writes to the export folder. It is a dry run until `--apply` (dump first); a second run only retries what failed. `--drop-placeholders` (also a dry run until `--apply`) removes imported jobs that hold nothing but placeholder files. Transcripts, scores and thumbnails of imported clips are not recoverable without the source videos.
 
 To replace the live history, stop the API first, `DROP DATABASE reelsmith` and `CREATE DATABASE reelsmith` through the `postgres` database as above, then restore into `reelsmith`. That deletes the current history, so take a dump first. `docker compose down -v` or `docker volume rm reelsmith_postgres_data` also deletes it (plain `docker compose down` and reboots do not), and the next `scripts/start.sh` then starts a new, empty database. If the volume is lost, restore the latest dump as above, or re-run `python -m scripts.migrate_sqlite_to_postgres`: it copies from your old SQLite file, which the app never modifies, so it brings back every job stored before the move to Postgres (not later ones). `scripts/deploy.sh` tar-snapshots the volume to `data/backups/` before it changes anything.
 
@@ -146,6 +149,7 @@ app/db/                  — SQLAlchemy ORM models, alembic migrations, `migrate
 scripts/start.sh         — one command: Postgres in Docker + API + UI
 scripts/migrate_sqlite_to_postgres.py — one-off copy of the SQLite history into Postgres
 scripts/map_inbox_to_db.py — map the export folder's clips and job folders into the database
+scripts/repair_job_metadata.py — fill missing job titles and durations from the URL; drop placeholder imports
 ```
 
 ## Live Progress Timeline
@@ -246,3 +250,4 @@ Reloading a client route such as `/uploads/new` or `/jobs/<id>` serves the UI (`
 | [008](docs/decisions/008-no-gpu-encode.md) | No GPU encode on Apple Silicon; cap the reel canvas and prefer H.264 |
 | [009](docs/decisions/009-postgres-default-store.md) | Postgres in Docker is the default job store; one launcher starts the stack |
 | [010](docs/decisions/010-map-export-folder.md) | Map the export folder into the database; the expiry sweep deletes only below managed roots |
+| [011](docs/decisions/011-repair-job-metadata.md) | Repair job metadata from the URL instead of re-running the job; drop the placeholder imports |
