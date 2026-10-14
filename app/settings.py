@@ -77,6 +77,10 @@ class Settings(BaseSettings):
     whisper_beam_size: int = 1
     whisper_vad_filter: bool = True
     whisper_cpu_threads: int = 8
+    # "auto" | "cpu" | "cuda". "auto" lets CTranslate2 pick a GPU when it sees
+    # one and, if the CUDA runtime turns out to be unusable (Windows without
+    # cublas64_12.dll), reloads on the CPU and retries once. "cuda" fails loudly.
+    whisper_device: str = "auto"
     # Load the model in the background at API start-up (whisper provider
     # only) so the first job doesn't pay for it. Tests turn this off.
     whisper_warmup: bool = True
