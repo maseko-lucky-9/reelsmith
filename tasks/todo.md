@@ -15,6 +15,7 @@ Open work is tracked per feature in `specs/*/tasks.md`; this file keeps the fini
 | [009 Durable job history](../specs/009-durable-job-history/spec.md) | [tasks.md](../specs/009-durable-job-history/tasks.md) | 0 open: T058-T063 done (Postgres in Docker, full job state persisted, SQLite copy, `scripts/start.sh`) |
 | [010 Map the export folder](../specs/010-map-export-folder/spec.md) | [tasks.md](../specs/010-map-export-folder/tasks.md) | 0 open: T064-T067 done (janitor guard, `scripts/map_inbox_to_db.py`, inbox job titles, enhance guard) |
 | [011 Repair job metadata](../specs/011-repair-job-metadata/spec.md) | [tasks.md](../specs/011-repair-job-metadata/tasks.md) | 0 open: T068-T070 done (titles and durations from the URL, placeholder imports dropped) |
+| [012 TikTok posting and trends](../specs/012-tiktok-posting-and-trends/spec.md) | [tasks.md](../specs/012-tiktok-posting-and-trends/tasks.md) | 13 open: T071-T076 built in PRs (phase 1), T077 go-live (owner decision), T078-T082 phases 2-3, T083 sound on hold |
 | [002-007 roadmap stubs](../specs/README.md) | none yet | stubs only: caption/brand pipeline, analytics, share links, webhooks, API tokens, workspaces |
 
 Constitution: [.specify/memory/constitution.md](../.specify/memory/constitution.md)

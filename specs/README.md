@@ -19,6 +19,7 @@ Spec numbers and ADR numbers (`docs/decisions/NNN-*.md`) are separate sequences.
 | 009 durable-job-history | Implemented (T058-T063) | [spec](009-durable-job-history/spec.md) · [tasks](009-durable-job-history/tasks.md) |
 | 010 map-export-folder | Implemented (T064-T067) | [spec](010-map-export-folder/spec.md) · [tasks](010-map-export-folder/tasks.md) |
 | 011 repair-job-metadata | Implemented (T068-T070) | [spec](011-repair-job-metadata/spec.md) · [tasks](011-repair-job-metadata/tasks.md) |
+| 012 tiktok-posting-and-trends | Phase 1 built, not live (T071-T076; T077 go-live is an owner decision); phases 2-4 planned | [spec](012-tiktok-posting-and-trends/spec.md) · [tasks](012-tiktok-posting-and-trends/tasks.md) · [baseline](012-tiktok-posting-and-trends/baseline.md) |
 
 ## Roadmap stubs
 

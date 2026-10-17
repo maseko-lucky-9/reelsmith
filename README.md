@@ -251,3 +251,4 @@ Reloading a client route such as `/uploads/new` or `/jobs/<id>` serves the UI (`
 | [009](docs/decisions/009-postgres-default-store.md) | Postgres in Docker is the default job store; one launcher starts the stack |
 | [010](docs/decisions/010-map-export-folder.md) | Map the export folder into the database; the expiry sweep deletes only below managed roots |
 | [011](docs/decisions/011-repair-job-metadata.md) | Repair job metadata from the URL instead of re-running the job; drop the placeholder imports |
+| [012](docs/decisions/012-tiktok-posting-gatekeeper.md) | The sidecar is the gatekeeper for TikTok posting; a 15-minute dispatcher replaces the Wait |
