@@ -218,13 +218,16 @@ class _Harness:
     def export_dir(self) -> Path:
         return self.tmp_path / "exp" / JOB_ID
 
-    async def complete_job(self, store: Any) -> list[dict[str, Any]]:
+    async def complete_job(
+        self, store: Any, source: str | None = "youtube"
+    ) -> list[dict[str, Any]]:
         """Run the original job (two discovered clips); return its clips."""
         options = PipelineOptions(audio_enhance=False)
         await store.create(
             JobState(
                 job_id=JOB_ID,
                 url=URL,
+                source=source,
                 download_path=str(self.tmp_path),
                 pipeline_options=options,
             )
@@ -425,6 +428,27 @@ async def test_reprompt_rewrites_the_manifest_with_the_new_clips(harness, memory
         rows = list(csv.DictReader(fh))
     assert sorted(r["filename"] for r in rows) == ["02_Alpha.mp4", "03_Gamma.mp4"]
     assert (harness.export_dir / "02_Alpha.mp4").is_file()
+
+
+def _manifest_rows(harness: _Harness) -> list[dict[str, str]]:
+    with (harness.export_dir / "manifest.csv").open(encoding="utf-8") as fh:
+        return list(csv.DictReader(fh))
+
+
+@pytest.mark.parametrize(("source", "cell"), [("tiktok", "tiktok"), (None, "")])
+async def test_the_manifest_carries_the_jobs_source_before_and_after_a_reprompt(
+    harness, memory_store, source, cell
+):
+    await harness.complete_job(memory_store, source=source)
+    original = _manifest_rows(harness)
+    assert sorted(r["filename"] for r in original) == ["00_Alpha.mp4", "01_Beta.mp4"]
+    assert [r["source"] for r in original] == [cell, cell]
+
+    await harness.reprompt(memory_store)
+
+    rewritten = _manifest_rows(harness)
+    assert sorted(r["filename"] for r in rewritten) == ["02_Alpha.mp4", "03_Gamma.mp4"]
+    assert [r["source"] for r in rewritten] == [cell, cell]
 
 
 async def test_reprompt_leaves_no_temp_dir(harness, memory_store):
