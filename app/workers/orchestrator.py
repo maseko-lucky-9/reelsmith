@@ -378,8 +378,9 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
             stem = Path(clip.get("output_path") or "").stem
             clip["export_path"] = path_map.get(stem, "")
 
+        job = await store.get(job_id)
         manifest_path = await asyncio.to_thread(
-            manifest_service.write_manifest, clips_data, export_dir
+            manifest_service.write_manifest, clips_data, export_dir, source=job.source
         )
         await _emit(bus, EventType.MANIFEST_CREATED, job_id, manifest_path=manifest_path)
 
@@ -1034,7 +1035,10 @@ async def _reprompt_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> 
             clip["export_path"] = path_map.get(Path(clip.get("output_path") or "").stem, "")
             manifest_clips.append(clip)
         manifest_path = await asyncio.to_thread(
-            manifest_service.write_manifest, manifest_clips, export_dir
+            manifest_service.write_manifest,
+            manifest_clips,
+            export_dir,
+            source=job.source,
         )
         await _emit(bus, EventType.MANIFEST_CREATED, job_id, manifest_path=manifest_path)
 

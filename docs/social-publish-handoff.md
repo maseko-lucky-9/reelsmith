@@ -1,17 +1,19 @@
-# Social publish handoff — reelsmith → n8n contract
+# Social publish handoff: reelsmith → n8n → tiktok-sidecar
+
+Decision and reasoning: [ADR-012](decisions/012-tiktok-posting-gatekeeper.md). Requirements: [spec 012](../specs/012-tiktok-posting-and-trends/spec.md). Operating detail for the cluster side lives in `home-lab/n8n-self-hosting/projects/reelsmith-social-publish/README.md` and `home-lab/tiktok-sidecar/README.md`.
 
 ## What reelsmith produces
 
-After every completed job, the orchestrator writes two artifacts into a dedicated sub-folder:
+After every completed job, the orchestrator writes two things into a dedicated sub-folder:
 
 ```
 $YTVIDEO_EXPORT_BASE_FOLDER/
 └── <job_id>/
     ├── <clip-stem>.mp4    (one file per rendered clip)
-    └── manifest.csv       (written last — safe trigger target after all clips copied)
+    └── manifest.csv       (written last, after all clips are copied)
 ```
 
-`manifest.csv` is always written **after** all clips have been fully copied (`shutil.copy2`).
+`manifest.csv` is always written **after** all clips have been fully copied (`shutil.copy2`). Syncthing may still be copying a clip when the manifest arrives, so a consumer must wait for a missing file rather than skip or archive it.
 
 ## manifest.csv schema
 
@@ -21,84 +23,55 @@ $YTVIDEO_EXPORT_BASE_FOLDER/
 | `title` | string | Human-readable clip title |
 | `duration_seconds` | float | Clip duration in seconds |
 | `file_size_mb` | float | File size in megabytes |
-| `description` | string | Auto-generated description |
-| `hashtags` | JSON string | `json.dumps(list[str])` — strip `#` for YouTube tags |
-| `export_path` | string | Absolute path to the `.mp4` inside the job sub-folder |
-| `thumbnail_path` | string | Absolute path to thumbnail image (may be empty) |
+| `description` | string | Auto-generated description (the caption) |
+| `hashtags` | JSON string | `json.dumps(list[str])`, without `#` |
+| `export_path` | string | Absolute path on the **producing machine**. Consumers must not use it; they join `filename` to the manifest's own folder. |
+| `thumbnail_path` | string | Absolute path to the thumbnail (may be empty) |
 | `job_id` | string | Matches the parent folder name |
+| `broll_credits` | JSON string | B-roll attributions (`[]` when none) |
+| `source` | string | The job's platform id: `youtube`, `tiktok`, `upload`, `generate`, `instagram`, `facebook`; empty for jobs created before the column existed |
 
-## n8n workflow — current architecture (post-2026-05-27 sidecar cutover)
-
-**Workflow:** `Reelsmith Social Publish` (id `SKLkX5qUDYLlWTxo`)
-**Trigger:** `Scanner Trigger` cron — `0 */8 * * *` (every 8 hours)
-
-> ⚠️ The `LocalFileTrigger` node was removed in the n8n 2.x upgrade — use the
-> `Scanner Trigger` cron instead. Any documentation referencing `LocalFileTrigger`
-> is outdated.
-
-### Publish pipeline
+## How a clip reaches TikTok
 
 ```
-Scanner Trigger (0 */8 * * *)
-  └─▶ Scan Manifests (Code) — walks /data/reelsmith-inbox for manifest.csv, skips processed/
-        └─▶ Index Clips (Code) — fans out per clip row; resolves export_path, sets clipIndex
-              └─▶ Assign Peak Window (Code) — distributes clips across 4-region peak windows
-                    └─▶ Wait — holds until scheduledAt
-                          └─▶ Read Clip File — reads mp4 as binary
-                                ├─▶ TikTok branch:
-                                │     └─▶ TikTok Rate Limit (≤3 posts/day cap)
-                                │           └─▶ TikTok Sidecar Upload
-                                │                 POST http://tiktok-sidecar.n8n-live.svc.cluster.local:8000/api/upload
-                                │                 (multipart: video, caption, hashtags, account=reelsmith)
-                                └─▶ YouTube branch:
-                                      └─▶ YouTube Init → YouTube Capture Session → YouTube Upload
-                                            (OAuth2 credential: reelsmith-youtube, privacyStatus: private)
-                                                │
-                                 Merge Results ◀┘
-                                      └─▶ Log Results (results.log.csv: timestamp,clip,title,status,tiktok_post_id,tiktok_post_url)
-                                            └─▶ Archive Manifest (moves manifest.csv → processed/manifest-<ISO>.csv)
+Reelsmith job done
+  └▶ <share>/<job_id>/ clips + manifest.csv
+       └▶ Syncthing: Mac (send-only) ─▶ cluster PVC syncthing-reelsmith-pvc
+            (only while the Mac is awake with Tailscale up)
+            └▶ n8n "Reelsmith Social Publish", every 15 minutes, 12:00-20:45 SAST
+                 Pick Due Clip ─▶ TikTok Sidecar Upload ─▶ Log Results ─▶ Archive Manifest
+                      └▶ tiktok-sidecar (the gatekeeper): reads the clip from /inbox, checks, posts
+                           └▶ TikTok web upload, signed in with the session cookie
 ```
 
-### TikTok publish mechanism
+Rules enforced:
 
-TikTok is published via a **self-hosted FastAPI sidecar** (`tiktok-sidecar`) running in the `n8n-live`
-namespace. The sidecar wraps `makiisthenes/TiktokAutoUploader` and authenticates using **session
-cookies** (not the official TikTok Content Posting API).
+- **Slots:** at most one clip per run, on or after 12:00, 15:00 or 18:00 SAST, at least 170 minutes after the previous slot was taken, never after 21:00. A slot missed while the host was off posts late, the same day.
+- **Which clips:** manifests dated 2026-10-11 or later, newest job first, then row order. Only `source = youtube` (a manifest without the column only if its job id is on the workflow's legacy list). A missing file waits; a file of 1 KB or less, an empty name or a non-`.mp4` name is junk and is skipped. A manifest is archived into `processed/` only when every row is posted, posted elsewhere or junk.
+- **Never twice:** the sidecar refuses a clip already posted (by name or by content hash) with 409, and blocks a clip whose last upload has no recorded outcome (`ambiguous`) until a person resolves it.
+- **Caps:** three posts per SAST day; a pause after two failed attempts in a row.
+- **Markers** live on the cluster volume, outside the Syncthing folder (`.slots/`, `.state/`) or beside the job (`.claims/`, `results.log.csv`). The share on the Mac is never edited.
 
-- **Cookie auth** — no developer app, no OAuth flow, no API registration required.
-- **Public posts** — posts land as public on the `@reelsmith` account.
-- **Cookie rotation** — session cookies expire in 2–4 weeks; monthly refresh required
-  (see `apps/tiktok-sidecar/README.md §6`).
-- **Rate cap** — the `TikTok Rate Limit` n8n node enforces ≤3 posts/day using
-  `$getWorkflowStaticData('global')` (UTC-day-scoped).
-- **NEVER** `kubectl delete pod tiktok-sidecar-*` — use `rollout restart` to preserve
-  the seeded cookies PVC.
+## Alerts and operating commands
 
-### Peak-time publishing
+| Event | What happens |
+|---|---|
+| Session cookie rejected | Telegram: "cookie expired, run `make refresh-cookies`" (repo `tiktok-sidecar`) |
+| Upload may have reached TikTok (timeout, reset, rejected publish) | clip kept as failed or `ambiguous`; Telegram with the file name and an `error_id`; resolve with `make ledger-resolve KEY=<job>/<file> OUTCOME=posted\|not_posted` |
+| Network or clock not ready, sidecar busy or paused | clip and slot released; Telegram after three in a row |
+| No post for 48 hours, publisher not running for 25 hours, sidecar down, error execution | watchdog Telegram (ongoing conditions once a day) |
 
-Clips from each manifest are distributed one-per-peak-window across four regions:
-
-| Region | Timezone | Daily peaks (local) |
-|---|---|---|
-| South Africa | Africa/Johannesburg | 12:00, 18:00, 20:00 |
-| US East | America/New_York | 12:00, 18:00, 20:00 |
-| US West | America/Los_Angeles | 12:00, 18:00, 20:00 |
-| UK / EU | Europe/London | 12:00, 19:00, 21:00 |
-
-`clip[0]` → earliest upcoming peak window, `clip[1]` → second, and so on.
-DST is handled automatically via `luxon` inside the Assign Peak Window Code node.
+Switches: `POSTING_ENABLED` on the sidecar (off by default) and the workflow's `DRY_RUN`. Rollback: `scripts/deploy-workflow.sh --deactivate`, then set `POSTING_ENABLED=false` or revert the manifests PR and sync.
 
 ## Syncthing replication
 
 Mac-side Syncthing replicates `$YTVIDEO_EXPORT_BASE_FOLDER` into the cluster:
 
-| Mac folder | Type | Cluster mount |
+| Mac folder | Type | Cluster path |
 |---|---|---|
-| `~/SyncthingShares/reelsmith-inbox` | Send Only | `/data/reelsmith-inbox` (n8n-live PVC `syncthing-reelsmith-pvc`) |
+| `~/SyncthingShares/reelsmith-inbox` | Send Only | PVC `syncthing-reelsmith-pvc`, folder `reelsmith-inbox/` |
 
-The `Scan Manifests` node walks `/data/reelsmith-inbox` inside the n8n pod. After processing,
-`Archive Manifest` moves the manifest to `processed/manifest-<ISO>.csv` (a rename, not delete —
-the Mac Send-Only folder stays clean).
+n8n mounts the PVC root at `/data/reelsmith-inbox`, so a job is at `/data/reelsmith-inbox/reelsmith-inbox/<job_id>/`. The sidecar mounts only the `reelsmith-inbox` subfolder, read-only, at `/inbox`, so a job is at `/inbox/<job_id>/`. The Mac reaches the cluster Syncthing over its Tailscale address, so nothing syncs while Tailscale is off or the Mac is asleep.
 
 ## Environment variable
 
@@ -106,23 +79,26 @@ the Mac Send-Only folder stays clean).
 YTVIDEO_EXPORT_BASE_FOLDER=/Users/ltmas/SyncthingShares/reelsmith-inbox
 ```
 
-Leave blank to fall back to `<download_path>/<video>/exports` (no per-job sub-folder —
-not suitable for n8n integration).
+Leave blank to fall back to `<download_path>/<video>/exports` (no per-job sub-folder, so not suitable for n8n). Tests never write to this folder (`conftest.py` redirects it).
 
-## Direct sidecar publish (for testing / immediate post without waiting for cron)
+## Standing prerequisites
+
+- The Mac awake with Tailscale up while a job exports, so the clips reach the cluster.
+- The homelab on from about 11:30 to 21:00 SAST.
+- A fresh session cookie about monthly.
+
+## Testing the sidecar without posting
 
 ```bash
-# Port-forward the sidecar from any machine with homelab kubectl access
+# Port-forward from a machine with homelab kubectl access
 kubectl -n n8n-live port-forward svc/tiktok-sidecar 8000:8000 &
 
-# POST the clip
+# A dry run runs every check and builds the caption, but uploads nothing
 curl -s -X POST http://127.0.0.1:8000/api/upload \
-  -F "video=@/path/to/clip.mp4" \
+  -F "clip_path=<job_id>/<file>.mp4" \
   -F "caption=Your caption here" \
-  -F "hashtags=#gadgets #tech #fyp" \
-  -F "account=reelsmith"
-# → {"status":"success","message":"Published successfully","post_url":"...","post_id":"..."}
+  -F 'hashtags=["gadgets","tech"]' \
+  -F "dry_run=true"
 ```
 
-This bypasses the cron + peak-window scheduler and posts immediately.
-Used for smoke-testing and on-demand live verification (e.g. 2026-05-27 B-7 test).
+The full request and response contract is in the sidecar README (Contract v1).
