@@ -53,6 +53,25 @@ os.environ.setdefault("YTVIDEO_REFRAME_MODEL_DIR", tempfile.mkdtemp(prefix="reel
 
 
 @pytest.fixture(autouse=True)
+def _isolate_export_base_folder(tmp_path_factory, monkeypatch):
+    """Point the export base folder at a per-test tmp dir, however it is read.
+
+    The ``setdefault`` above only wins while ``YTVIDEO_EXPORT_BASE_FOLDER`` is
+    unset in the process environment; a shell that exports it (or the ``.env``
+    path, when a test builds a fresh ``Settings``) would send the pipeline's job
+    directories into the developer's real export folder (a Syncthing share).
+    So every test gets both the shared ``settings`` object and the environment
+    pointed at its own folder. A test that needs another value sets it on
+    ``settings`` itself, which runs after this fixture and wins.
+    """
+    from app.settings import settings
+
+    export_base = str(tmp_path_factory.mktemp("export-base"))
+    monkeypatch.setattr(settings, "export_base_folder", export_base)
+    monkeypatch.setenv("YTVIDEO_EXPORT_BASE_FOLDER", export_base)
+
+
+@pytest.fixture(autouse=True)
 async def _cancel_lingering_tasks():
     """Cancel asyncio tasks leaked by a test before the event loop is torn down.
 

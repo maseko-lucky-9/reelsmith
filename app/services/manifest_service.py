@@ -11,7 +11,7 @@ log = logging.getLogger(__name__)
 COLUMNS = [
     "filename", "title", "duration_seconds", "file_size_mb",
     "description", "hashtags", "export_path", "thumbnail_path", "job_id",
-    "broll_credits",
+    "broll_credits", "source",
 ]
 
 
@@ -36,7 +36,16 @@ def broll_credits(assets: list[dict] | None) -> list[dict[str, str]]:
     return credits
 
 
-def write_manifest(clips: list[dict], export_dir: str) -> str:
+def write_manifest(
+    clips: list[dict], export_dir: str, source: str | None = None
+) -> str:
+    """Write ``manifest.csv`` into ``export_dir`` and return its path.
+
+    ``source`` is the job's platform id (``jobs.source``: youtube, tiktok,
+    upload, generate...), written on every row; ``None`` (a legacy job) is
+    written as an empty cell. Consumers read columns by header name, so new
+    columns are only ever appended.
+    """
     out_path = str(Path(export_dir) / "manifest.csv")
     tmp_path = out_path + ".tmp"
     with open(tmp_path, "w", newline="", encoding="utf-8") as f:
@@ -58,6 +67,7 @@ def write_manifest(clips: list[dict], export_dir: str) -> str:
                 "thumbnail_path": clip.get("thumbnail_path", ""),
                 "job_id": clip.get("job_id", ""),
                 "broll_credits": json.dumps(broll_credits(clip.get("broll_assets"))),
+                "source": source or "",
             }
             writer.writerow(row)
     os.replace(tmp_path, out_path)

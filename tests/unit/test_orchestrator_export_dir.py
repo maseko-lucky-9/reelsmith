@@ -58,13 +58,13 @@ def _wire_stubs(monkeypatch, tmp_path: Path, export_base: str = "") -> str:
     return str(clips_dir)
 
 
-async def _run(job_id: str, tmp_path: Path) -> None:
+async def _run(job_id: str, tmp_path: Path, source: str | None = "youtube") -> None:
     bus = AsyncEventBus()
     store = JobStore()
     state = JobState(
         job_id=job_id,
         url="https://www.youtube.com/watch?v=fake",
-        source="youtube",
+        source=source,
         download_path=str(tmp_path),
     )
     await store.create(state)
@@ -95,7 +95,7 @@ async def test_export_dir_namespaced_when_base_folder_set(tmp_path, monkeypatch)
     )
     monkeypatch.setattr(
         orch.manifest_service, "write_manifest",
-        lambda clips_data, export_dir: str(Path(export_dir) / "manifest.csv"),
+        lambda clips_data, export_dir, source=None: str(Path(export_dir) / "manifest.csv"),
     )
 
     job_id = "job-namespaced"
@@ -117,7 +117,7 @@ async def test_export_dir_uses_clips_parent_when_base_folder_unset(tmp_path, mon
     )
     monkeypatch.setattr(
         orch.manifest_service, "write_manifest",
-        lambda clips_data, export_dir: str(Path(export_dir) / "manifest.csv"),
+        lambda clips_data, export_dir, source=None: str(Path(export_dir) / "manifest.csv"),
     )
 
     job_id = "job-default"
@@ -125,3 +125,26 @@ async def test_export_dir_uses_clips_parent_when_base_folder_unset(tmp_path, mon
 
     assert len(captured) == 1
     assert captured[0] == str(Path(clips_dir_str).parent / "exports")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["youtube", "tiktok", None])
+async def test_manifest_is_written_with_the_jobs_source(tmp_path, monkeypatch, source):
+    _wire_stubs(monkeypatch, tmp_path, export_base=str(tmp_path / "exports"))
+    monkeypatch.setattr(
+        orch.export_service, "export_clips",
+        lambda paths, export_dir: [p for p in paths if p],
+    )
+
+    sources: list[str | None] = []
+
+    def _fake_write_manifest(clips_data, export_dir, source=None):
+        sources.append(source)
+        return str(Path(export_dir) / "manifest.csv")
+
+    monkeypatch.setattr(orch.manifest_service, "write_manifest", _fake_write_manifest)
+
+    await _run("job-source", tmp_path, source=source)
+
+    # The job record decides, not the adapter (always "youtube" in these stubs).
+    assert sources == [source]

@@ -97,8 +97,8 @@ def _broll(provider, asset_id, author, url, query="ocean"):
     }  # fmt: skip
 
 
-def test_broll_credits_column_is_last():
-    assert COLUMNS[-1] == "broll_credits"
+def test_broll_credits_column_keeps_its_place():
+    assert COLUMNS.index("broll_credits") == COLUMNS.index("job_id") + 1
 
 
 def test_each_broll_asset_is_credited(tmp_path):
@@ -137,3 +137,50 @@ def test_a_clip_without_broll_has_no_credits(tmp_path, assets):
 
     rows = _read_csv(str(tmp_path / "manifest.csv"))
     assert json.loads(rows[0]["broll_credits"]) == []
+
+
+# ── source column (spec 012) ──────────────────────────────────────────────────
+
+
+def test_columns_keep_their_order_with_source_appended_last():
+    # n8n reads the manifest by header name; an existing column must never
+    # move, so a new one is appended.
+    assert COLUMNS == [
+        "filename", "title", "duration_seconds", "file_size_mb",
+        "description", "hashtags", "export_path", "thumbnail_path", "job_id",
+        "broll_credits", "source",
+    ]  # fmt: skip
+
+
+@pytest.mark.parametrize("source", ["youtube", "tiktok", "upload", "generate"])
+def test_source_is_written_on_every_row(tmp_path, source):
+    clips = [{"start": 0, "end": 5}, {"start": 5, "end": 9}]
+    write_manifest(clips, str(tmp_path), source=source)
+
+    rows = _read_csv(str(tmp_path / "manifest.csv"))
+    assert [r["source"] for r in rows] == [source, source]
+
+
+@pytest.mark.parametrize("source", [None, ""])
+def test_a_legacy_job_without_a_source_writes_an_empty_cell(tmp_path, source):
+    write_manifest([{"start": 0, "end": 5}], str(tmp_path), source=source)
+
+    rows = _read_csv(str(tmp_path / "manifest.csv"))
+    assert rows[0]["source"] == ""
+
+
+def test_source_defaults_to_an_empty_cell(tmp_path):
+    write_manifest([{"start": 0, "end": 5}], str(tmp_path))
+
+    rows = _read_csv(str(tmp_path / "manifest.csv"))
+    assert rows[0]["source"] == ""
+
+
+def test_source_leaves_the_other_columns_untouched(tmp_path):
+    clip = {"title": "My Clip", "job_id": "j1", "start": 0, "end": 10}
+    write_manifest([clip], str(tmp_path), source="tiktok")
+
+    rows = _read_csv(str(tmp_path / "manifest.csv"))
+    assert (rows[0]["title"], rows[0]["job_id"], rows[0]["duration_seconds"]) == (
+        "My Clip", "j1", "10",
+    )  # fmt: skip
