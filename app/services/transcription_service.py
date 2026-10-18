@@ -3,8 +3,14 @@
 Provider (``YTVIDEO_TRANSCRIPTION_PROVIDER``): ``whisper`` or ``stub``.
 
 * **Model** — one process-wide ``WhisperModel`` (``whisper_model``, int8,
-  ``whisper_cpu_threads``), loaded lazily under a lock so concurrent first
-  calls build it once; the API lifespan pre-loads it via ``warm_up()``.
+  ``whisper_device``, ``whisper_cpu_threads``), loaded lazily under a lock so
+  concurrent first calls build it once; the API lifespan pre-loads it via
+  ``warm_up()``.
+* **Device** — ``whisper_device`` is ``auto`` (default), ``cpu`` or ``cuda``.
+  A host whose GPU lacks the CUDA 12 libraries (Windows without
+  ``cublas64_12.dll``) loads the model fine and only fails on the first decode,
+  so under ``auto`` that ``RuntimeError`` reloads the model on the CPU and
+  retries once (``_decode_with_cpu_fallback``); later calls stay on the CPU.
 * **Language** — job languages are BCP-47 tags (``"en-US"``), which
   faster-whisper rejects with ``ValueError``; ``resolve_language`` maps them to
   the ISO 639-1 code Whisper knows (see its docstring for the fallbacks).
@@ -65,6 +71,8 @@ LOOP_MIN_WORDS = 25
 LOOP_MAX_PHRASE_WORDS = 20
 
 _model: WhisperModel | None = None
+# Set once a decode hit an unusable CUDA runtime: the model reloads on the CPU.
+_cpu_fallback = False
 _model_lock = threading.Lock()
 _decode_lock = threading.Lock()
 
@@ -137,18 +145,47 @@ def _get_model() -> WhisperModel:
             if _model is None:
                 from faster_whisper import WhisperModel
 
+                device = "cpu" if _cpu_fallback else settings.whisper_device
                 log.info(
-                    "Loading Whisper model  name=%s  cpu_threads=%d",
+                    "Loading Whisper model  name=%s  device=%s  cpu_threads=%d",
                     settings.whisper_model,
+                    device,
                     settings.whisper_cpu_threads,
                 )
                 _model = WhisperModel(
                     settings.whisper_model,
+                    device=device,
                     compute_type="int8",
                     cpu_threads=settings.whisper_cpu_threads,
                 )
                 log.info("Whisper model loaded")
     return _model
+
+
+def _is_cuda_runtime_error(exc: BaseException) -> bool:
+    """Whether ``exc`` is CTranslate2 failing to use CUDA (missing or too-old libraries).
+
+    The model loads fine without them; the error surfaces on the first decode,
+    e.g. ``Library cublas64_12.dll is not found or cannot be loaded``.
+    """
+    if not isinstance(exc, RuntimeError) or isinstance(exc, TranscriptionCancelled):
+        return False
+    message = str(exc).lower()
+    return any(marker in message for marker in ("cublas", "cudnn", "cuda"))
+
+
+def _switch_to_cpu(exc: BaseException) -> None:
+    """Drop the GPU model so the next ``_get_model()`` loads on the CPU."""
+    global _model, _cpu_fallback
+    with _model_lock:
+        if not _cpu_fallback:
+            log.warning(
+                "Whisper cannot use CUDA (%s); falling back to the CPU. "
+                "Set YTVIDEO_WHISPER_DEVICE=cpu to skip the GPU attempt.",
+                exc,
+            )
+        _cpu_fallback = True
+        _model = None
 
 
 def warm_up() -> None:
@@ -238,6 +275,27 @@ def _decode(
     return words
 
 
+def _decode_with_cpu_fallback(
+    audio_path: str,
+    code: str | None,
+    cancel: threading.Event | None,
+    **decoding: float,
+) -> list[WordTiming]:
+    """``_decode`` on the current model; on an unusable CUDA runtime, once, on the CPU.
+
+    Only ``whisper_device="auto"`` falls back: ``"cuda"`` was asked for, so
+    its failure is raised, and on ``"cpu"`` (or after the fallback) a CUDA-looking
+    error is not a GPU problem.
+    """
+    try:
+        return _decode(_get_model(), audio_path, code, cancel, **decoding)
+    except RuntimeError as exc:
+        if _cpu_fallback or settings.whisper_device != "auto" or not _is_cuda_runtime_error(exc):
+            raise
+        _switch_to_cpu(exc)
+    return _decode(_get_model(), audio_path, code, cancel, **decoding)
+
+
 def transcribe_to_words(
     audio_path: str,
     language: str | None = None,
@@ -275,16 +333,16 @@ def transcribe_to_words(
         if on_start is not None:
             on_start()
         if repeatable:
-            words = _decode(model, audio_path, code, cancel, temperature=GREEDY_TEMPERATURE)
+            words = _decode_with_cpu_fallback(audio_path, code, cancel, temperature=GREEDY_TEMPERATURE)
             if has_decode_loop([w.word for w in words]):
                 log.warning(
                     "Greedy transcription repeats a phrase back to back (a decode loop); decoding "
                     "again with the temperature fallback (not repeatable)  path=%s",
                     audio_path,
                 )
-                words = _decode(model, audio_path, code, cancel)
+                words = _decode_with_cpu_fallback(audio_path, code, cancel)
         else:
-            words = _decode(model, audio_path, code, cancel)
+            words = _decode_with_cpu_fallback(audio_path, code, cancel)
     log.info("Transcription complete  words=%d", len(words))
     return words
 
