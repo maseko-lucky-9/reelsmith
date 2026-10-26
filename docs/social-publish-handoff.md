@@ -47,7 +47,7 @@ Reelsmith job done
 Rules enforced:
 
 - **Slots:** at most one clip per run, on or after 12:00, 15:00 or 18:00 SAST, at least 170 minutes after the previous slot was taken, never after 21:00. A slot missed while the host was off posts late, the same day.
-- **Which clips:** manifests dated 2026-10-11 or later, newest job first, then row order. Only `source = youtube` (a manifest without the column only if its job id is on the workflow's legacy list). A missing file waits; a file of 1 KB or less, an empty name or a non-`.mp4` name is junk and is skipped. A manifest is archived into `processed/` only when every row is posted, posted elsewhere or junk.
+- **Which clips:** manifests dated 2026-10-11 or later, rotating across source videos (never the same video twice in a row; least recently used first), then row order within a video. A video's `00_*` intro (or a clip titled "Intro") is never posted. Only `source = youtube` (a manifest without the column only if its job id is on the workflow's legacy list). A missing file waits; a file of 1 KB or less, an empty name or a non-`.mp4` name is junk and is skipped. A manifest is archived into `processed/` only when every row is posted, posted elsewhere or junk.
 - **Never twice:** the sidecar refuses a clip already posted (by name or by content hash) with 409, and blocks a clip whose last upload has no recorded outcome (`ambiguous`) until a person resolves it.
 - **Caps:** three posts per SAST day; a pause after two failed attempts in a row.
 - **Markers** live on the cluster volume, outside the Syncthing folder (`.slots/`, `.state/`) or beside the job (`.claims/`, `results.log.csv`). The share on the Mac is never edited.

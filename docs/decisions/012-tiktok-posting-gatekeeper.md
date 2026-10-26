@@ -22,7 +22,7 @@ Clips posted to @reelsmith get no traffic and the automatic push stopped. The re
 ## Decision
 
 1. **The sidecar is the single gatekeeper.** It reads the clip itself from a read-only mount of the inbox, validates the path and the file, keeps the ledger, enforces the daily cap, refuses duplicates by name and by content hash, and holds the kill switch (`POSTING_ENABLED`, off by default). n8n only chooses a clip and records the outcome.
-2. **A dispatcher replaces the Wait.** n8n runs every 15 minutes between 12:00 and 20:45 SAST and posts at most one clip, in three daily slots, newest job first, only from YouTube-sourced jobs dated 2026-10-11 or later. Slot and claim markers are exclusive-create files, so two runs cannot take the same slot or clip.
+2. **A dispatcher replaces the Wait.** n8n runs every 15 minutes between 12:00 and 20:45 SAST and posts at most one clip, in three daily slots, rotating across source videos (never the same video twice in a row; least recently used first; a video's `00_*` intro is never posted; amended 2026-10-26), only from YouTube-sourced jobs dated 2026-10-11 or later. Slot and claim markers are exclusive-create files, so two runs cannot take the same slot or clip.
 3. **No video bytes pass through n8n.** The sidecar reads the file; n8n sends a relative path.
 4. **Fail closed, never post twice.** The ledger is written before the upload; an unfinished attempt blocks that clip until a person resolves it. Only outcomes that certainly did not start release the clip.
 5. **Deploys stay manual.** The workflow is updated in place through the n8n API (same id, deactivation is the rollback); manifests change only on an ArgoCD sync the owner runs.
