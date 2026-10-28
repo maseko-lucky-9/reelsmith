@@ -24,7 +24,7 @@ describe('Sidebar — only advertises pages that have a backend', () => {
     render(<Sidebar />)
     const hrefs = screen.getAllByRole('link').map((a) => a.getAttribute('href'))
     expect(hrefs).toEqual(
-      expect.arrayContaining(['/', '/generate/new', '/settings/brand', '/settings/social']),
+      expect.arrayContaining(['/', '/generate/new', '/sources/youtube', '/settings/brand', '/settings/social']),
     )
   })
 })

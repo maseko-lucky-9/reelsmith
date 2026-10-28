@@ -65,3 +65,34 @@ describe('api.cancelJob / api.deleteJob (spec 013)', () => {
     await expect(api.deleteJob('j1')).rejects.toThrow('409 {"detail":"cancel it first"}')
   })
 })
+
+describe('api.searchYoutube / api.checkYoutubeClean (spec 015)', () => {
+  it('searches with the query and limit as URL parameters', async () => {
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ items: [] }) })
+
+    await api.searchYoutube('ted talk & more', 5)
+
+    const url = String(fetchMock.mock.calls[0][0])
+    expect(url.startsWith('/api/sources/youtube/search?')).toBe(true)
+    const q = requestedQuery()
+    expect([q.get('q'), q.get('limit')]).toEqual(['ted talk & more', '5'])
+  })
+
+  it('checks one video through its own route', async () => {
+    const answer = { clean: true, confidence: 0.9, reason: 'ok', frames_checked: 4 }
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => answer })
+
+    const body = await api.checkYoutubeClean('aB8zcAttP1E')
+
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/api/sources/youtube/aB8zcAttP1E/clean')
+    expect(body).toEqual(answer)
+  })
+
+  it('refuses to put anything but the id in the path', async () => {
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({}) })
+
+    await api.checkYoutubeClean('../x?y')
+
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/api/sources/youtube/..%2Fx%3Fy/clean')
+  })
+})

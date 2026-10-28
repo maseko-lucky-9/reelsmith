@@ -4,9 +4,11 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createElement, type ComponentType } from 'react'
 import type { JobState } from '@/api/client'
 
+const navigateMock = vi.hoisted(() => vi.fn())
+
 vi.mock('@tanstack/react-router', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@tanstack/react-router')>()),
-  useNavigate: () => vi.fn(),
+  useNavigate: () => navigateMock,
 }))
 
 vi.mock('@/api/client', () => ({
@@ -61,6 +63,17 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals()
+})
+
+describe('home page: Search YouTube (spec 015)', () => {
+  it('has a Search YouTube button beside the new-project entry that opens the search page', async () => {
+    navigateMock.mockReset()
+    await renderHome()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Search YouTube' }))
+
+    expect(navigateMock).toHaveBeenCalledWith({ to: '/sources/youtube' })
+  })
 })
 
 describe('home page: select and delete', () => {

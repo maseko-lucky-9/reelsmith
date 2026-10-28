@@ -17,6 +17,7 @@ Open work is tracked per feature in `specs/*/tasks.md`; this file keeps the fini
 | [011 Repair job metadata](../specs/011-repair-job-metadata/spec.md) | [tasks.md](../specs/011-repair-job-metadata/tasks.md) | 0 open: T068-T070 done (titles and durations from the URL, placeholder imports dropped) |
 | [012 TikTok posting and trends](../specs/012-tiktok-posting-and-trends/spec.md) | [tasks.md](../specs/012-tiktok-posting-and-trends/tasks.md) | 13 open: T071-T076 built in PRs (phase 1), T077 go-live (owner decision), T078-T082 phases 2-3, T083 sound on hold |
 | [013 Cancel and delete jobs](../specs/013-cancel-and-delete-jobs/spec.md) | [tasks.md](../specs/013-cancel-and-delete-jobs/tasks.md) | 1 open: T084-T088 and T090-T092 done (cancel route and orchestrator registry, safe job delete hardened in review, home-page select and delete); T089 end-to-end check on the owner's stack |
+| [015 YouTube source search](../specs/015-youtube-source-search/spec.md) | [tasks.md](../specs/015-youtube-source-search/tasks.md) | 1 open: T111-T124 done (search route over `run_bounded`, clean-footage check with a local vision model, search page with lazy badges); T125 end-to-end on the owner's stack (YouTube refused the stream request from the build machine) |
 | [002-007 roadmap stubs](../specs/README.md) | none yet | stubs only: caption/brand pipeline, analytics, share links, webhooks, API tokens, workspaces |
 
 Constitution: [.specify/memory/constitution.md](../.specify/memory/constitution.md)
