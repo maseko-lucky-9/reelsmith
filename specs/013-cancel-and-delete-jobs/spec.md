@@ -11,7 +11,7 @@ A job cannot be stopped once it starts: there is no cancel route, no `cancelled`
 ### Cancel
 
 - **FR-001**: Every pipeline task of a job (its run, a re-render, a reprompt, waiting for a slot or running) MUST be findable by the job's id while it is not done.
-- **FR-002**: A user cancel of a job's run MUST end it with status `cancelled` and one `JobCancelled` event (payload `cancelled_step`), emitted last, and MUST remove the job's `_tmp` folder. A job cancelled while it waits for a slot MUST end the same way and MUST NOT take a slot.
+- **FR-002**: A user cancel of a job's run MUST end it with status `cancelled` and one `JobCancelled` event (payload `cancelled_step`), emitted last, and MUST remove the job's `_tmp` folder. A job cancelled while it waits for a slot MUST end the same way and MUST NOT take a slot. A user cancel MUST win over an internal cancel in flight when it lands (a decode-budget timeout, a `wait_for`, a failing sibling chapter's TaskGroup): the run ends `cancelled`, never `completed` by a fallback or `failed` by that error, unless it had already completed. A repeated cancel MUST NOT cut the wait for a worker thread (`ffmpeg_tools.to_thread_cancellable` keeps waiting until the worker returns).
 - **FR-003**: A shutdown (the orchestrator task cancelled) MUST keep today's behaviour: the job's status is left as it was (the next start fails it as interrupted) and neither `JobCancelled` nor `RepromptFailed` is emitted.
 - **FR-004**: A user cancel of a re-render MUST put the chapter back to the status it had before; of a reprompt, MUST keep the old clips (the existing undo), release the reprompt claim (also when the reprompt was still waiting for a slot) and emit `RepromptFailed` with `reason="cancelled"`. The job stays `completed`.
 - **FR-005**: The yt-dlp download thread, which cannot be killed, MUST stop at its next progress tick once its job is cancelled (a progress hook raising `yt_dlp.utils.DownloadCancelled`). Every other worker thread of a job (folder creation, export, manifest, thumbnail, captions, words sidecar, ...) runs to its end. Until each of the job's threads returns, the job MUST count as active.
@@ -43,6 +43,8 @@ A job cannot be stopped once it starts: there is no cancel route, no `cancelled`
 - A `_job_thread` counts itself from inside its thread, so between being submitted and starting it is not counted; its task is still alive then, which keeps the job active (review nit).
 - The delete lock has no timeout: a delete stuck on a hung mount holds up the other deletes until it returns.
 - An upload job cancelled (or failed) before its download step keeps its uploaded file when deleted: only the adapter-recorded `video_path` is trusted, so the file stays as a safe orphan in `uploads/`.
+- A job whose `download_path` spells a managed folder with another case or Unicode form (on APFS the same folder) gets a folder the delete does not recognise as below a managed root: its rows are deleted while its files stay.
+- `POST /jobs` accepts any `download_path`; a job whose folder is then refused (FR-010) cannot be deleted (409, rows kept). Follow-up: validate `download_path` at `POST /jobs` (below the download folder, no symlink below it).
 - `POST /renders` (and `POST /subtitle-images`) take an arbitrary `output_path` from the client and write there. This predates spec 013 and is out of its scope; follow-up: confine it to the job's folder.
 
 ## Out of scope
