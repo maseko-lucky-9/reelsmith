@@ -107,7 +107,8 @@ async def reprompt_job(
     # Same rule and message as a clip re-render (POST /clips/{id}/rerender).
     if not job.video_path or not Path(job.video_path).is_file():
         raise HTTPException(status_code=409, detail="source video not retained")
-    if not has_span and (reason := orchestrator.reprompt_unavailable_reason()):
+    prompt = body.prompt if body.prompt is not None else job.prompt
+    if not has_span and (reason := orchestrator.reprompt_unavailable_reason(prompt)):
         raise HTTPException(status_code=409, detail=reason)
     if orchestrator.deleting(job_id):
         raise HTTPException(status_code=409, detail="this job is being deleted")
@@ -116,7 +117,6 @@ async def reprompt_job(
             status_code=409, detail="a reprompt of this job is already running"
         )
 
-    prompt = body.prompt if body.prompt is not None else job.prompt
     payload = {
         "reprompt": True,
         "prompt": prompt,

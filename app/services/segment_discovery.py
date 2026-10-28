@@ -265,6 +265,13 @@ def segments_to_chapters(
             )
             continue
         index = len(chapters)
+        # The scene judge's reason and emotion (spec 014) ride in the
+        # breakdown, a JSON column, so the clip keeps them with no migration.
+        breakdown: dict[str, Any] = dict(seg.score_breakdown)
+        if seg.reason:
+            breakdown["reason"] = seg.reason
+        if seg.emotion:
+            breakdown["emotion"] = seg.emotion
         chapters.append(
             {
                 "index": index,
@@ -272,7 +279,7 @@ def segments_to_chapters(
                 "start": start,
                 "end": end,
                 "virality_score": seg.score,
-                "score_breakdown": dict(seg.score_breakdown),
+                "score_breakdown": breakdown,
                 "summary": seg.summary,
             }
         )

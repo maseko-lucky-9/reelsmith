@@ -52,7 +52,10 @@ class CreateJobRequest(BaseModel):
     )
     segment_mode: Literal["auto", "chapter"] = "auto"
     language: str = "en-US"
-    prompt: str | None = None
+    # What to find (spec 014): with scene search set up it picks the clips by
+    # what is seen and said, over the source's chapters; else it ranks the
+    # discovered clips by their transcript.
+    prompt: str | None = Field(default=None, max_length=2000)
     auto_hook: bool = True
     brand_template_id: str | None = None
     pipeline_options: PipelineOptions = Field(default_factory=PipelineOptions)

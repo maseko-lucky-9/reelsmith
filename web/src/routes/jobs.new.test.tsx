@@ -59,3 +59,27 @@ describe('NewJobPage — download path (T035)', () => {
     expect(vi.mocked(api.createJob).mock.calls[0][0].download_path).toBe('/data/reels')
   })
 })
+
+describe('NewJobPage — prompt (spec 014)', () => {
+  it('sends the prompt the user typed, trimmed', async () => {
+    renderPage()
+    fireEvent.change(screen.getByPlaceholderText(/YouTube, Facebook/), { target: { value: URL } })
+    fireEvent.change(screen.getByLabelText('Find moments (optional)'), {
+      target: { value: '  the moment the speaker gets emotional ' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Start job' }))
+
+    await waitFor(() => expect(api.createJob).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(api.createJob).mock.calls[0][0].prompt).toBe('the moment the speaker gets emotional')
+  })
+
+  it('omits a blank prompt', async () => {
+    renderPage()
+    fireEvent.change(screen.getByPlaceholderText(/YouTube, Facebook/), { target: { value: URL } })
+    fireEvent.change(screen.getByLabelText('Find moments (optional)'), { target: { value: '  ' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Start job' }))
+
+    await waitFor(() => expect(api.createJob).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(api.createJob).mock.calls[0][0]).not.toHaveProperty('prompt')
+  })
+})

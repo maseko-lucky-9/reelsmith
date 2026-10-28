@@ -9,6 +9,7 @@ import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
 import { detectPlatform } from '@/lib/detectPlatform'
 import { PlatformChip } from '@/components/platform-chip'
+import { ScenePromptField } from '@/components/scene-prompt-field'
 
 export const jobsNewRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -23,6 +24,7 @@ function NewJobPage() {
   const [downloadPath, setDownloadPath] = useState('')
   const [language, setLanguage] = useState('en-US')
   const [segmentMode, setSegmentMode] = useState<'auto' | 'chapter'>('chapter')
+  const [prompt, setPrompt] = useState('')
 
   const platform = useMemo(() => detectPlatform(url.trim()), [url])
   const isUnsupported = url.length > 0 && platform === 'unsupported'
@@ -34,6 +36,7 @@ function NewJobPage() {
         ...(downloadPath.trim() ? { download_path: downloadPath.trim() } : {}),
         language,
         segment_mode: segmentMode,
+        ...(prompt.trim() ? { prompt: prompt.trim() } : {}),
       }),
     onSuccess: (data) => {
       toast.success(`Job ${data.job_id} queued`)
@@ -111,6 +114,8 @@ function NewJobPage() {
             <option value="auto">Auto (heuristic scoring)</option>
           </select>
         </div>
+
+        <ScenePromptField id="job-prompt" value={prompt} onChange={setPrompt} />
 
         <Button
           className="w-full"

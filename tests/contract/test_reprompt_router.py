@@ -285,6 +285,24 @@ def test_reprompt_without_clip_discovery_409(client, source_video, monkeypatch):
     assert _queue(client).qsize() == 0
 
 
+def test_reprompt_with_a_prompt_scene_search_takes_needs_no_clip_discovery(
+    client, source_video, monkeypatch, tmp_path
+):
+    """Spec 014: scene search picks the clips, so provider ``chapter`` does not refuse."""
+    monkeypatch.setattr(orch.settings, "segment_provider", "chapter")
+    monkeypatch.setattr(orch.settings, "scene_search_provider", "auto")
+    sidecar_python = tmp_path / "python"
+    sidecar_python.write_text("")
+    monkeypatch.setattr(orch.settings, "scene_python", str(sidecar_python))
+    _seed(client, video_path=str(source_video))
+
+    r = client.post("/jobs/job-1/reprompt", json={"prompt": "every shot of a red car"})
+
+    assert r.status_code == 202
+    _, payload = _queue(client).get_nowait()
+    assert payload["prompt"] == "every shot of a red car"
+
+
 def test_second_reprompt_while_one_is_in_flight_409(client, source_video):
     _seed(client, video_path=str(source_video))
     assert client.post("/jobs/job-1/reprompt", json={"prompt": "a"}).status_code == 202

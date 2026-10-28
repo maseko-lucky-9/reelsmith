@@ -1,0 +1,121 @@
+"""Killable child processes (spec 014): stream lines; on cancel SIGTERM, then SIGKILL the group."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import sys
+import textwrap
+from pathlib import Path
+
+import pytest
+
+from app.services import child_process
+
+
+def _script(tmp_path: Path, body: str) -> list[str]:
+    path = tmp_path / "child.py"
+    path.write_text(textwrap.dedent(body))
+    return [sys.executable, str(path), str(tmp_path)]
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+async def _wait_for(path: Path) -> None:
+    for _ in range(500):
+        if path.exists() and path.read_text():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"{path} never appeared")
+
+
+async def test_lines_are_streamed_and_the_exit_status_and_stderr_returned(tmp_path):
+    argv = _script(
+        tmp_path,
+        """
+        import sys
+        print("one", flush=True)
+        print("", flush=True)
+        print("two", flush=True)
+        print("oops", file=sys.stderr)
+        sys.exit(3)
+        """,
+    )
+    lines: list[str] = []
+    code, err = await child_process.run_streaming(argv, timeout=30, on_line=lines.append)
+    assert (code, err, lines) == (3, "oops", ["one", "two"])
+
+
+async def test_cancel_sends_sigterm_first_so_the_child_can_clean_up(tmp_path):
+    argv = _script(
+        tmp_path,
+        """
+        import os, signal, sys, time
+        from pathlib import Path
+        out = Path(sys.argv[1])
+        def term(signum, frame):
+            (out / "cleaned").write_text("yes")
+            sys.exit(143)
+        signal.signal(signal.SIGTERM, term)
+        (out / "pid").write_text(str(os.getpid()))
+        print("started", flush=True)
+        time.sleep(60)
+        """,
+    )
+    task = asyncio.create_task(child_process.run_streaming(argv, timeout=60, on_line=lambda line: None))
+    await _wait_for(tmp_path / "pid")
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert (tmp_path / "cleaned").read_text() == "yes"
+    assert not _alive(int((tmp_path / "pid").read_text()))
+
+
+async def test_a_child_ignoring_sigterm_and_its_grandchild_are_killed_after_the_grace(tmp_path):
+    argv = _script(
+        tmp_path,
+        """
+        import os, signal, subprocess, sys, time
+        from pathlib import Path
+        out = Path(sys.argv[1])
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        grand = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        (out / "pids").write_text(f"{os.getpid()} {grand.pid}")
+        time.sleep(60)
+        """,
+    )
+    task = asyncio.create_task(
+        child_process.run_streaming(argv, timeout=60, on_line=lambda line: None, terminate_grace=0.3)
+    )
+    await _wait_for(tmp_path / "pids")
+    child, grandchild = (int(p) for p in (tmp_path / "pids").read_text().split())
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not _alive(child)
+    for _ in range(100):  # the grandchild is reaped by init, not by us
+        if not _alive(grandchild):
+            break
+        await asyncio.sleep(0.02)
+    assert not _alive(grandchild)
+
+
+async def test_a_timeout_stops_the_child_and_raises(tmp_path):
+    argv = _script(
+        tmp_path,
+        """
+        import os, sys, time
+        from pathlib import Path
+        (Path(sys.argv[1]) / "pid").write_text(str(os.getpid()))
+        time.sleep(60)
+        """,
+    )
+    with pytest.raises(TimeoutError):
+        await child_process.run_streaming(argv, timeout=3, on_line=lambda line: None, terminate_grace=0.2)
+    assert not _alive(int((tmp_path / "pid").read_text()))

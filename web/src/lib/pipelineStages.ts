@@ -348,6 +348,35 @@ function clampPercent(n: number): number {
   return Math.min(100, Math.max(0, Math.round(n)))
 }
 
+export interface SceneIndexProgress {
+  done: number
+  total: number
+}
+
+/**
+ * The source's scene indexing in flight (spec 014): the latest SceneIndexProgress
+ * (`done` of `total` chunks) not yet followed by ScenesIndexed; null otherwise.
+ */
+export function sceneIndexProgress(events: PipelineEvent[] | undefined): SceneIndexProgress | null {
+  let latest: SceneIndexProgress | null = null
+  for (const e of events ?? []) {
+    if (e.type === 'ScenesIndexed') {
+      latest = null
+    } else if (e.type === 'SceneIndexProgress') {
+      const done = e.payload?.done
+      const total = e.payload?.total
+      if (typeof done === 'number' && typeof total === 'number' && Number.isFinite(done) && total > 0) {
+        latest = { done: Math.min(Math.max(0, done), total), total }
+      }
+    }
+  }
+  return latest
+}
+
+export function sceneIndexLabel(progress: SceneIndexProgress): string {
+  return `Indexing scenes ${progress.done}/${progress.total}`
+}
+
 /** The last DownloadProgress percent, or null without a numeric one. */
 function latestDownloadPercent(events: PipelineEvent[]): number | null {
   const last = events.findLast((e) => e.type === 'DownloadProgress')
@@ -401,6 +430,18 @@ export function deriveOverallProgress(job: JobState, events: PipelineEvent[] | u
   }
   const downloaded = Boolean(job.video_path) || evs.some((e) => e.type === 'VideoDownloaded')
   if (downloaded) {
+    const scenes = sceneIndexProgress(evs)
+    if (scenes) {
+      const percent = clampPercent((scenes.done / scenes.total) * 100)
+      return {
+        ...base,
+        phase: 'detecting',
+        percent,
+        label: sceneIndexLabel(scenes),
+        percentText: `${percent}%`,
+        failed: false,
+      }
+    }
     return { ...base, phase: 'detecting', percent: null, label: 'Detecting chapters…', percentText: null, failed: false }
   }
   const percent = latestDownloadPercent(evs)
@@ -482,6 +523,10 @@ const NON_STAGE_EVENT_TYPES = [
   // Drive the main progress bar (deriveOverallProgress), not a row.
   'ChapterCompleted',
   'DownloadProgress',
+  // AI scene search (spec 014): "Indexing scenes n/m" while the source is indexed
+  // (sceneIndexProgress), shown on the progress bar and the chapters row.
+  'SceneIndexProgress',
+  'ScenesIndexed',
 ] as const
 
 /**
