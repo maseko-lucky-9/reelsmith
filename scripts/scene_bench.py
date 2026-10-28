@@ -154,10 +154,11 @@ def run_index(video: Path, out_dir: Path, model: str) -> dict:
             sys.executable,
             str(REPO_ROOT / "scripts" / "scene_index.py"),
             "index",
-            str(video),
-            str(out_dir),
             "--model",
             model,
+            "--",
+            str(video),
+            str(out_dir),
         ],
         capture_output=True,
         text=True,
@@ -269,11 +270,7 @@ def summarise(results: list[dict]) -> dict:
 
 
 def cosine_sanity(pool, meta: list[dict]) -> dict:
-    """Cosine between the least-similar and a mid pair of chunks from different sources."""
-    import numpy as np
-
-    sims = pool @ pool.T
-    np.fill_diagonal(sims, -2)
+    """Highest and lowest cosine between the first chunks of different sources."""
     first = {}
     for i, m in enumerate(meta):
         first.setdefault(m["video"], i)

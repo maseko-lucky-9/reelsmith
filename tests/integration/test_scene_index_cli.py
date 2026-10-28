@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -73,7 +74,10 @@ def test_index_writes_normalised_distinct_embeddings_and_streams_progress(two_sc
     script = REPO / "scripts" / "scene_index.py"
     env = {**os.environ, "TMPDIR": str(scratch)}
     done = subprocess.run(
-        [str(SCENE_PYTHON), str(script), "index", str(two_scene_clip), str(out_dir), "--chunk", "8", "--overlap", "0"],
+        [
+            str(SCENE_PYTHON), str(script), "index", "--chunk", "8", "--overlap", "0",
+            "--", str(two_scene_clip), str(out_dir),
+        ],
         capture_output=True, text=True, timeout=900, env=env,
     )  # fmt: skip
     assert done.returncode == 0, done.stderr
@@ -95,8 +99,52 @@ def test_index_writes_normalised_distinct_embeddings_and_streams_progress(two_sc
 
     # A missing source fails fast with exit 1 and a clear message, and writes nothing.
     missing = subprocess.run(
-        [str(SCENE_PYTHON), str(script), "index", str(tmp_path / "nope.mp4"), str(tmp_path / "idx2")],
+        [str(SCENE_PYTHON), str(script), "index", "--", str(tmp_path / "nope.mp4"), str(tmp_path / "idx2")],
         capture_output=True, text=True, timeout=120, env=env,
     )  # fmt: skip
     assert missing.returncode == 1 and "video not found" in missing.stderr
     assert not (tmp_path / "idx2").exists()
+
+
+def test_dash_prefixed_query_round_trips_through_double_dash(tmp_path):
+    script = REPO / "scripts" / "scene_index.py"
+    done = subprocess.run(
+        [str(SCENE_PYTHON), str(script), "query", "--", "--help me find a dog"],
+        capture_output=True, text=True, timeout=300,
+    )  # fmt: skip
+    assert done.returncode == 0, done.stderr
+    lines = done.stdout.splitlines()
+    assert len(lines) == 1 and "usage" not in lines[0]
+    vector = np.array(json.loads(lines[0]), dtype=np.float32)
+    assert vector.shape == (768,) and float(np.linalg.norm(vector)) == pytest.approx(1.0, abs=1e-3)
+
+
+def test_sigterm_mid_index_exits_143_and_leaves_no_temp_dir_or_ffmpeg(tmp_path):
+    """Phase 2 cancels a job by SIGTERM-ing this process: it must clean up after itself."""
+    clip = tmp_path / "long.mp4"
+    subprocess.run(
+        [
+            _bundled_ffmpeg(), "-y", "-f", "lavfi", "-i", "testsrc2=s=320x240:r=10:d=96",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", str(clip),
+        ],
+        check=True, capture_output=True, timeout=120,
+    )  # fmt: skip
+    scratch = tmp_path / "tmp"
+    scratch.mkdir()
+    proc = subprocess.Popen(
+        [str(SCENE_PYTHON), str(REPO / "scripts" / "scene_index.py"), "index", "--", str(clip), str(tmp_path / "idx")],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env={**os.environ, "TMPDIR": str(scratch)},
+    )  # fmt: skip
+    try:
+        assert json.loads(proc.stdout.readline())["done"] == 0
+        assert json.loads(proc.stdout.readline())["done"] == 1  # a chunk is embedded, 11 remain
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=60) == 143, proc.stderr.read()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    assert list(scratch.iterdir()) == [], "temp chunk dir left behind"
+    assert not (tmp_path / "idx").exists(), "a cancelled index must not publish files"
+    survivors = subprocess.run(["pgrep", "-f", str(clip)], capture_output=True, text=True).stdout.split()
+    assert survivors == [], f"ffmpeg or indexer still running: {survivors}"

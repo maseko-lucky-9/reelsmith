@@ -6,6 +6,9 @@ Runs in the API venv: numpy only, no mlx, no ffmpeg, no model.
 from __future__ import annotations
 
 import json
+import os
+import signal
+import time
 
 import numpy as np
 import pytest
@@ -28,7 +31,18 @@ from app.vendor.sentrysearch.reranker import (
     parse_rerank_response,
 )
 from scripts.scene_bench import chance_top_k, is_hit, judge_scores, percentile
-from scripts.scene_index import MODEL_ENV, plan_spans, resolve_model, write_index
+from scripts.scene_index import (
+    MODEL_ENV,
+    TEMP_PREFIX,
+    SceneIndexError,
+    _build_parser,
+    install_signal_handlers,
+    load_index,
+    plan_spans,
+    resolve_model,
+    sweep_stale_temp_dirs,
+    write_index,
+)
 
 # --- expected_chunk_spans -------------------------------------------------
 
@@ -109,6 +123,94 @@ def test_write_index_writes_both_files_and_leaves_no_temp_files(tmp_path):
     loaded = np.load(out / "embeddings.npy")
     assert loaded.shape == (3, 768) and loaded.dtype == np.float32
     assert json.loads((out / "chunks.json").read_text()) == meta
+
+
+def test_query_text_after_double_dash_may_look_like_a_flag():
+    parser = _build_parser()
+    assert parser.parse_args(["query", "--", "--help"]).text == "--help"
+    assert parser.parse_args(["query", "--model", "org/m", "--", "-dog on a beach"]).text == "-dog on a beach"
+
+
+def test_query_without_double_dash_misreads_dash_text_which_is_why_callers_must_use_it(capsys):
+    with pytest.raises(SystemExit) as dash_text:
+        _build_parser().parse_args(["query", "-dog"])
+    assert dash_text.value.code == 2
+    with pytest.raises(SystemExit) as help_flag:
+        _build_parser().parse_args(["query", "--help"])
+    assert help_flag.value.code == 0
+    assert "usage" in capsys.readouterr().out
+
+
+def test_index_accepts_double_dash_before_a_dash_prefixed_video_path():
+    args = _build_parser().parse_args(["index", "--chunk", "4", "--", "-weird name.mp4", "out"])
+    assert (args.video.name, args.chunk, args.out_dir.name) == ("-weird name.mp4", 4, "out")
+
+
+def test_write_index_publishes_chunks_json_before_embeddings_npy(tmp_path, monkeypatch):
+    published: list[str] = []
+    real_replace = os.replace
+
+    def recording_replace(src, dst):
+        published.append(os.path.basename(dst))
+        real_replace(src, dst)
+
+    monkeypatch.setattr("scripts.scene_index.os.replace", recording_replace)
+    write_index(tmp_path, np.zeros((1, 768), dtype=np.float32), [{"start": 0.0, "end": 8.0, "skipped_still": False}])
+    assert published == ["chunks.json", "embeddings.npy"]
+
+
+def _write_raw(out, rows, chunks):
+    out.mkdir(parents=True, exist_ok=True)
+    np.save(out / "embeddings.npy", rows)
+    (out / "chunks.json").write_text(json.dumps(chunks))
+
+
+def test_load_index_returns_matching_rows_and_chunks(tmp_path):
+    chunks = [{"start": 0.0, "end": 8.0, "skipped_still": False}] * 2
+    _write_raw(tmp_path, np.zeros((2, 768), dtype=np.float32), chunks)
+    rows, loaded = load_index(tmp_path)
+    assert rows.shape == (2, 768) and loaded == chunks
+
+
+def test_load_index_rejects_a_torn_index_with_more_chunks_than_rows(tmp_path):
+    _write_raw(tmp_path, np.zeros((2, 768), dtype=np.float32), [{"start": 0.0, "end": 8.0}] * 3)
+    with pytest.raises(SceneIndexError, match="2 embedding rows but 3 chunks"):
+        load_index(tmp_path)
+
+
+def test_load_index_rejects_wrong_dimensions(tmp_path):
+    _write_raw(tmp_path, np.zeros((1, 512), dtype=np.float32), [{"start": 0.0, "end": 8.0}])
+    with pytest.raises(SceneIndexError, match="expected"):
+        load_index(tmp_path)
+
+
+def test_load_index_rejects_a_directory_without_embeddings(tmp_path):
+    (tmp_path / "chunks.json").write_text("[]")
+    with pytest.raises(SceneIndexError, match="no complete index"):
+        load_index(tmp_path)
+
+
+def test_sweep_removes_only_old_scene_index_dirs(tmp_path):
+    old, fresh, other = tmp_path / f"{TEMP_PREFIX}old", tmp_path / f"{TEMP_PREFIX}fresh", tmp_path / "unrelated_old"
+    for d in (old, fresh, other):
+        d.mkdir()
+        (d / "c.mp4").write_bytes(b"x")
+    long_ago = time.time() - 7 * 3600
+    for d in (old, other):
+        os.utime(d, (long_ago, long_ago))
+    assert sweep_stale_temp_dirs(tmp_path) == 1
+    assert not old.exists() and fresh.exists() and other.exists()
+
+
+def test_sigterm_handler_raises_system_exit_143():
+    previous = signal.getsignal(signal.SIGTERM)
+    try:
+        install_signal_handlers()
+        with pytest.raises(SystemExit) as exc:
+            signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+        assert exc.value.code == 143
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 # --- highlights (numpy ranking) -------------------------------------------

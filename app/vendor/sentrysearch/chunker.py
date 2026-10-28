@@ -12,6 +12,10 @@
 #     Upstream cuts with `-c copy` first, which snaps each chunk start to the previous
 #     keyframe, so the stored (start, end) can be off by seconds.
 #   - Added a timeout to every ffmpeg call.
+#   - is_still_frame_chunk: `-vsync vfr` -> `-fps_mode vfr` (-vsync is removed in newer
+#     ffmpeg) and its temp frame dir is now removed in a `finally`, not only on success.
+#   - preprocess_chunk is kept for parity with upstream; scripts/scene_index.py does not
+#     call it (render_chunk replaces cut-then-preprocess).
 """Video chunking logic (spans, still-frame detection, 480p/5fps preprocessing)."""
 
 import functools

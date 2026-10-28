@@ -14,7 +14,7 @@ Nothing here imports chromadb, google-genai, click or torch.
 |---|---|
 | `base_embedder.py` | identical apart from the header and ruff-format whitespace |
 | `mlx_embedder.py` | header, ruff-format whitespace, the "missing dependencies" message, and `_load_forced_embedding_model()` (upstream's `load_embedding_model(..., config_overrides=...)` call raises a duplicate-keyword TypeError on mlx-vlm 0.7.11; the helper falls back to passing a ready-made config). The `_video_capable_class` shim is **required**: without it mlx-vlm silently drops the video pixels and every chunk embeds to a meaningless vector |
-| `chunker.py` | trimmed to `expected_chunk_spans`, `is_still_frame_chunk`, `preprocess_chunk` and helpers; bundled imageio-ffmpeg only (no system ffmpeg/ffprobe); `render_chunk()` added (one-pass accurate cut + 480p/5fps); `-vsync` replaced by `-fps_mode`; timeouts and temp-dir cleanup added |
+| `chunker.py` | trimmed to `expected_chunk_spans`, `is_still_frame_chunk`, `preprocess_chunk` and helpers; bundled imageio-ffmpeg only (no system ffmpeg/ffprobe); `render_chunk()` added (one-pass accurate cut + 480p/5fps); `-vsync` replaced by `-fps_mode`; timeouts and temp-dir cleanup added; `preprocess_chunk` kept for parity but unused by `scene_index.py` |
 | `highlights.py` | numpy scoring kept; `rank_highlights()` takes `(embeddings, metas)` instead of a chromadb store |
 | `reranker.py` | only the pure helpers (`RerankScore`, `RERANK_SCHEMA`, `build_rerank_prompt`, `parse_rerank_response`, `_sort_key`); `rerank_results()` and its trimmer import removed |
 

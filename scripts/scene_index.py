@@ -1,14 +1,28 @@
 #!/usr/bin/env python
 """Scene-embedding sidecar CLI. Runs under ``.venv-mlx`` (mlx + mlx-vlm), never the API venv.
 
-    scene_index.py index <video> <out_dir> [--chunk 8] [--overlap 0] [--model HF_ID]
-    scene_index.py query <text> [--model HF_ID]
+    scene_index.py index [--chunk 8] [--overlap 0] [--model HF_ID] -- <video> <out_dir>
+    scene_index.py query [--model HF_ID] -- <text>
+
+Callers MUST put ``--`` before the positionals. Without it, argparse reads a query such as
+``--help`` as a flag (prints usage, exit 0) and ``-dog`` as an unknown option (exit 2); a
+video path or query text that starts with ``-`` is only safe after ``--``.
 
 ``index`` cuts the video into fixed spans (480p / 5 fps, one ffmpeg pass each),
 embeds every span with Qwen3-VL-Embedding on MLX and writes, atomically:
 
-    <out_dir>/embeddings.npy   float32, n x 768, rows L2-normalised
     <out_dir>/chunks.json      [{"start": s, "end": e, "skipped_still": bool}, ...]
+    <out_dir>/embeddings.npy   float32, n x 768, rows L2-normalised (written LAST)
+
+``embeddings.npy`` appearing is the "index complete" signal, so index into a fresh
+directory (an old index there is overwritten file by file, and a crash between the two
+renames would pair new chunks with old vectors). Read with ``load_index(out_dir)``, which
+checks that both files exist and that rows == len(chunks).
+
+SIGTERM exits 143 after cleaning up: the handler raises SystemExit, the temp chunk
+directory is removed and the in-flight ffmpeg child is killed. Chunk temp dirs
+(``scene_index_*``) left by a SIGKILL or crash are swept at the next start once older
+than 6 hours.
 
 Progress goes to stdout as one JSON object per line (``{"done": i, "total": n}``)
 so a parent process can stream it; logs and a final ``stats`` line go to stderr.
@@ -25,12 +39,18 @@ import contextlib
 import json
 import os
 import resource
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -40,6 +60,9 @@ DEFAULT_MODEL = "mlx-community/Qwen3-VL-Embedding-2B-8bit"
 MODEL_ENV = "YTVIDEO_SCENE_MODEL"
 EMBED_DIMS = 768
 MIN_CHUNK_SECONDS = 1.0  # a shorter tail cannot hold 2 sampled frames
+TEMP_PREFIX = "scene_index_"
+STALE_TEMP_SECONDS = 6 * 3600
+SIGTERM_EXIT = 143  # 128 + SIGTERM, what a shell reports for a terminated child
 
 
 class SceneIndexError(RuntimeError):
@@ -58,6 +81,34 @@ def plan_spans(duration: float, chunk: int, overlap: int) -> list[tuple[float, f
     spans = expected_chunk_spans(duration, chunk, overlap)
     kept = [s for s in spans if s[1] - s[0] >= MIN_CHUNK_SECONDS]
     return kept or spans
+
+
+def install_signal_handlers() -> None:
+    """Turn SIGTERM into SystemExit(143) so ``with``/``finally`` blocks run.
+
+    ``subprocess.run`` kills its child on any exception, so an ffmpeg render in flight dies
+    with us. SIGINT already raises KeyboardInterrupt.
+    """
+
+    def _terminate(signum: int, frame: object) -> None:
+        raise SystemExit(SIGTERM_EXIT)
+
+    signal.signal(signal.SIGTERM, _terminate)
+
+
+def sweep_stale_temp_dirs(root: Path | None = None, max_age_s: float = STALE_TEMP_SECONDS) -> int:
+    """Remove ``scene_index_*`` dirs older than *max_age_s* left by a crash. Returns the count."""
+    base = root or Path(tempfile.gettempdir())
+    cutoff = time.time() - max_age_s
+    removed = 0
+    for path in base.glob(f"{TEMP_PREFIX}*"):
+        try:
+            if path.is_dir() and path.stat().st_mtime < cutoff:
+                shutil.rmtree(path, ignore_errors=True)
+                removed += 1
+        except OSError:
+            continue
+    return removed
 
 
 def peak_rss_mb() -> float:
@@ -116,7 +167,7 @@ def index_video(
     rows = np.zeros((len(spans), EMBED_DIMS), dtype=np.float32)
     meta: list[dict] = []
     emit({"done": 0, "total": len(spans)})
-    with tempfile.TemporaryDirectory(prefix="scene_index_") as tmp:
+    with tempfile.TemporaryDirectory(prefix=TEMP_PREFIX) as tmp:
         for i, (start, end) in enumerate(spans):
             try:
                 path = chunker.render_chunk(str(video), start, end, os.path.join(tmp, f"c{i:05d}.mp4"))
@@ -152,21 +203,40 @@ def _mlx_peak_gb() -> float:
 
 
 def write_index(out_dir: Path, rows, meta: list[dict]) -> None:
-    """Write embeddings.npy and chunks.json via temp files + rename (never half-written)."""
+    """Write chunks.json, then embeddings.npy, each via temp file + rename.
+
+    embeddings.npy goes last: a reader that sees it also sees the matching chunks.json.
+    """
     import numpy as np
 
     out_dir.mkdir(parents=True, exist_ok=True)
     npy_tmp = out_dir / "embeddings.npy.tmp"
     json_tmp = out_dir / "chunks.json.tmp"
     try:
+        json_tmp.write_text(json.dumps(meta), encoding="utf-8")
         with npy_tmp.open("wb") as handle:
             np.save(handle, rows.astype(np.float32))
-        json_tmp.write_text(json.dumps(meta), encoding="utf-8")
-        os.replace(npy_tmp, out_dir / "embeddings.npy")
         os.replace(json_tmp, out_dir / "chunks.json")
+        os.replace(npy_tmp, out_dir / "embeddings.npy")
     finally:
         npy_tmp.unlink(missing_ok=True)
         json_tmp.unlink(missing_ok=True)
+
+
+def load_index(out_dir: Path) -> tuple["np.ndarray", list[dict]]:
+    """Read an index written by ``index``; raise SceneIndexError if it is missing or torn."""
+    import numpy as np
+
+    try:
+        chunks = json.loads((out_dir / "chunks.json").read_text(encoding="utf-8"))
+        rows = np.load(out_dir / "embeddings.npy")
+    except (OSError, ValueError) as exc:
+        raise SceneIndexError(f"no complete index in {out_dir}: {exc}") from exc
+    if rows.ndim != 2 or rows.shape[1] != EMBED_DIMS:
+        raise SceneIndexError(f"{out_dir}/embeddings.npy has shape {rows.shape}, expected (n, {EMBED_DIMS})")
+    if rows.shape[0] != len(chunks):
+        raise SceneIndexError(f"{out_dir}: {rows.shape[0]} embedding rows but {len(chunks)} chunks (torn index)")
+    return rows, chunks
 
 
 def embed_query(text: str, model: str) -> list[float]:
@@ -215,6 +285,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    install_signal_handlers()
+    sweep_stale_temp_dirs()
     model = resolve_model(args.model)
     try:
         if args.command == "index":
