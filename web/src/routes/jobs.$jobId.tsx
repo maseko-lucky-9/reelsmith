@@ -14,6 +14,7 @@ import { TimelineErrorBoundary } from '@/components/timeline-error-boundary'
 import { PlatformChip } from '@/components/platform-chip'
 import { RepromptForm } from '@/components/reprompt-form'
 import type { PipelineEvent } from '@/lib/pipelineStages'
+import { isConflict } from '@/lib/jobStatus'
 
 export const jobDetailRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -74,7 +75,10 @@ function JobDetailPage() {
   // A cancel ends with JobCancelled (a run) or RepromptFailed (a reprompt), which refetch the job.
   const cancelMutation = useMutation({
     mutationFn: () => api.cancelJob(jobId),
-    onError: (e: Error) => toast.error(`Could not cancel: ${e.message}`),
+    // A 409 means it already stopped (a second click); the refetch shows it.
+    onError: (e: Error) => {
+      if (!isConflict(e)) toast.error(`Could not cancel: ${e.message}`)
+    },
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: ['job', jobId] })
       void queryClient.invalidateQueries({ queryKey: ['jobs'] })

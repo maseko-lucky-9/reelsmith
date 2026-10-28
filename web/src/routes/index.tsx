@@ -17,7 +17,7 @@ import {
 import { rootRoute } from './root'
 import { api } from '@/api/client'
 import { ProjectCard } from '@/components/dashboard/ProjectCard'
-import { isActiveJob } from '@/lib/jobStatus'
+import { forgetJob, isActiveJob } from '@/lib/jobStatus'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 
@@ -32,6 +32,9 @@ const PLACEHOLDERS = [
   'Drop a Zoom link…',
   'Drop a Vimeo link…',
 ]
+
+// Home-page refresh while any job is pending or running (no SSE here).
+const ACTIVE_POLL_MS = 3000
 
 const FEATURE_ICONS = [
   { label: 'Long to shorts', icon: Scissors, focusInput: true },
@@ -57,6 +60,8 @@ function LibraryPage() {
   const jobsQuery = useQuery({
     queryKey: ['jobs'],
     queryFn: () => api.listJobs(),
+    // While a job runs (or is being cancelled) its badge follows it.
+    refetchInterval: (query) => ((query.state.data ?? []).some(isActiveJob) ? ACTIVE_POLL_MS : false),
   })
 
   const jobs = jobsQuery.data ?? []
@@ -88,13 +93,23 @@ function LibraryPage() {
     const noun = ids.length === 1 ? 'job' : 'jobs'
     if (!window.confirm(`Delete ${ids.length} ${noun} and all their clips and files? This cannot be undone.`)) return
     setDeleting(true)
-    // One DELETE per job (there is no bulk endpoint); one failure does not stop the rest.
+    // One DELETE per job (there is no bulk endpoint; the server runs them one at a time).
+    // One failure does not stop the rest.
     const results = await Promise.allSettled(ids.map((id) => api.deleteJob(id)))
     setDeleting(false)
-    const failed = results.filter((r) => r.status === 'rejected').length
-    if (failed === 0) toast.success(`Deleted ${ids.length} ${noun}`)
-    else toast.error(`Deleted ${ids.length - failed} of ${ids.length}; ${failed} could not be deleted`)
-    setSelected(new Set())
+    const failedIds = ids.filter((_, i) => results[i].status === 'rejected')
+    for (const id of ids) if (!failedIds.includes(id)) forgetJob(queryClient, id)
+    if (failedIds.length === 0) {
+      toast.success(`Deleted ${ids.length} ${noun}`)
+    } else {
+      const names = failedIds.map((id) => {
+        const failedJob = jobs.find((j) => j.job_id === id)
+        return failedJob?.title ?? failedJob?.url ?? id
+      })
+      toast.error(`Deleted ${ids.length - failedIds.length} of ${ids.length}; could not delete: ${names.join(', ')}`)
+    }
+    // The failed ones stay selected, ready for a retry.
+    setSelected(new Set(failedIds))
     void queryClient.invalidateQueries({ queryKey: ['jobs'] })
   }
 

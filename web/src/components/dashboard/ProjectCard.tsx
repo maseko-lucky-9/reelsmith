@@ -4,7 +4,7 @@ import { Ban, Check, Trash2, Video } from 'lucide-react'
 import { toast } from 'sonner'
 import type { JobState, JobStatus } from '@/api/client'
 import { api } from '@/api/client'
-import { isActiveJob } from '@/lib/jobStatus'
+import { CANCEL_REFRESH_MS, forgetJob, isActiveJob, isConflict } from '@/lib/jobStatus'
 
 const STATUS_COLORS: Record<JobStatus, string> = {
   completed: 'bg-emerald-600 text-white',
@@ -32,14 +32,37 @@ export function ProjectCard({ job, selectable = false, selected = false, onToggl
   const refresh = () => void queryClient.invalidateQueries({ queryKey: ['jobs'] })
   const cancelMutation = useMutation({
     mutationFn: () => api.cancelJob(job.job_id),
-    onSuccess: () => toast.success('Job cancelled'),
-    onError: (e: Error) => toast.error(`Could not cancel: ${e.message}`),
+    onSuccess: (res) => {
+      if (res.status === 'cancelling') {
+        // Its tasks are still unwinding: look again once they have.
+        toast.info('Cancelling…')
+        setTimeout(refresh, CANCEL_REFRESH_MS)
+      } else {
+        toast.success('Job cancelled')
+      }
+    },
+    // A 409 means it already stopped (a second click): just show its state.
+    onError: (e: Error) => {
+      if (!isConflict(e)) toast.error(`Could not cancel: ${e.message}`)
+    },
     onSettled: refresh,
   })
   const deleteMutation = useMutation({
     mutationFn: () => api.deleteJob(job.job_id),
-    onSuccess: () => toast.success('Job deleted'),
-    onError: (e: Error) => toast.error(`Could not delete: ${e.message}`),
+    onSuccess: () => {
+      forgetJob(queryClient, job.job_id)
+      toast.success('Job deleted')
+    },
+    onError: (e: Error) => {
+      // 409: a re-render or reprompt of it is still running; offer to cancel that.
+      if (isConflict(e)) {
+        toast.error(`Could not delete: ${e.message}`, {
+          action: { label: 'Cancel it', onClick: () => cancelMutation.mutate() },
+        })
+      } else {
+        toast.error(`Could not delete: ${e.message}`)
+      }
+    },
     onSettled: refresh,
   })
 

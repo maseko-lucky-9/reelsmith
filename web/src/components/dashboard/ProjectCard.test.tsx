@@ -61,6 +61,8 @@ beforeEach(() => {
   vi.mocked(api.cancelJob).mockReset().mockResolvedValue({ job_id: 'job-1', status: 'cancelling' })
   vi.mocked(api.deleteJob).mockReset().mockResolvedValue(undefined)
   vi.mocked(toast.error).mockReset()
+  vi.mocked(toast.info).mockReset()
+  vi.mocked(toast.success).mockReset()
 })
 
 afterEach(() => {
@@ -129,13 +131,78 @@ describe('ProjectCard', () => {
     expect(api.deleteJob).not.toHaveBeenCalled()
   })
 
-  it('reports a delete the server refused', async () => {
+  it('offers to cancel what still runs when the server refuses a delete (409)', async () => {
     vi.mocked(api.deleteJob).mockRejectedValue(new Error('409 cancel it first'))
     renderCard({ job: job('completed') })
 
     fireEvent.click(screen.getByRole('button', { name: /delete ocean talk/i }))
 
-    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Could not delete: 409 cancel it first'))
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith('Could not delete: 409 cancel it first', {
+        action: { label: 'Cancel it', onClick: expect.any(Function) },
+      }),
+    )
+    const options = vi.mocked(toast.error).mock.calls[0][1] as unknown as { action: { onClick: () => void } }
+    act(() => options.action.onClick())
+    await waitFor(() => expect(api.cancelJob).toHaveBeenCalledWith('job-1'))
+  })
+
+  it('reports any other delete failure without an action', async () => {
+    vi.mocked(api.deleteJob).mockRejectedValue(new Error('500 boom'))
+    renderCard({ job: job('completed') })
+
+    fireEvent.click(screen.getByRole('button', { name: /delete ocean talk/i }))
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Could not delete: 500 boom'))
+  })
+
+  it("forgets a deleted job's page, clips and events from the cache", async () => {
+    const qc = new QueryClient({ defaultOptions: { mutations: { retry: false } } })
+    for (const key of ['job', 'clips', 'job-events']) qc.setQueryData([key, 'job-1'], { cached: true })
+    qc.setQueryData(['job', 'other'], { cached: true })
+    render(
+      <QueryClientProvider client={qc}>
+        <ProjectCard job={job('completed')} />
+      </QueryClientProvider>,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /delete ocean talk/i }))
+
+    await waitFor(() => expect(qc.getQueryData(['job', 'job-1'])).toBeUndefined())
+    expect(qc.getQueryData(['clips', 'job-1'])).toBeUndefined()
+    expect(qc.getQueryData(['job-events', 'job-1'])).toBeUndefined()
+    expect(qc.getQueryData(['job', 'other'])).toEqual({ cached: true })
+  })
+
+  it('says Cancelling… while the tasks unwind, then looks again', async () => {
+    vi.mocked(api.cancelJob).mockResolvedValue({ job_id: 'job-1', status: 'cancelling' })
+    const { invalidate } = renderCard({ job: job('running') })
+
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }))
+
+    await waitFor(() => expect(toast.info).toHaveBeenCalledWith('Cancelling…'))
+    expect(toast.success).not.toHaveBeenCalled()
+    await waitFor(() => expect(invalidate).toHaveBeenCalledTimes(2), { timeout: 3000 })
+  })
+
+  it('says cancelled when the job had no task and was marked at once', async () => {
+    vi.mocked(api.cancelJob).mockResolvedValue({ job_id: 'job-1', status: 'cancelled' })
+    renderCard({ job: job('pending') })
+
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }))
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Job cancelled'))
+    expect(toast.info).not.toHaveBeenCalled()
+  })
+
+  it('swallows the 409 of a second cancel click and refreshes the list', async () => {
+    vi.mocked(api.cancelJob).mockRejectedValue(new Error('409 {"detail":"job is cancelled; nothing to cancel"}'))
+    const { invalidate } = renderCard({ job: job('running') })
+
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }))
+
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['jobs'] }))
+    expect(toast.error).not.toHaveBeenCalled()
   })
 
   it('opens the job on a click outside select mode', () => {

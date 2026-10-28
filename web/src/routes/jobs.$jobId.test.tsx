@@ -313,6 +313,27 @@ describe('JobDetailPage — cancel (spec 013)', () => {
     expect(api.cancelJob).not.toHaveBeenCalled()
   })
 
+  it('swallows the 409 of a second cancel click', async () => {
+    vi.mocked(api.cancelJob).mockRejectedValue(new Error('409 {"detail":"job is cancelled; nothing to cancel"}'))
+    await renderPage('running')
+
+    fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }))
+    await flush()
+
+    expect(api.cancelJob).toHaveBeenCalled()
+    expect(toast.error).not.toHaveBeenCalled()
+  })
+
+  it('reports any other cancel failure', async () => {
+    vi.mocked(api.cancelJob).mockRejectedValue(new Error('500 boom'))
+    await renderPage('running')
+
+    fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }))
+    await flush()
+
+    expect(toast.error).toHaveBeenCalledWith('Could not cancel: 500 boom')
+  })
+
   it('says a cancelled job was cancelled and opens no stream', async () => {
     await renderPage('cancelled')
 

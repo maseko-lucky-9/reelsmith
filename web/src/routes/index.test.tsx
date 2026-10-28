@@ -37,7 +37,7 @@ async function renderHome() {
   const Page = indexRoute.options.component as ComponentType
   render(createElement(QueryClientProvider, { client: qc }, createElement(Page)))
   await screen.findByText('Talk a')
-  return { invalidate }
+  return { invalidate, qc }
 }
 
 function card(name: string): HTMLElement {
@@ -121,9 +121,83 @@ describe('home page: select and delete', () => {
 
     fireEvent.click(deleteSelectedButton())
 
-    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Deleted 1 of 2; 1 could not be deleted'))
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Deleted 1 of 2; could not delete: Talk b'))
     expect(api.deleteJob).toHaveBeenCalledTimes(2)
+    // The failed one stays selected for a retry.
+    expect(deleteSelectedButton()).toHaveTextContent('Delete selected (1)')
+    expect(card('Talk b').querySelector('[role="checkbox"]')).toHaveAttribute('aria-checked', 'true')
   })
+
+  it("forgets the deleted jobs' cached pages, keeps the failed one's", async () => {
+    vi.mocked(api.deleteJob).mockImplementation((id: string) =>
+      id === 'b' ? Promise.reject(new Error('409')) : Promise.resolve(undefined),
+    )
+    const { qc } = await renderHome()
+    qc.setQueryData(['job', 'a'], { cached: true })
+    qc.setQueryData(['clips', 'a'], [])
+    qc.setQueryData(['job', 'b'], { cached: true })
+    fireEvent.click(screen.getByRole('button', { name: 'Select' }))
+    fireEvent.click(card('Talk a'))
+    fireEvent.click(card('Talk b'))
+
+    fireEvent.click(deleteSelectedButton())
+
+    await waitFor(() => expect(qc.getQueryData(['job', 'a'])).toBeUndefined())
+    expect(qc.getQueryData(['clips', 'a'])).toBeUndefined()
+    expect(qc.getQueryData(['job', 'b'])).toEqual({ cached: true })
+  })
+
+  it('select all toggles: a second click clears the selection', async () => {
+    await renderHome()
+    fireEvent.click(screen.getByRole('button', { name: 'Select' }))
+    const selectAll = within(screen.getByRole('toolbar')).getByRole('checkbox', { name: /select all/i })
+
+    fireEvent.click(selectAll)
+    expect(deleteSelectedButton()).toHaveTextContent('Delete selected (3)')
+    fireEvent.click(selectAll)
+
+    expect(deleteSelectedButton()).toHaveTextContent('Delete selected (0)')
+  })
+
+  it('select all is disabled when every job is still running', async () => {
+    vi.mocked(api.listJobs).mockResolvedValue([job('x', 'running'), job('y', 'pending')])
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const Page = indexRoute.options.component as ComponentType
+    render(createElement(QueryClientProvider, { client: qc }, createElement(Page)))
+    await screen.findByText('Talk x')
+    fireEvent.click(screen.getByRole('button', { name: 'Select' }))
+
+    expect(within(screen.getByRole('toolbar')).getByRole('checkbox', { name: /select all/i })).toBeDisabled()
+  })
+
+  it('on the Saved tab, select all picks only the completed jobs shown', async () => {
+    await renderHome()
+    fireEvent.click(screen.getByRole('button', { name: /saved/i }))
+    fireEvent.click(screen.getByRole('button', { name: 'Select' }))
+
+    fireEvent.click(within(screen.getByRole('toolbar')).getByRole('checkbox', { name: /select all/i }))
+    fireEvent.click(deleteSelectedButton())
+
+    await waitFor(() => expect(api.deleteJob).toHaveBeenCalledTimes(1))
+    expect(api.deleteJob).toHaveBeenCalledWith('a')
+  })
+
+  it('refreshes the list while a job is running, and stops when none is', async () => {
+    await renderHome()
+    const calls = vi.mocked(api.listJobs).mock.calls.length
+
+    await waitFor(() => expect(vi.mocked(api.listJobs).mock.calls.length).toBeGreaterThan(calls), { timeout: 4500 })
+  }, 10_000)
+
+  it('does not poll when no job is running', async () => {
+    vi.mocked(api.listJobs).mockResolvedValue([job('a', 'completed')])
+    await renderHome()
+    const calls = vi.mocked(api.listJobs).mock.calls.length
+
+    await new Promise((resolve) => setTimeout(resolve, 3500))
+
+    expect(vi.mocked(api.listJobs).mock.calls.length).toBe(calls)
+  }, 10_000)
 
   it('deletes nothing when the confirm is declined', async () => {
     confirmAnswer = false
