@@ -28,7 +28,8 @@ async def _apply_clip_mutator(mutator: ClipMutator, clip: dict[str, Any]) -> Non
 
 
 # Statuses of a job that is queued or in flight; nothing survives a restart in
-# these states (the queue and the pipelines live in the process).
+# these states (the queue and the pipelines live in the process). A
+# "cancelled" job, like a completed or failed one, is final.
 INTERRUPTIBLE_STATUSES = ("pending", "running")
 INTERRUPTED_ERROR = "interrupted by restart"
 
@@ -61,8 +62,11 @@ class JobStoreProtocol(Protocol):
         job_id: str | None = None,
         min_score: int | None = None,
         search: str = "",
+        *,
+        include_retired: bool = False,
     ) -> list[dict[str, Any]]: ...
     async def retire_clips(self, job_id: str, clip_ids: Sequence[str]) -> int: ...
+    async def delete(self, job_id: str) -> bool: ...
 
 
 class InMemoryJobStore:
@@ -207,9 +211,13 @@ class InMemoryJobStore:
         job_id: str | None = None,
         min_score: int | None = None,
         search: str = "",
+        *,
+        include_retired: bool = False,
     ) -> list[dict[str, Any]]:
         async with self._lock:
-            clips = [c for c in self._clips.values() if not c.get("retired")]
+            clips = [
+                c for c in self._clips.values() if include_retired or not c.get("retired")
+            ]
             if job_id:
                 clips = [c for c in clips if c.get("job_id") == job_id]
             if min_score is not None:
@@ -220,6 +228,15 @@ class InMemoryJobStore:
                     if search.lower() in (c.get("title") or "").lower()
                 ]
             return clips
+
+    async def delete(self, job_id: str) -> bool:
+        """Forget the job and every clip of it, retired ones included; True if
+        the job existed. Files are not touched (``retention.delete_job_files``)."""
+        async with self._lock:
+            existed = self._jobs.pop(job_id, None) is not None
+            for clip_id in [i for i, c in self._clips.items() if c.get("job_id") == job_id]:
+                del self._clips[clip_id]
+            return existed
 
 
 # Keep the old name as an alias so existing imports don't break during the transition.
@@ -549,13 +566,17 @@ class SqlJobStore:
         job_id: str | None = None,
         min_score: int | None = None,
         search: str = "",
+        *,
+        include_retired: bool = False,
     ) -> list[dict[str, Any]]:
         from sqlalchemy import func, select
 
         from app.db.models import ClipRecord
 
         async with self._factory() as session:
-            q = select(ClipRecord).where(ClipRecord.retired == False)  # noqa: E712
+            q = select(ClipRecord)
+            if not include_retired:
+                q = q.where(ClipRecord.retired == False)  # noqa: E712
             if job_id:
                 q = q.where(ClipRecord.job_id == job_id)
             if min_score is not None:
@@ -565,6 +586,45 @@ class SqlJobStore:
                 q = q.where(ClipRecord.title.ilike(f"%{search}%"))
             result = await session.execute(q)
             return [_clip_record_to_dict(r) for r in result.scalars().all()]
+
+    async def delete(self, job_id: str) -> bool:
+        """Delete the job's row and every row that hangs off it, in one
+        transaction; True if the job existed. Files are not touched
+        (``retention.delete_job_files``).
+
+        The child rows are deleted explicitly, deepest first, instead of
+        relying on ``ON DELETE CASCADE``: SQLite enforces foreign keys only
+        with ``PRAGMA foreign_keys=ON``, which the engine does not set.
+        """
+        from sqlalchemy import delete, select
+
+        from app.db.models import (
+            ChapterRecord,
+            ClipAnalyticsSnapshot,
+            ClipEdit,
+            ClipRecord,
+            JobRecord,
+            PublishJob,
+            ScheduledPost,
+            ShareLink,
+        )
+
+        clip_ids = select(ClipRecord.id).where(ClipRecord.job_id == job_id)
+        publish_ids = select(PublishJob.id).where(PublishJob.clip_id.in_(clip_ids))
+        async with self._factory() as session:
+            await session.execute(
+                delete(ScheduledPost).where(ScheduledPost.publish_job_id.in_(publish_ids))
+            )
+            for table in (PublishJob, ClipEdit, ClipAnalyticsSnapshot, ShareLink):
+                await session.execute(delete(table).where(table.clip_id.in_(clip_ids)))
+            await session.execute(delete(ClipRecord).where(ClipRecord.job_id == job_id))
+            await session.execute(delete(ChapterRecord).where(ChapterRecord.job_id == job_id))
+            result = await session.execute(
+                delete(JobRecord).where(JobRecord.id == job_id).returning(JobRecord.id)
+            )
+            existed = result.first() is not None
+            await session.commit()
+        return existed
 
 
 def _chapter_from_record(record: Any) -> ChapterArtifacts | None:

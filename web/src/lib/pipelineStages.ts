@@ -450,6 +450,8 @@ export function describeSkippedStages(stages: DerivedStage[]): string {
 const NON_STAGE_EVENT_TYPES = [
   'VideoRequested',
   'JobFailed',
+  // The user cancelled the job (POST /jobs/{id}/cancel); it ends the stream like JobFailed.
+  'JobCancelled',
   // Reprompt of a completed job (FR-016): JobReprompted precedes its JobCompleted;
   // RepromptFailed ends a failed one (the job stays completed with its old clips).
   'JobReprompted',
@@ -495,5 +497,6 @@ export const KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set([
 export const TERMINAL_EVENT_TYPES: ReadonlySet<string> = new Set([
   'JobCompleted',
   'JobFailed',
+  'JobCancelled',
   'RepromptFailed',
 ])

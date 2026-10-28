@@ -221,3 +221,29 @@ def test_download_adds_no_hook_without_a_callback(stub_ydl, tmp_path):
     (ydl,) = stub_ydl.instances
     assert ydl.progress_hooks == []
     assert ydl.post_processors == []
+
+
+# ── download_stop (spec 013) ──────────────────────────────────────────────────
+
+
+def test_download_is_aborted_with_download_cancelled_once_the_stop_check_turns_true(stub_ydl, tmp_path):
+    from yt_dlp.utils import DownloadCancelled
+
+    token = _yt_dlp_base.download_stop.set(lambda: True)
+    try:
+        with pytest.raises(DownloadCancelled):
+            _yt_dlp_base.yt_dlp_download("https://x.test/v", str(tmp_path), source="t")
+    finally:
+        _yt_dlp_base.download_stop.reset(token)
+
+
+def test_download_runs_to_the_end_while_the_stop_check_stays_false(stub_ydl, tmp_path):
+    token = _yt_dlp_base.download_stop.set(lambda: False)
+    try:
+        result = _yt_dlp_base.yt_dlp_download("https://x.test/v", str(tmp_path), source="t")
+    finally:
+        _yt_dlp_base.download_stop.reset(token)
+
+    assert result.video_path == "/tmp/v.mp4"
+    (ydl,) = stub_ydl.instances
+    assert len(ydl.progress_hooks) == 1

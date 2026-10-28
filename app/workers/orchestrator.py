@@ -15,7 +15,7 @@ from typing import Any
 
 import app.logging_config  # noqa: F401
 from app.bus.event_bus import AsyncEventBus
-from app.bus.job_store import JobStore
+from app.bus.job_store import JobNotFoundError, JobStore
 from app.domain.events import Event, EventType
 from app.domain.models import ChapterArtifacts, JobState, PipelineOptions
 from app.services import (
@@ -40,7 +40,7 @@ from app.services import (
     transcription_service,
 )
 from app.services.platforms import resolve as resolve_adapter
-from app.services.platforms._yt_dlp_base import download_progress
+from app.services.platforms._yt_dlp_base import download_progress, download_stop
 from app.settings import settings
 
 log = logging.getLogger(__name__)
@@ -55,12 +55,72 @@ def _sanitize(name: str) -> str:
     return _SAFE_CHAR_RE.sub("_", name).strip() or "chapter"
 
 
+# ── Cancel (spec 013) ─────────────────────────────────────────────────────────
+
+# Every pipeline task of a job (its run, a re-render, a reprompt), waiting for
+# a slot or running; an entry leaves when its task is done. In-process only,
+# like the tasks themselves.
+_job_tasks: dict[str, set[asyncio.Task[Any]]] = {}
+# Jobs the user cancelled (``cancel_job``) whose tasks are still unwinding.
+# A task cancelled while its job is not in here was cancelled by a shutdown,
+# which keeps the job's status as it was.
+_user_cancelled: set[str] = set()
+# Jobs whose download thread is still running. A cancel cannot kill the
+# thread; it stops at yt-dlp's next progress tick (``download_stop``), and
+# until then the job counts as active, so it cannot be deleted under it.
+_downloads_running: set[str] = set()
+
+
+def _track_job_task(job_id: str, task: asyncio.Task[Any]) -> None:
+    _job_tasks.setdefault(job_id, set()).add(task)
+
+    def _untrack(done: asyncio.Task[Any]) -> None:
+        tasks = _job_tasks.get(job_id)
+        if tasks is None:
+            return
+        tasks.discard(done)
+        if not tasks:
+            del _job_tasks[job_id]
+            _user_cancelled.discard(job_id)
+
+    task.add_done_callback(_untrack)
+
+
+def cancel_job(job_id: str) -> bool:
+    """Cancel every pipeline task of ``job_id``; False if it has none.
+
+    The job is marked as cancelled by the user first, so each task, as it
+    unwinds, records what a user cancel means (``cancelled`` status and
+    ``JobCancelled`` for a run, ``RepromptFailed`` for a reprompt, the prior
+    chapter status for a re-render) instead of what a shutdown leaves.
+    """
+    tasks = [task for task in _job_tasks.get(job_id, ()) if not task.done()]
+    if not tasks:
+        return False
+    _user_cancelled.add(job_id)
+    for task in tasks:
+        task.cancel()
+    return True
+
+
+def job_active(job_id: str) -> bool:
+    """True while anything of the job may still run or write files: a
+    pipeline task (run, re-render or reprompt, waiting or running), a
+    reprompt claim, or a download thread that outlived its task."""
+    return (
+        job_id in _job_tasks
+        or reprompt_in_flight(job_id)
+        or job_id in _downloads_running
+    )
+
+
 async def run_orchestrator(bus: AsyncEventBus, store: JobStore) -> None:
     """Subscribes to VIDEO_REQUESTED events and runs per-job pipelines.
 
     At most ``settings.max_concurrent_jobs`` pipelines run at once; a job past
     the cap waits for a slot with its status still ``pending``. Cancelling the
-    orchestrator cancels running and waiting jobs alike.
+    orchestrator cancels running and waiting jobs alike. Each task is also
+    registered under its job id, so ``cancel_job`` can cancel one job.
     """
     log.info("Orchestrator subscribed; awaiting VideoRequested events")
     max_jobs = settings.max_concurrent_jobs
@@ -73,14 +133,23 @@ async def run_orchestrator(bus: AsyncEventBus, store: JobStore) -> None:
     pipeline_tasks: set[asyncio.Task[Any]] = set()
 
     async def _run_when_slot_free(event: Event) -> None:
-        async with job_slots:
+        try:
+            await job_slots.acquire()
+        except asyncio.CancelledError:
+            if event.job_id in _user_cancelled:
+                await _finish_then_honour_cancel(_cancel_before_start(event, bus, store))
+            raise
+        try:
             await _run_job(event, bus, store)
+        finally:
+            job_slots.release()
 
     try:
         async for event in bus.subscribe(types=[EventType.VIDEO_REQUESTED]):
             task = asyncio.create_task(_run_when_slot_free(event))
             pipeline_tasks.add(task)
             task.add_done_callback(pipeline_tasks.discard)
+            _track_job_task(event.job_id, task)
     except asyncio.CancelledError:
         for task in pipeline_tasks:
             task.cancel()
@@ -135,6 +204,27 @@ async def _download_progress_events(bus: AsyncEventBus, job_id: str) -> AsyncIte
         )
 
 
+async def _cancel_before_start(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
+    """Record a user cancel of a task that was still waiting for a slot.
+
+    A run is marked ``cancelled``; a reprompt releases its claim (the
+    reprompt itself never ran, so nothing else will) and reports
+    ``RepromptFailed``; a re-render had changed nothing yet.
+    """
+    job_id = trigger.job_id
+    if trigger.payload.get("rerender_clip_id"):
+        log.info("[%s] Re-render cancelled before it started", job_id)
+    elif trigger.payload.get("reprompt"):
+        log.info("[%s] Reprompt cancelled before it started", job_id)
+        release_reprompt(job_id)
+        await _emit(
+            bus, EventType.REPROMPT_FAILED, job_id, error="cancelled", reason="cancelled"
+        )
+    else:
+        log.info("[%s] Job cancelled before it started", job_id)
+        await _record_cancel(bus, store, job_id)
+
+
 async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
     if trigger.payload.get("rerender_clip_id"):
         await _rerender_clip(trigger, bus, store)
@@ -145,6 +235,11 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
 
     job_id = trigger.job_id
     payload = trigger.payload
+    # Cancelled while it had no task yet (still in the queue): never start.
+    with contextlib.suppress(JobNotFoundError):
+        if (await store.get(job_id)).status == "cancelled":
+            log.info("[%s] Job was cancelled before it started; not running it", job_id)
+            return
     url: str = payload["url"]
     download_path: str = payload["download_path"]
     caption_format: str = payload.get("caption_format", settings.default_caption_format)
@@ -200,10 +295,13 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
         log.info("[%s] Step: download video", job_id)
         step_t0 = time.perf_counter()
         await store.update(job_id, lambda s: setattr(s, "current_step", "download"))
+        stop_download = threading.Event()
         try:
             async with _download_progress_events(bus, job_id):
                 result = await asyncio.wait_for(
-                    asyncio.to_thread(adapter.download, url, destination),
+                    asyncio.to_thread(
+                        _download_in_thread, adapter, url, destination, job_id, stop_download
+                    ),
                     timeout=settings.download_timeout_seconds,
                 )
         except asyncio.TimeoutError:
@@ -211,6 +309,10 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
         except Exception as e:
             log.error("[%s] download failed  url=%s  error=%s", job_id, url, e)
             raise RuntimeError(f"download failed: {e}") from e
+        finally:
+            # A thread that outlived the wait (cancel, timeout) stops at its
+            # next progress tick instead of downloading for nobody.
+            stop_download.set()
         video_path = result.video_path
         info = result.info
         if not video_path or info is None:
@@ -400,6 +502,10 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
 
     except asyncio.CancelledError:
         log.warning("[%s] Job cancelled after %.2fs", job_id, time.perf_counter() - job_t0)
+        # Only a user cancel is recorded; a shutdown leaves the job as it
+        # was (the next start fails it as interrupted).
+        if job_id in _user_cancelled:
+            await _finish_then_honour_cancel(_record_cancel(bus, store, job_id))
         raise
     except Exception as e:  # noqa: BLE001
         log.exception("[%s] Job failed after %.2fs", job_id, time.perf_counter() - job_t0)
@@ -410,6 +516,26 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
     finally:
         if cleanup_root is not None and cleanup_root.exists():
             shutil.rmtree(cleanup_root, ignore_errors=True)
+
+
+def _download_in_thread(
+    adapter: Any, url: str, destination: str, job_id: str, stop: threading.Event
+) -> Any:
+    """``adapter.download`` in a worker thread that ``stop`` can end.
+
+    yt-dlp polls ``download_stop`` on each progress tick and aborts once
+    ``stop`` is set. The job counts as active (``job_active``) until the
+    thread returns, however long it outlives its task.
+    """
+    if stop.is_set():
+        raise RuntimeError("download cancelled before it started")
+    _downloads_running.add(job_id)
+    token = download_stop.set(stop.is_set)
+    try:
+        return adapter.download(url, destination)
+    finally:
+        download_stop.reset(token)
+        _downloads_running.discard(job_id)
 
 
 def _full_video_chapter(safe_end: float) -> dict[str, Any]:
@@ -647,6 +773,14 @@ async def _rerender_clip(trigger: Event, bus: AsyncEventBus, store: JobStore) ->
         )
     except asyncio.CancelledError:
         log.warning("[%s] Re-render of clip %s cancelled", job_id, clip_id)
+        # A user cancel puts the chapter back, as a failure does; a shutdown
+        # leaves it as it was.
+        if chapter is not None and job_id in _user_cancelled:
+            await _finish_then_honour_cancel(
+                _restore_chapter_status(
+                    store, job_id, int(chapter["index"]), prior_chapter_status
+                )
+            )
         raise
     except Exception:  # noqa: BLE001 — a failed re-render must not fail the job
         log.exception(
@@ -1071,9 +1205,18 @@ async def _reprompt_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> 
         await _emit(bus, EventType.JOB_COMPLETED, job_id, output_paths=output_paths)
     except asyncio.CancelledError:
         log.warning("[%s] Reprompt cancelled; the job keeps its clips", job_id)
-        await _finish_then_honour_cancel(
-            _undo_reprompt(store, job_id, new_clip_ids, new_indexes, retired_old_ids)
-        )
+        user_cancel = job_id in _user_cancelled
+
+        async def _undo() -> None:
+            await _undo_reprompt(store, job_id, new_clip_ids, new_indexes, retired_old_ids)
+            # A user cancel ends the UI's reprompt; a shutdown has no listener.
+            if user_cancel:
+                await _emit(
+                    bus, EventType.REPROMPT_FAILED, job_id,
+                    error="cancelled", reason="cancelled",
+                )
+
+        await _finish_then_honour_cancel(_undo())
         raise
     except Exception as e:  # noqa: BLE001 — a failed reprompt must not fail the job
         error_text = str(e)
@@ -1110,6 +1253,26 @@ async def _record_failure(
         failed_step=(await store.get(job_id)).current_step,
         error=error,
     )
+
+
+async def _record_cancel(bus: AsyncEventBus, store: JobStore, job_id: str) -> None:
+    """Mark a user-cancelled job ``cancelled`` and emit ``JobCancelled``.
+
+    Only a job still ``pending`` or ``running`` changes: one that completed
+    or failed just before the cancel landed keeps that outcome, and one the
+    cancel route already marked is not reported twice.
+    """
+    changed = False
+
+    def _cancel(s: JobState) -> None:
+        nonlocal changed
+        if s.status in ("pending", "running"):
+            s.status = "cancelled"
+            changed = True
+
+    state = await store.update(job_id, _cancel)
+    if changed:
+        await _emit(bus, EventType.JOB_CANCELLED, job_id, cancelled_step=state.current_step)
 
 
 async def _finish_then_honour_cancel(coro: Coroutine[Any, Any, None]) -> None:
