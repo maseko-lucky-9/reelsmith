@@ -763,16 +763,75 @@ def test_legacy_upload_root_matches_the_upload_adapter():
     assert LEGACY_UPLOAD_ROOT.resolve() == upload_adapter._LEGACY_UPLOAD_ROOT
 
 
+def _legacy_base(tmp_path, monkeypatch, *, mode: int = 0o755):
+    base = tmp_path / "yt"
+    (base / "uploads").mkdir(parents=True)
+    base.chmod(mode)
+    monkeypatch.setattr(upload_adapter, "_LEGACY_BASE", base)
+    return base
+
+
 def test_managed_roots_are_the_download_path_its_uploads_and_the_legacy_root(
     monkeypatch, tmp_path
 ):
     monkeypatch.setattr(settings, "default_download_path", str(tmp_path / "dl"))
+    base = _legacy_base(tmp_path, monkeypatch)
 
     assert managed_roots() == (
         (tmp_path / "dl").resolve(),
         (tmp_path / "dl" / "uploads").resolve(),
-        LEGACY_UPLOAD_ROOT.resolve(),
+        (base / "uploads").resolve(),
     )
+
+
+def test_a_missing_legacy_root_is_not_a_managed_root(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "default_download_path", str(tmp_path / "dl"))
+    monkeypatch.setattr(upload_adapter, "_LEGACY_BASE", tmp_path / "absent")
+
+    assert managed_roots() == ((tmp_path / "dl").resolve(), (tmp_path / "dl" / "uploads").resolve())
+    assert upload_adapter.upload_roots() == ((tmp_path / "dl" / "uploads").resolve(),)
+
+
+def test_a_planted_symlink_never_makes_a_folder_a_legacy_root(monkeypatch, tmp_path):
+    """``/tmp`` is world-writable: ``/tmp/yt`` planted as a symlink to any
+    folder would make that folder deletable."""
+    monkeypatch.setattr(settings, "default_download_path", str(tmp_path / "dl"))
+    victim = tmp_path / "victim"
+    (victim / "uploads").mkdir(parents=True)
+    planted = tmp_path / "yt"
+    planted.symlink_to(victim, target_is_directory=True)
+    monkeypatch.setattr(upload_adapter, "_LEGACY_BASE", planted)
+
+    assert upload_adapter.legacy_upload_root() is None
+    assert (victim / "uploads").resolve() not in managed_roots()
+
+
+def test_a_planted_symlink_as_the_legacy_uploads_folder_is_refused(monkeypatch, tmp_path):
+    base = tmp_path / "yt"
+    base.mkdir()
+    (tmp_path / "victim").mkdir()
+    (base / "uploads").symlink_to(tmp_path / "victim", target_is_directory=True)
+    monkeypatch.setattr(upload_adapter, "_LEGACY_BASE", base)
+
+    assert upload_adapter.legacy_upload_root() is None
+
+
+@pytest.mark.parametrize("loose", ["base", "uploads"])
+def test_a_group_or_world_writable_legacy_root_is_not_trusted(monkeypatch, tmp_path, loose):
+    base = _legacy_base(tmp_path, monkeypatch)
+    (base if loose == "base" else base / "uploads").chmod(0o777)
+
+    assert upload_adapter.legacy_upload_root() is None
+    assert (base / "uploads").resolve() not in managed_roots()
+
+
+def test_the_legacy_root_is_checked_on_every_call(monkeypatch, tmp_path):
+    base = _legacy_base(tmp_path, monkeypatch)
+    assert upload_adapter.legacy_upload_root() == (base / "uploads").resolve()
+
+    (base / "uploads").chmod(0o775)
+
+    assert upload_adapter.legacy_upload_root() is None
 
 
 @pytest.fixture

@@ -393,7 +393,8 @@ async def test_a_job_folder_that_is_a_symlink_inside_the_root_is_not_walked(root
     link.symlink_to(real, target_is_directory=True)
     job = await _job(store, JOB, destination_folder=str(link))
 
-    assert await delete_job_files(job, store) == []
+    with pytest.raises(retention.JobFolderRefused):
+        await delete_job_files(job, store)
     assert keep.exists()
 
 
@@ -512,7 +513,8 @@ async def test_a_protected_folder_spelled_in_another_case_is_never_walked(root, 
     copy = _file(folder / "exp.mp4")
     job = await _job(store, JOB, destination_folder=str(folder), output_paths=[str(copy)])
 
-    assert await delete_job_files(job, store) == []
+    with pytest.raises(retention.JobFolderRefused):
+        await delete_job_files(job, store)
     assert copy.exists()
 
 
@@ -626,15 +628,46 @@ async def test_a_delete_reads_only_path_references_not_every_row(root):
 # ── Defence in depth ──────────────────────────────────────────────────────────
 
 
-async def test_a_job_folder_with_a_symlink_anywhere_in_its_path_deletes_nothing(root):
+async def test_a_job_folder_with_a_symlink_below_the_root_is_refused_and_nothing_goes(root):
+    """The rows must then stay too (``JobFolderRefused``): the files are
+    the app's, and no row would name them any more."""
     store = InMemoryJobStore()
     real = root / "real"
     precious = _file(real / f"Talk-{JOB[:8]}" / "video.mp4")
     (root / "alias").symlink_to(real, target_is_directory=True)
     job = await _job(store, JOB, destination_folder=str(root / "alias" / f"Talk-{JOB[:8]}"))
 
-    assert await delete_job_files(job, store) == []
+    with pytest.raises(retention.JobFolderRefused):
+        await delete_job_files(job, store)
     assert precious.exists()
+
+
+async def test_a_root_reached_through_a_symlink_still_deletes_the_jobs_files(tmp_path, monkeypatch):
+    """The reviewer's reproduction: the download path itself is spelled
+    through a symlink (macOS ``/tmp``, ``/var``, or a linked data folder).
+    Only symlinks between the root and the job folder are refused."""
+    real = (tmp_path / "real-downloads").resolve()
+    (real / "uploads").mkdir(parents=True)
+    linked = tmp_path / "linked-downloads"
+    linked.symlink_to(real, target_is_directory=True)
+    monkeypatch.setattr(retention.settings, "default_download_path", str(linked))
+    folder = linked / "slug-abcd1234"
+    src = _file(folder / "video.mp4")
+    clip = _file(folder / "clips" / "01.mp4")
+    store = InMemoryJobStore()
+    job = await _job(
+        store,
+        JOB,
+        destination_folder=str(folder),
+        clips_folder=str(folder / "clips"),
+        video_path=str(src),
+        output_paths=[str(clip)],
+    )
+
+    deleted = await delete_job_files(job, store, protected=())
+
+    assert set(deleted) == {str(real / "slug-abcd1234" / "video.mp4"), str(real / "slug-abcd1234" / "clips" / "01.mp4")}
+    assert not (real / "slug-abcd1234").exists()
 
 
 async def test_a_job_folder_that_holds_a_managed_root_deletes_nothing(root):
@@ -644,7 +677,8 @@ async def test_a_job_folder_that_holds_a_managed_root_deletes_nothing(root):
     own = _file(folder / "video.mp4")
     job = await _job(store, JOB, destination_folder=str(folder), video_path=str(own))
 
-    assert await delete_job_files(job, store, roots=(root, folder / "uploads")) == []
+    with pytest.raises(retention.JobFolderRefused):
+        await delete_job_files(job, store, roots=(root, folder / "uploads"))
     assert upload.exists() and own.exists()
 
 
@@ -763,3 +797,14 @@ async def test_a_protected_folder_spelled_in_another_case_inside_the_job_folder_
 
     assert precious.exists()
     assert paths["export"].exists(), "the walk must stop at the protected folder"
+
+
+async def test_a_folder_outside_the_managed_roots_is_not_ours_and_does_not_block(root, outside):
+    """Refused, but not the app's to delete: no ``JobFolderRefused``, so the
+    rows can go (spec 013 FR-007)."""
+    store = InMemoryJobStore()
+    precious = _file(outside / "job" / "video.mp4")
+    job = await _job(store, JOB, destination_folder=str(outside / "job"))
+
+    assert await delete_job_files(job, store) == []
+    assert precious.exists()

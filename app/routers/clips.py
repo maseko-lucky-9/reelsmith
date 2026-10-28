@@ -139,10 +139,18 @@ async def rerender_clip(
         "reframe_provider": req.reframe_provider,
         "regenerate_copy": req.regenerate_copy,
     }
-    if hasattr(request.app.state, "job_queue"):
-        await request.app.state.job_queue.put((job.job_id, payload))
-    else:
-        await request.app.state.event_bus.publish(
-            Event(type=EventType.VIDEO_REQUESTED, job_id=job.job_id, payload=payload)
-        )
+    # Claimed with no await since the deleting check above, and released when
+    # the re-render's task ends (or here, if it is never queued): a delete
+    # in between answers 409, and a delete first makes this one 409.
+    orchestrator.claim_work(job.job_id)
+    try:
+        if hasattr(request.app.state, "job_queue"):
+            await request.app.state.job_queue.put((job.job_id, payload))
+        else:
+            await request.app.state.event_bus.publish(
+                Event(type=EventType.VIDEO_REQUESTED, job_id=job.job_id, payload=payload)
+            )
+    except BaseException:
+        orchestrator.release_work(job.job_id)
+        raise
     return {"status": "queued", "clip_id": clip_id}

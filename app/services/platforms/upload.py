@@ -10,6 +10,7 @@ preventing path traversal / arbitrary file read.
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -23,16 +24,35 @@ _UPLOAD_ROOT = (Path(settings.default_download_path) / "uploads").resolve()
 # Where uploads were stored before T031; jobs created then still point here.
 _LEGACY_UPLOAD_ROOT = Path("/tmp/yt/uploads").resolve()
 _ALLOWED_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
+# The legacy root's parent, checked with it by ``legacy_upload_root``.
+_LEGACY_BASE = Path("/tmp/yt")
+
+
+def legacy_upload_root() -> Path | None:
+    """The resolved legacy upload root (``/tmp/yt/uploads``), or None when it
+    cannot be trusted. ``/tmp`` is world-writable: anyone could plant
+    ``/tmp/yt`` as a symlink to any folder and make it deletable. So both
+    ``/tmp/yt`` and ``/tmp/yt/uploads`` must be real folders (``lstat``: no
+    symlink), owned by this user, with no group or world write bit. Checked
+    on every call, not once at import."""
+    for path in (_LEGACY_BASE, _LEGACY_BASE / "uploads"):
+        try:
+            st = os.lstat(path)
+        except OSError:
+            return None
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o022:
+            return None
+    return (_LEGACY_BASE / "uploads").resolve()
 
 
 def upload_roots() -> tuple[Path, ...]:
-    """The resolved folders an uploaded file may live in, read from settings
-    now (``POST /jobs`` and a job delete; the adapter keeps its import-time
-    roots)."""
-    return (
-        (Path(settings.default_download_path) / "uploads").resolve(),
-        _LEGACY_UPLOAD_ROOT,
-    )
+    """The resolved folders an uploaded file may live in, read now (``POST
+    /jobs`` and a job delete; the adapter keeps its import-time roots): the
+    download path's ``uploads`` and, when it can be trusted, the legacy
+    root."""
+    legacy = legacy_upload_root()
+    uploads = (Path(settings.default_download_path) / "uploads").resolve()
+    return (uploads,) if legacy is None else (uploads, legacy)
 
 
 def uploaded_file(raw: str | None) -> Path | None:

@@ -52,7 +52,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bus.job_store import CLIP_FILE_KEYS, PathReferences
 from app.db.models import ClipRecord, JobRecord
-from app.services.platforms.upload import uploaded_file
+from app.services.platforms.upload import legacy_upload_root, uploaded_file
 from app.services.segment_discovery import words_sidecar_path
 from app.settings import settings
 
@@ -157,12 +157,14 @@ async def sweep_expired_clips(
 
 def managed_roots() -> tuple[Path, ...]:
     """The resolved folders the sweeps may delete below: the download path,
-    its ``uploads`` folder and the legacy upload root. A root itself is
-    never removed, so ``uploads`` stays even when it is empty."""
+    its ``uploads`` folder and the legacy upload root, the last only when it
+    can be trusted (``upload.legacy_upload_root``, checked on every call). A
+    root itself is never removed, so ``uploads`` stays even when it is
+    empty."""
     download = Path(settings.default_download_path)
-    return tuple(
-        path.resolve() for path in (download, download / "uploads", LEGACY_UPLOAD_ROOT)
-    )
+    roots = tuple(path.resolve() for path in (download, download / "uploads"))
+    legacy = legacy_upload_root()
+    return roots if legacy is None else (*roots, legacy)
 
 
 def _is_unsafe(raw: str) -> bool:
@@ -703,6 +705,12 @@ async def _still_retired_and_unused(
 FileId = tuple[int, int]
 
 
+class JobFolderRefused(Exception):
+    """The job's folder holds files the app owns (it lies below a managed
+    root) but may not be deleted safely, so nothing is deleted and the job's
+    rows must stay: deleting them would leave files no row names."""
+
+
 def protected_roots() -> tuple[Path, ...]:
     """Resolved folders no job delete may touch, even when one lies below a
     managed root: the export folder (spec 010 FR-007) and the app's own
@@ -833,9 +841,11 @@ async def delete_job_files(
       spelling or by identity;
     * a file another job or another job's clip, live or retired, names, or
       another job's words sidecar, by spelling or by identity;
-    * the job folder, when it is unsafe, not canonical (a symlink anywhere in
-      its path), not strictly below a managed root, inside a protected folder
-      or holding a managed root: then nothing of the job's folder goes;
+    * the job folder, when it is unsafe, has a symlink between its managed
+      root and itself, is not strictly below a managed root, is inside a
+      protected folder or holds a managed root: then nothing of the job's
+      folder goes, and when it is a real folder below a managed root
+      ``JobFolderRefused`` is raised before anything is deleted;
     * the walk only (named files still go), when the folder holds a
       protected folder or overlaps another job's folder;
     * symlinks: never followed and never removed (``delete_below_root``).
@@ -895,10 +905,10 @@ def _job_folder(
         folder = lexical.resolve()
     except (OSError, RuntimeError, ValueError):
         return None
-    if folder != lexical:
-        log.warning("delete job %s: kept folder %r: a symlink in its path", job_id, raw)
-        return None
     if not folder.is_dir():
+        return None
+    if not _no_symlink_below_root(lexical, folder, roots):
+        log.warning("delete job %s: kept folder %r: a symlink below the managed folder", job_id, raw)
         return None
     if not _is_managed(folder, roots) or any(r.is_relative_to(folder) for r in roots):
         log.warning("delete job %s: kept folder %r: not strictly below a managed folder", job_id, raw)
@@ -907,6 +917,32 @@ def _job_folder(
         log.warning("delete job %s: kept folder %r: inside a protected folder", job_id, raw)
         return None
     return folder
+
+
+def _no_symlink_below_root(lexical: Path, folder: Path, roots: Sequence[Path]) -> bool:
+    """True when the path from the owning managed root down to the folder has
+    no symlink. A symlink *above* the root is fine (macOS ``/tmp`` and
+    ``/var``, a download path reached through a link): the roots are
+    resolved, so the lexical path is rebased onto the root its deepest
+    ancestor resolves to and must then equal the resolved folder."""
+    for ancestor in lexical.parents:
+        try:
+            resolved = ancestor.resolve()
+        except (OSError, RuntimeError, ValueError):
+            return False
+        if resolved in roots:
+            return resolved / lexical.relative_to(ancestor) == folder
+    return False
+
+
+def _refused_but_ours(raw: str | None, folder: Path | None, roots: Sequence[Path]) -> bool:
+    """True when the job's folder was refused although it is a real folder
+    below a managed root, i.e. it holds files the app owns."""
+    if folder is not None or not raw or "\x00" in raw or not os.path.isabs(raw):
+        return False
+    if not os.path.isdir(raw):
+        return False
+    return _is_managed(Path(os.path.realpath(raw)), roots)
 
 
 def _may_walk(job_id: str, folder: Path, keep: _Keep, ancestry: _Ancestry) -> bool:
@@ -949,6 +985,9 @@ def _delete_job_files_sync(
     keep = _keep_set(refs, protected)
     ancestry = _Ancestry()
     folder = _job_folder(job_id, job.destination_folder, roots, keep, ancestry)
+    # Before anything is deleted: the caller keeps the rows (FR-007).
+    if _refused_but_ours(job.destination_folder, folder, roots):
+        raise JobFolderRefused("a symlink below the download folder, a protected folder, or a managed folder inside it")
     upload_source = _upload_source(job)
     allowed_outside = (
         {upload_source, words_sidecar_path(str(upload_source))} if upload_source else set()

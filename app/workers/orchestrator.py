@@ -72,9 +72,12 @@ _user_cancelled: set[str] = set()
 # active, so it cannot be deleted while a thread may still write into it.
 _threads_running: dict[str, int] = {}
 _threads_lock = threading.Lock()
-# Jobs a ``DELETE /jobs/{id}`` is deleting; a re-render or reprompt of one
-# answers 409.
+# Jobs a ``DELETE /jobs/{id}`` is deleting; a re-render, reprompt or clip
+# enhancement of one answers 409.
 _deleting: set[str] = set()
+# Claimed work per job (``claim_work``): re-renders between their 202 and the
+# end of their task, clip enhancements during their request.
+_work_in_flight: dict[str, int] = {}
 
 
 def _track_job_task(job_id: str, task: asyncio.Task[Any]) -> None:
@@ -105,19 +108,49 @@ def cancel_job(job_id: str) -> bool:
         return False
     _user_cancelled.add(job_id)
     for task in tasks:
-        task.cancel()
+        # Idempotent: a task already cancelled is not cancelled again. A
+        # second cancel would break ``to_thread_cancellable``'s wait for its
+        # worker thread, so the task would end (and the job look idle) while
+        # the thread still writes into the job's folder.
+        if task.cancelling() == 0:
+            task.cancel()
     return True
 
 
+def job_has_work(job_id: str) -> bool:
+    """True while the job has work a cancel can stop or wait for: a pipeline
+    task (run, re-render or reprompt, waiting or running), a reprompt claim,
+    or a claimed re-render or clip enhancement (``claim_work``)."""
+    return job_id in _job_tasks or reprompt_in_flight(job_id) or job_id in _work_in_flight
+
+
+def job_threads_running(job_id: str) -> bool:
+    """True while a worker thread of the job still runs after its task ended
+    (it cannot be stopped; it finishes on its own)."""
+    return job_id in _threads_running
+
+
 def job_active(job_id: str) -> bool:
-    """True while anything of the job may still run or write files: a
-    pipeline task (run, re-render or reprompt, waiting or running), a
-    reprompt claim, or a worker thread that outlived its task."""
-    return (
-        job_id in _job_tasks
-        or reprompt_in_flight(job_id)
-        or job_id in _threads_running
-    )
+    """True while anything of the job may still run or write files
+    (``job_has_work`` or ``job_threads_running``)."""
+    return job_has_work(job_id) or job_threads_running(job_id)
+
+
+def claim_work(job_id: str) -> None:
+    """Count one piece of work on the job's files that has no task yet or
+    none at all: a re-render from its 202 until its task ends, a clip
+    enhancement for its request. Taken synchronously in the route right
+    after its ``deleting`` check, so a delete and the work exclude each
+    other; released with ``release_work``."""
+    _work_in_flight[job_id] = _work_in_flight.get(job_id, 0) + 1
+
+
+def release_work(job_id: str) -> None:
+    left = _work_in_flight.get(job_id, 0) - 1
+    if left > 0:
+        _work_in_flight[job_id] = left
+    else:
+        _work_in_flight.pop(job_id, None)
 
 
 def claim_delete(job_id: str) -> bool:
@@ -264,6 +297,7 @@ async def _cancel_before_start(trigger: Event, bus: AsyncEventBus, store: JobSto
     job_id = trigger.job_id
     if trigger.payload.get("rerender_clip_id"):
         log.info("[%s] Re-render cancelled before it started", job_id)
+        release_work(job_id)
     elif trigger.payload.get("reprompt"):
         log.info("[%s] Reprompt cancelled before it started", job_id)
         release_reprompt(job_id)
@@ -854,6 +888,8 @@ async def _rerender_clip(trigger: Event, bus: AsyncEventBus, store: JobStore) ->
     finally:
         if cleanup_root is not None:
             shutil.rmtree(cleanup_root, ignore_errors=True)
+        # The route's claim (``claim_work``), however the re-render ended.
+        release_work(job_id)
 
 
 async def _restore_chapter_status(

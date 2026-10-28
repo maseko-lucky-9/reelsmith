@@ -33,6 +33,14 @@ _YT_DLP_TIMEOUT_SECONDS = 12.0
 # A job in one of these states has (or is about to get) a pipeline task.
 _ACTIVE_STATUSES = ("pending", "running")
 
+# 409 details of DELETE /jobs/{id}; the web client tells them apart
+# (web/src/lib/jobStatus.ts).
+DELETE_WORK_RUNNING = (
+    "a re-render, reprompt or clip enhancement of this job is still running; cancel it first"
+)
+DELETE_STILL_FINISHING = "the job is still finishing; try again in a moment"
+DELETE_IN_PROGRESS = "this job is already being deleted"
+
 
 class CreateJobRequest(BaseModel):
     url: str
@@ -270,25 +278,40 @@ async def delete_job(job_id: str, request: Request) -> Response:
     or reprompt asked for meanwhile answers 409; deletes run one at a time.
 
     Raises:
-        HTTPException: 409 while the job is pending or running, a re-render,
-            reprompt or worker thread of it is still running, or another
-            delete of it is under way.
+        HTTPException: 409, with a detail saying which, while the job is
+            pending or running or a re-render, reprompt or clip enhancement
+            of it runs (cancel it first); while only its worker threads are
+            still finishing (try again in a moment); while another request
+            is deleting it; or when its folder may not be deleted safely
+            (then nothing is deleted, rows included).
     """
     store = request.app.state.job_store
     if not orchestrator.claim_delete(job_id):
-        raise HTTPException(status_code=409, detail="this job is already being deleted")
+        # A duplicate request: done if the other one already got there.
+        try:
+            await store.get(job_id)
+        except JobNotFoundError:
+            return Response(status_code=204)
+        raise HTTPException(status_code=409, detail=DELETE_IN_PROGRESS)
     try:
         async with _delete_lock(request):
             try:
                 job = await store.get(job_id)
             except JobNotFoundError:
                 return Response(status_code=204)
-            if job.status in _ACTIVE_STATUSES or orchestrator.job_active(job_id):
+            if job.status in _ACTIVE_STATUSES:
+                raise HTTPException(status_code=409, detail=f"job is {job.status}; cancel it first")
+            if orchestrator.job_has_work(job_id):
+                raise HTTPException(status_code=409, detail=DELETE_WORK_RUNNING)
+            if orchestrator.job_threads_running(job_id):
+                raise HTTPException(status_code=409, detail=DELETE_STILL_FINISHING)
+            try:
+                await retention.delete_job_files(job, store)
+            except retention.JobFolderRefused as refused:
                 raise HTTPException(
                     status_code=409,
-                    detail=f"job is {job.status} or still has work running; cancel it first",
-                )
-            await retention.delete_job_files(job, store)
+                    detail=f"the job's folder cannot be deleted safely ({refused}); nothing was deleted",
+                ) from None
             await store.delete(job_id)
             await request.app.state.event_bus.forget(job_id)
     finally:

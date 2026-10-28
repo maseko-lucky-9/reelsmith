@@ -34,7 +34,14 @@ URL = "https://www.youtube.com/watch?v=cancel01"
 
 
 def _REGISTRIES():
-    return (orch._job_tasks, orch._user_cancelled, orch._threads_running, orch._reprompts_in_flight, orch._deleting)
+    return (
+        orch._job_tasks,
+        orch._user_cancelled,
+        orch._threads_running,
+        orch._reprompts_in_flight,
+        orch._deleting,
+        orch._work_in_flight,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -225,7 +232,7 @@ def test_delete_of_an_active_job_is_409_and_touches_nothing(client, root, status
     assert _status(client) == status
 
 
-@pytest.mark.parametrize("busy", ["task", "reprompt", "download"])
+@pytest.mark.parametrize("busy", ["task", "reprompt", "rerender claim", "thread"])
 def test_delete_of_a_completed_job_with_work_running_is_409(client, root, busy):
     paths = _job_folder(root)
     _seed(client, destination_folder=str(paths["folder"]))
@@ -233,12 +240,36 @@ def test_delete_of_a_completed_job_with_work_running_is_409(client, root, busy):
         _live_task(client)  # a re-render
     elif busy == "reprompt":
         assert orch.claim_reprompt(JOB)
+    elif busy == "rerender claim":
+        orch.claim_work(JOB)  # a re-render queued, its task not started yet
     else:
         orch._threads_running[JOB] = 1  # a worker thread that outlived its task
 
-    assert client.delete(f"/jobs/{JOB}").status_code == 409
+    response = client.delete(f"/jobs/{JOB}")
+
+    assert response.status_code == 409
+    # Only work a cancel can stop is answered with "cancel it first"; a
+    # thread still finishing is not (cancelling would be a dead end).
+    if busy == "thread":
+        assert response.json()["detail"] == "the job is still finishing; try again in a moment"
+    else:
+        assert response.json()["detail"].endswith("cancel it first")
+        assert "still finishing" not in response.json()["detail"]
     assert paths["Talk.mp4"].exists()
     assert _status(client) == "completed"
+    assert not orch.deleting(JOB)
+
+
+def test_delete_of_a_cancelled_job_with_only_a_thread_left_says_try_again(client, root):
+    _seed(client, status="cancelled")
+    orch._threads_running[JOB] = 1
+
+    response = client.delete(f"/jobs/{JOB}")
+
+    assert (response.status_code, response.json()["detail"]) == (
+        409,
+        "the job is still finishing; try again in a moment",
+    )
 
 
 def test_a_failed_file_delete_keeps_the_rows_so_the_delete_can_be_retried(client, root, monkeypatch):
@@ -252,6 +283,7 @@ def test_a_failed_file_delete_keeps_the_rows_so_the_delete_can_be_retried(client
     with pytest.raises(OSError):
         client.delete(f"/jobs/{JOB}")
     assert client.get(f"/jobs/{JOB}").status_code == 200
+    assert not orch.deleting(JOB)
 
 
 # ── The event stream ends on JobCancelled and on RepromptFailed ───────────────
@@ -415,3 +447,137 @@ def test_cancel_marks_a_queued_job_then_cancels_a_task_it_got_meanwhile(client, 
 
     assert client.post(f"/jobs/{JOB}/cancel").json()["status"] == "cancelled"
     assert calls == [JOB, JOB]
+
+
+# ── Review round 2 ────────────────────────────────────────────────────────────
+
+
+def test_a_rerender_queued_just_before_a_delete_makes_the_delete_409(client, root):
+    """The re-render's claim is taken in its route, before its task exists:
+    a DELETE right after the 202 must not delete the folder under it."""
+    paths = _job_folder(root)
+    _seed(client, destination_folder=str(paths["folder"]), video_path=str(paths["Talk.mp4"]))
+    reel = str(paths["clips/00_Intro.mp4"])
+    client.portal.call(client.app.state.job_store.upsert_clip, JOB, "clip-1", lambda c: c.update(output_path=reel))
+
+    assert client.post("/clips/clip-1/rerender", json={}).status_code == 202
+    response = client.delete(f"/jobs/{JOB}")
+
+    assert response.status_code == 409
+    assert response.json()["detail"].endswith("cancel it first")
+    assert paths["Talk.mp4"].exists() and _status(client) == "completed"
+
+
+def test_a_rerender_that_cannot_be_queued_releases_its_claim(client, root, monkeypatch):
+    source = root / "src.mp4"
+    source.write_bytes(b"x")
+    _seed(client, video_path=str(source))
+    client.portal.call(client.app.state.job_store.upsert_clip, JOB, "clip-1", lambda c: c.update(output_path="/x"))
+
+    async def _broken_put(item: Any) -> None:
+        raise RuntimeError("queue gone")
+
+    monkeypatch.setattr(client.app.state.job_queue, "put", _broken_put)
+
+    with pytest.raises(RuntimeError):
+        client.post("/clips/clip-1/rerender", json={})
+    assert not orch.job_active(JOB)
+
+
+def test_a_refused_job_folder_keeps_the_rows_and_answers_409(client, root):
+    """Files below the download folder that may not be deleted safely (here
+    reached through a symlink below the root): deleting the rows would leave
+    files no row names, so nothing goes."""
+    real = root / "real" / f"Talk-{JOB[:8]}"
+    real.mkdir(parents=True)
+    (real / "Talk.mp4").write_bytes(b"x")
+    (root / "alias").symlink_to(root / "real", target_is_directory=True)
+    _seed(client, destination_folder=str(root / "alias" / f"Talk-{JOB[:8]}"))
+
+    response = client.delete(f"/jobs/{JOB}")
+
+    assert response.status_code == 409
+    assert "cannot be deleted safely" in response.json()["detail"]
+    assert (real / "Talk.mp4").exists()
+    assert client.get(f"/jobs/{JOB}").status_code == 200
+    assert not orch.deleting(JOB)
+
+
+def test_a_duplicate_delete_of_a_job_already_gone_is_204(client):
+    """Two requests for one job: the second cannot claim it, and the first has
+    already deleted it."""
+    assert orch.claim_delete(JOB)  # the first request, still releasing
+
+    assert client.delete(f"/jobs/{JOB}").status_code == 204
+
+
+def test_a_duplicate_delete_of_a_job_still_being_deleted_is_409(client):
+    _seed(client)
+    assert orch.claim_delete(JOB)
+
+    response = client.delete(f"/jobs/{JOB}")
+
+    assert (response.status_code, response.json()["detail"]) == (409, "this job is already being deleted")
+    assert _status(client) == "completed"
+
+
+def _clip_file(root: Path) -> Path:
+    clip_file = root / f"Talk-{JOB[:8]}" / "clips" / "00.mp4"
+    clip_file.parent.mkdir(parents=True)
+    clip_file.write_bytes(b"x")
+    return clip_file
+
+
+def test_enhancing_a_clip_of_a_job_being_deleted_is_409(root):
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    from app.routers import enhance_speech
+
+    clip = SimpleNamespace(job_id=JOB, output_path=str(root / "x.mp4"))
+    assert orch.claim_delete(JOB)
+
+    with pytest.raises(HTTPException) as refused:
+        enhance_speech._claim_job(clip)
+
+    assert refused.value.status_code == 409
+    assert not orch.job_has_work(JOB)
+
+
+async def test_an_enhancement_counts_as_work_on_the_job_while_it_runs(root, monkeypatch):
+    """A delete during an enhancement answers 409; the claim is released
+    after, also when the enhancement fails."""
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    from app.routers import enhance_speech
+
+    clip_file = _clip_file(root)
+    record = SimpleNamespace(id="c1", job_id=JOB, output_path=str(clip_file))
+    seen: list[bool] = []
+
+    class _Session:
+        async def execute(self, _query):
+            return SimpleNamespace(scalar_one_or_none=lambda: record)
+
+        async def commit(self) -> None:
+            seen.append(orch.job_active(JOB))
+
+    def _enhance(src: str, out: str, provider: str) -> None:
+        seen.append(orch.job_active(JOB))
+
+    monkeypatch.setattr(enhance_speech.audio_enhance_service, "enhance", _enhance)
+    await enhance_speech.enhance_speech("c1", session=_Session())
+    assert seen == [True, True]
+    assert not orch.job_active(JOB)
+
+    def _fail(src: str, out: str, provider: str) -> None:
+        raise enhance_speech.audio_enhance_service.AudioEnhanceError("boom")
+
+    monkeypatch.setattr(enhance_speech.audio_enhance_service, "enhance", _fail)
+    with pytest.raises(HTTPException):
+        body = enhance_speech.EnhanceAudioRequest(provider="loudnorm")
+        await enhance_speech.enhance_audio("c1", body, session=_Session())
+    assert not orch.job_active(JOB)

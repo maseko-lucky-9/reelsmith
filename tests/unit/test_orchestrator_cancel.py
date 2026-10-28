@@ -30,7 +30,14 @@ JOB = "job-cancel"
 
 
 def _REGISTRIES():
-    return (orch._job_tasks, orch._user_cancelled, orch._threads_running, orch._reprompts_in_flight, orch._deleting)
+    return (
+        orch._job_tasks,
+        orch._user_cancelled,
+        orch._threads_running,
+        orch._reprompts_in_flight,
+        orch._deleting,
+        orch._work_in_flight,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -519,3 +526,76 @@ def test_a_delete_claim_is_exclusive():
     assert orch.deleting(JOB)
     orch.release_delete(JOB)
     assert not orch.deleting(JOB)
+
+
+async def test_a_second_cancel_does_not_let_the_job_look_idle_while_its_thread_writes():
+    """The auditor's PoC: a second Cancel click used to cancel the task again,
+    which broke ``to_thread_cancellable``'s wait for its worker thread."""
+    from app.services import ffmpeg_tools
+
+    started, release = threading.Event(), threading.Event()
+
+    def _slow_writer() -> None:
+        started.set()
+        release.wait(5)
+
+    task = asyncio.create_task(ffmpeg_tools.to_thread_cancellable(_slow_writer))
+    orch._track_job_task(JOB, task)
+    await asyncio.to_thread(started.wait, 5)
+
+    assert orch.cancel_job(JOB) is True
+    await asyncio.sleep(0.05)
+    assert orch.cancel_job(JOB) is True
+    await asyncio.sleep(0.05)
+
+    assert orch.job_active(JOB), "the worker thread still runs"
+    assert not task.done()
+    release.set()
+    await _until(lambda: not orch.job_active(JOB))
+    assert task.cancelled()
+
+
+async def test_a_rerender_releases_its_claim_however_it_ends(tmp_path):
+    """The route claims a re-render (``claim_work``) before queueing it; the
+    re-render releases it when it ends, also when it fails early."""
+    bus, store = AsyncEventBus(), InMemoryJobStore()
+    await _create(store, JOB, tmp_path)
+    orch.claim_work(JOB)
+    assert orch.job_active(JOB)
+    trigger = Event(type=EventType.VIDEO_REQUESTED, job_id=JOB, payload={"rerender_clip_id": "missing", "url": URL})
+
+    await orch._run_job(trigger, bus, store)
+
+    assert not orch.job_active(JOB)
+    assert orch._work_in_flight == {}
+
+
+async def test_a_rerender_cancelled_while_waiting_releases_its_claim(pipeline, tmp_path):
+    bus, store = AsyncEventBus(), InMemoryJobStore()
+    await _completed_job(store, tmp_path)
+    await _create(store, "job-a", tmp_path)
+    runner = asyncio.create_task(orch.run_orchestrator(bus, store))
+    try:
+        await _request(bus, "job-a", tmp_path)
+        await asyncio.wait_for(pipeline.entered.wait(), 5)
+        orch.claim_work(JOB)
+        await _request(bus, JOB, tmp_path, rerender_clip_id="old-clip")
+        await _settle()
+
+        assert orch.cancel_job(JOB) is True
+        await _until(lambda: JOB not in orch._job_tasks)
+
+        assert not orch.job_active(JOB)
+    finally:
+        await _stop(runner)
+
+
+def test_work_claims_are_counted():
+    orch.claim_work(JOB)
+    orch.claim_work(JOB)
+    orch.release_work(JOB)
+    assert orch.job_has_work(JOB)
+    orch.release_work(JOB)
+    assert not orch.job_has_work(JOB)
+    orch.release_work(JOB)  # an extra release never goes negative
+    assert orch._work_in_flight == {}
