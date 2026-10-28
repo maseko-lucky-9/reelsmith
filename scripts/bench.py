@@ -45,7 +45,6 @@ import json
 import logging
 import platform
 import re
-import resource
 import shutil
 import subprocess
 import sys
@@ -140,6 +139,56 @@ def normalize_maxrss_mib(raw: int, platform_name: str = sys.platform) -> float:
     """Convert ``ru_maxrss`` to MiB: bytes on macOS, kilobytes on Linux."""
     divisor = 1024 * 1024 if platform_name == "darwin" else 1024
     return raw / divisor
+
+
+def _windows_peak_rss_bytes() -> int:
+    """Peak working set of this process (``resource`` is POSIX-only)."""
+    import ctypes
+    from ctypes import wintypes
+
+    class _Counters(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("PageFaultCount", wintypes.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+
+    counters = _Counters(cb=ctypes.sizeof(_Counters))
+    kernel32 = ctypes.WinDLL("kernel32")
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.K32GetProcessMemoryInfo.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(_Counters),
+        wintypes.DWORD,
+    ]
+    if not kernel32.K32GetProcessMemoryInfo(
+        kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb
+    ):
+        raise ctypes.WinError()
+    return counters.PeakWorkingSetSize
+
+
+def peak_rss_mib(children: bool = False) -> float | None:
+    """Peak RSS in MiB, or ``None`` where the platform can't measure it.
+
+    Windows has no ``resource`` module and no peak RSS for reaped children,
+    so ``children`` is ``None`` there.
+    """
+    if sys.platform == "win32":
+        if children:
+            return None
+        return round(_windows_peak_rss_bytes() / (1024 * 1024), 1)
+    import resource
+
+    who = resource.RUSAGE_CHILDREN if children else resource.RUSAGE_SELF
+    return round(normalize_maxrss_mib(resource.getrusage(who).ru_maxrss), 1)
 
 
 class _StageTimingHandler(logging.Handler):
@@ -415,18 +464,8 @@ def run_bench(args: argparse.Namespace) -> dict[str, Any]:
         "wall_clock_s": round(wall, 3),
         "stages": aggregate_stage_timings(timing_handler.timings),
         "peak_rss_mib": {
-            "self": round(
-                normalize_maxrss_mib(
-                    resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-                ),
-                1,
-            ),
-            "children": round(
-                normalize_maxrss_mib(
-                    resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
-                ),
-                1,
-            ),
+            "self": peak_rss_mib(),
+            "children": peak_rss_mib(children=True),
         },
         "input": {**_probe_media(input_path), "path": str(input_path)},
         "chapters": [vars(c) for c in chapters] if chapters else None,
