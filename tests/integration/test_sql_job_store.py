@@ -155,3 +155,114 @@ async def test_fail_interrupted_jobs_on_postgres(db_store: SqlJobStore):
     assert (await db_store.get("int-r")).error == "interrupted by restart"
     assert (await db_store.get("int-c")).status == "completed"
     assert await db_store.fail_interrupted_jobs() == []
+
+
+# ── Spec 013: delete and the cancelled status on Postgres ─────────────────────
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_sql_delete_removes_job_and_all_children(db_store: SqlJobStore):
+    import uuid
+    from datetime import UTC, datetime
+
+    from sqlalchemy import delete, func, select
+
+    from app.db.models import (
+        ChapterRecord,
+        ClipAnalyticsSnapshot,
+        ClipEdit,
+        ClipRecord,
+        JobRecord,
+        PublishJob,
+        ScheduledPost,
+        ShareLink,
+        SocialAccount,
+    )
+    from app.domain.models import ChapterArtifacts
+
+    account_id = str(uuid.uuid4())
+
+    def _completed(c: ChapterArtifacts) -> None:
+        c.status = "completed"
+
+    for job_id in ("integ-del-gone", "integ-del-kept"):
+        await db_store.create(JobState(job_id=job_id, url=f"https://yt.test/{job_id}", download_path="/tmp"))
+        await db_store.upsert_chapter(job_id, _completed, 0)
+        await db_store.upsert_clip(job_id, f"{job_id}-live", lambda c: c.update(output_path="/d/live.mp4"))
+        await db_store.upsert_clip(job_id, f"{job_id}-old", lambda c: c.update(output_path="/d/old.mp4"))
+        await db_store.retire_clips(job_id, [f"{job_id}-old"])
+
+    children = (ClipEdit, PublishJob, ScheduledPost, ShareLink, ClipAnalyticsSnapshot)
+    async with db_store._factory() as session:
+        session.add(
+            SocialAccount(id=account_id, platform="tiktok", account_handle="integ", access_token_enc=b"x")
+        )
+        await session.flush()
+        for job_id in ("integ-del-gone", "integ-del-kept"):
+            live = f"{job_id}-live"
+            publish_id = str(uuid.uuid4())
+            session.add(ClipEdit(clip_id=live, timeline={}))
+            session.add(PublishJob(id=publish_id, clip_id=live, social_account_id=account_id))
+            await session.flush()
+            session.add(ScheduledPost(publish_job_id=publish_id, scheduled_for=datetime.now(UTC)))
+            session.add(ShareLink(clip_id=live, token=f"tok-{uuid.uuid4()}"))
+            session.add(ClipAnalyticsSnapshot(clip_id=f"{job_id}-old", platform="tiktok", external_post_id="p"))
+        await session.commit()
+
+    try:
+        assert await db_store.delete("integ-del-gone") is True
+
+        async def _count(model, column=None, value=None) -> int:
+            async with db_store._factory() as session:
+                q = select(func.count()).select_from(model)
+                if column is not None:
+                    q = q.where(column == value)
+                return await session.scalar(q)
+
+        assert await _count(JobRecord, JobRecord.id, "integ-del-gone") == 0
+        assert await _count(ChapterRecord, ChapterRecord.job_id, "integ-del-gone") == 0
+        assert await _count(ClipRecord, ClipRecord.job_id, "integ-del-gone") == 0
+        # Every child table holds exactly the kept job's one row.
+        for model in children:
+            assert await _count(model) == 1, model.__tablename__
+        assert (await db_store.get("integ-del-kept")).chapters[0].status == "completed"
+        kept_clips = await db_store.list_clips(job_id="integ-del-kept", include_retired=True)
+        assert {c["clip_id"] for c in kept_clips} == {"integ-del-kept-live", "integ-del-kept-old"}
+        assert await db_store.delete("integ-del-gone") is False
+    finally:
+        async with db_store._factory() as session:
+            await session.execute(delete(PublishJob).where(PublishJob.social_account_id == account_id))
+            await session.execute(delete(SocialAccount).where(SocialAccount.id == account_id))
+            await session.commit()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_status_cancelled_round_trips(db_store: SqlJobStore):
+    await db_store.create(JobState(job_id="integ-cancel", url="https://yt.test/c", download_path="/tmp"))
+    await db_store.update("integ-cancel", lambda s: setattr(s, "status", "cancelled"))
+
+    assert (await db_store.get("integ-cancel")).status == "cancelled"
+    assert [j.status for j in await db_store.list_jobs() if j.job_id == "integ-cancel"] == ["cancelled"]
+    # Final: a restart does not fail it as interrupted.
+    assert "integ-cancel" not in await db_store.fail_interrupted_jobs()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_path_references_read_the_folders_out_of_the_state_json(db_store: SqlJobStore):
+    await db_store.create(JobState(job_id="integ-ref-a", url="https://yt.test/a", download_path="/tmp"))
+    await db_store.create(JobState(job_id="integ-ref-b", url="upload:///d/uploads/b.mp4", download_path="/tmp"))
+
+    def _folders(s: JobState) -> None:
+        s.destination_folder = "/d/b"
+        s.clips_folder = "/d/b/clips"
+        s.video_path = "/d/uploads/b.mp4"
+
+    await db_store.update("integ-ref-b", _folders)
+
+    refs = await db_store.path_references("integ-ref-a")
+
+    assert sorted(refs.folders) == ["/d/b", "/d/b/clips"]
+    assert refs.sources == ["/d/uploads/b.mp4"] and refs.upload_files == ["/d/uploads/b.mp4"]

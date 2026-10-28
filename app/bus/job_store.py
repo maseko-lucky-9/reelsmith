@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import logging
 from collections.abc import Awaitable, Callable, Collection, Sequence
+from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from pydantic import ValidationError
@@ -32,6 +33,34 @@ async def _apply_clip_mutator(mutator: ClipMutator, clip: dict[str, Any]) -> Non
 # "cancelled" job, like a completed or failed one, is final.
 INTERRUPTIBLE_STATUSES = ("pending", "running")
 INTERRUPTED_ERROR = "interrupted by restart"
+
+
+# Clip fields that name a file the clip owns.
+CLIP_FILE_KEYS = ("output_path", "thumbnail_path", "ai_hook_audio_path", "captions_burnt_path")
+
+
+@dataclass
+class PathReferences:
+    """Every path the rows of the *other* jobs name, for a job delete (spec
+    013): what that delete must never take. Only path columns are read."""
+
+    # Each job's source (``video_path``); its words sidecar is derived.
+    sources: list[str] = field(default_factory=list)
+    # The file each ``upload://`` URL names (``video_path`` is set only at
+    # the download step).
+    upload_files: list[str] = field(default_factory=list)
+    # The files of every clip, live or retired.
+    clip_files: list[str] = field(default_factory=list)
+    # Each job's ``destination_folder`` and ``clips_folder``.
+    folders: list[str] = field(default_factory=list)
+
+
+def _upload_file(url: str) -> str | None:
+    if not url.startswith("upload://"):
+        return None
+    from urllib.parse import urlparse
+
+    return urlparse(url).path or None
 
 
 @runtime_checkable
@@ -67,6 +96,7 @@ class JobStoreProtocol(Protocol):
     ) -> list[dict[str, Any]]: ...
     async def retire_clips(self, job_id: str, clip_ids: Sequence[str]) -> int: ...
     async def delete(self, job_id: str) -> bool: ...
+    async def path_references(self, exclude_job_id: str) -> PathReferences: ...
 
 
 class InMemoryJobStore:
@@ -237,6 +267,24 @@ class InMemoryJobStore:
             for clip_id in [i for i, c in self._clips.items() if c.get("job_id") == job_id]:
                 del self._clips[clip_id]
             return existed
+
+    async def path_references(self, exclude_job_id: str) -> PathReferences:
+        """The paths every job but ``exclude_job_id`` names (``PathReferences``)."""
+        refs = PathReferences()
+        async with self._lock:
+            for job in self._jobs.values():
+                if job.job_id == exclude_job_id:
+                    continue
+                if job.video_path:
+                    refs.sources.append(job.video_path)
+                if upload := _upload_file(job.url):
+                    refs.upload_files.append(upload)
+                refs.clip_files += [p for p in job.output_paths if p]
+                refs.folders += [f for f in (job.destination_folder, job.clips_folder) if f]
+            for clip in self._clips.values():
+                if clip.get("job_id") != exclude_job_id:
+                    refs.clip_files += [clip[k] for k in CLIP_FILE_KEYS if clip.get(k)]
+        return refs
 
 
 # Keep the old name as an alias so existing imports don't break during the transition.
@@ -625,6 +673,38 @@ class SqlJobStore:
             existed = result.first() is not None
             await session.commit()
         return existed
+
+    async def path_references(self, exclude_job_id: str) -> PathReferences:
+        """The paths every job but ``exclude_job_id`` names
+        (``PathReferences``): two queries that read path columns only (the
+        folders come out of ``jobs.state`` by JSON key), not whole rows."""
+        from sqlalchemy import select
+
+        from app.db.models import ClipRecord, JobRecord
+
+        refs = PathReferences()
+        async with self._factory() as session:
+            jobs = await session.execute(
+                select(
+                    JobRecord.video_path,
+                    JobRecord.youtube_url,
+                    JobRecord.state["destination_folder"].as_string(),
+                    JobRecord.state["clips_folder"].as_string(),
+                ).where(JobRecord.id != exclude_job_id)
+            )
+            for video_path, url, destination, clips_folder in jobs.all():
+                if video_path:
+                    refs.sources.append(video_path)
+                if upload := _upload_file(url or ""):
+                    refs.upload_files.append(upload)
+                refs.folders += [f for f in (destination, clips_folder) if f]
+            clips = await session.execute(
+                select(*(getattr(ClipRecord, k) for k in CLIP_FILE_KEYS)).where(
+                    ClipRecord.job_id != exclude_job_id
+                )
+            )
+            refs.clip_files = [p for row in clips.all() for p in row if p]
+        return refs
 
 
 def _chapter_from_record(record: Any) -> ChapterArtifacts | None:

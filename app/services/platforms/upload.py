@@ -25,6 +25,39 @@ _LEGACY_UPLOAD_ROOT = Path("/tmp/yt/uploads").resolve()
 _ALLOWED_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 
 
+def upload_roots() -> tuple[Path, ...]:
+    """The resolved folders an uploaded file may live in, read from settings
+    now (``POST /jobs`` and a job delete; the adapter keeps its import-time
+    roots)."""
+    return (
+        (Path(settings.default_download_path) / "uploads").resolve(),
+        _LEGACY_UPLOAD_ROOT,
+    )
+
+
+def uploaded_file(raw: str | None) -> Path | None:
+    """The resolved uploaded file ``raw`` names, or None unless it lies
+    strictly below an upload root (``upload_roots``), has an allowed video
+    suffix and is a regular file. ``raw`` is a path or an ``upload://`` URL.
+    """
+    if not raw:
+        return None
+    if raw.startswith("upload://"):
+        raw = urlparse(raw).path
+    if not raw or "\x00" in raw or not os.path.isabs(raw):
+        return None
+    try:
+        candidate = Path(raw).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    roots = upload_roots()
+    if candidate in roots or not any(candidate.is_relative_to(root) for root in roots):
+        return None
+    if candidate.suffix.lower() not in _ALLOWED_SUFFIXES or not candidate.is_file():
+        return None
+    return candidate
+
+
 def _probe_duration(path: str) -> float:
     """Return video duration in seconds via PyAV, or 0 on failure."""
     try:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Literal
 from urllib.parse import urlparse
@@ -16,6 +17,7 @@ from app.domain.ids import new_job_id
 from app.domain.models import JobState, PipelineOptions
 from app.services import retention
 from app.services.platforms import detect_platform_id
+from app.services.platforms.upload import uploaded_file
 from app.services.yt_dlp_metadata import dump_json
 from app.settings import settings
 from app.workers import orchestrator
@@ -116,6 +118,13 @@ async def create_job(req: CreateJobRequest, request: Request) -> CreateJobRespon
     if source is None and not req.url.startswith("upload://"):
         raise HTTPException(
             status_code=400, detail=f"Unsupported platform for URL: {req.url}"
+        )
+    # An upload:// URL must name an uploaded video in the uploads folder: a
+    # path a client typed is never trusted (spec 013 threat T1).
+    if req.url.startswith("upload://") and uploaded_file(req.url) is None:
+        raise HTTPException(
+            status_code=400,
+            detail="upload:// URL must name an uploaded video file in the uploads folder",
         )
 
     # Return the existing job if the same URL was already processed or is
@@ -237,6 +246,15 @@ async def cancel_job(job_id: str, request: Request) -> CancelJobResponse:
     return CancelJobResponse(job_id=job_id, status="cancelled")
 
 
+def _delete_lock(request: Request) -> asyncio.Lock:
+    """One job delete at a time (per app): two jobs sharing a source, deleted
+    together, would each see the other still naming it and both keep it."""
+    lock = getattr(request.app.state, "job_delete_lock", None)
+    if lock is None:
+        lock = request.app.state.job_delete_lock = asyncio.Lock()
+    return lock
+
+
 @router.delete("/{job_id}", status_code=204)
 async def delete_job(job_id: str, request: Request) -> Response:
     """Delete a finished job: its files, then its rows (clips and everything
@@ -248,24 +266,33 @@ async def delete_job(job_id: str, request: Request) -> Response:
     another job still uses (``retention.delete_job_files``). Deleting a job
     that does not exist is not an error: the request is idempotent.
 
+    The job is claimed as being deleted before the checks, so a re-render
+    or reprompt asked for meanwhile answers 409; deletes run one at a time.
+
     Raises:
-        HTTPException: 409 while the job is pending or running, or a
-            re-render, reprompt or download of it is still running.
+        HTTPException: 409 while the job is pending or running, a re-render,
+            reprompt or worker thread of it is still running, or another
+            delete of it is under way.
     """
     store = request.app.state.job_store
+    if not orchestrator.claim_delete(job_id):
+        raise HTTPException(status_code=409, detail="this job is already being deleted")
     try:
-        job = await store.get(job_id)
-    except JobNotFoundError:
-        return Response(status_code=204)
-    if job.status in _ACTIVE_STATUSES or orchestrator.job_active(job_id):
-        raise HTTPException(
-            status_code=409,
-            detail=f"job is {job.status} or still has work running; cancel it first",
-        )
-
-    await retention.delete_job_files(job, store)
-    await store.delete(job_id)
-    await request.app.state.event_bus.forget(job_id)
+        async with _delete_lock(request):
+            try:
+                job = await store.get(job_id)
+            except JobNotFoundError:
+                return Response(status_code=204)
+            if job.status in _ACTIVE_STATUSES or orchestrator.job_active(job_id):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"job is {job.status} or still has work running; cancel it first",
+                )
+            await retention.delete_job_files(job, store)
+            await store.delete(job_id)
+            await request.app.state.event_bus.forget(job_id)
+    finally:
+        orchestrator.release_delete(job_id)
     return Response(status_code=204)
 
 

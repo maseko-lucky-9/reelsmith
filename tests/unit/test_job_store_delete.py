@@ -158,3 +158,27 @@ async def test_sql_delete_removes_every_row_that_hangs_off_the_job():
         }
     finally:
         await engine.dispose()
+
+
+async def test_path_references_name_every_path_of_the_other_jobs_only(store):
+    await store.create(JobState(job_id="gone", url="upload:///d/uploads/mine.mp4", download_path="/d"))
+    await store.update("gone", lambda s: setattr(s, "video_path", "/d/uploads/mine.mp4"))
+    await store.upsert_clip("gone", "gone-clip", _set("output_path", "/d/mine/00.mp4"))
+    await store.create(JobState(job_id="kept", url="upload:///d/uploads/theirs.mp4", download_path="/d"))
+
+    def _theirs(s: JobState) -> None:
+        s.video_path = "/d/uploads/theirs.mp4"
+        s.destination_folder = "/d/theirs"
+        s.clips_folder = "/d/theirs/clips"
+
+    await store.update("kept", _theirs)
+    await store.upsert_clip("kept", "kept-live", _set("output_path", "/d/theirs/clips/00.mp4"))
+    await store.upsert_clip("kept", "kept-old", _set("thumbnail_path", "/d/theirs/clips/old.jpg"))
+    await store.retire_clips("kept", ["kept-old"])
+
+    refs = await store.path_references("gone")
+
+    assert refs.sources == ["/d/uploads/theirs.mp4"]
+    assert refs.upload_files == ["/d/uploads/theirs.mp4"]
+    assert sorted(refs.folders) == ["/d/theirs", "/d/theirs/clips"]
+    assert set(refs.clip_files) == {"/d/theirs/clips/00.mp4", "/d/theirs/clips/old.jpg"}

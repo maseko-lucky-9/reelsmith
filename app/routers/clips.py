@@ -9,6 +9,7 @@ from starlette.convertors import StringConvertor, register_url_convertor
 
 from app.bus.job_store import JobNotFoundError
 from app.domain.events import Event, EventType
+from app.workers import orchestrator
 
 router = APIRouter(prefix="/clips", tags=["clips"])
 
@@ -119,6 +120,8 @@ async def rerender_clip(
             status_code=409,
             detail=f"job is {job.status}; only a completed job's clips can be re-rendered",
         )
+    if orchestrator.deleting(job.job_id):
+        raise HTTPException(status_code=409, detail="the clip's job is being deleted")
     # Jobs created before jobs.video_path existed have no recorded source.
     if not job.video_path or not Path(job.video_path).is_file():
         raise HTTPException(status_code=409, detail="source video not retained")

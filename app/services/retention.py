@@ -39,6 +39,7 @@ import errno
 import logging
 import os
 import stat
+import unicodedata
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -49,7 +50,9 @@ from urllib.parse import urlparse
 from sqlalchemy import and_, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.bus.job_store import CLIP_FILE_KEYS, PathReferences
 from app.db.models import ClipRecord, JobRecord
+from app.services.platforms.upload import uploaded_file
 from app.services.segment_discovery import words_sidecar_path
 from app.settings import settings
 
@@ -686,11 +689,18 @@ async def _still_retired_and_unused(
 
 
 # ── Deleting one job (spec 013) ───────────────────────────────────────────────
+#
+# Threat model. A job's rows are partly client-controlled: ``POST /jobs``
+# takes the URL and the download path, and an ``upload://`` URL once named
+# any path (T1: a failed upload job then deleted another job's files). So
+# nothing here trusts the URL: the only files deleted are the job's folder
+# and the files inside it, plus an upload source the upload adapter itself
+# recorded below the upload folder. Paths are compared by file identity
+# ((st_dev, st_ino)) as well as by spelling, case-folded and in both Unicode
+# normal forms, so a differently spelled path on a case- or
+# normalisation-insensitive file system (APFS) cannot slip past a check.
 
-# Clip fields that name a file the clip owns.
-_CLIP_FILE_KEYS = ("output_path", "thumbnail_path", "ai_hook_audio_path", "captions_burnt_path")
-# Enough for "every job" from JobStoreProtocol.list_jobs, which pages.
-_ALL_JOBS = 1_000_000
+FileId = tuple[int, int]
 
 
 def protected_roots() -> tuple[Path, ...]:
@@ -712,9 +722,83 @@ def protected_roots() -> tuple[Path, ...]:
     return tuple(Path(value).resolve() for value in raw if value)
 
 
+def _fold(text: str) -> str:
+    """One spelling per name on any file system: NFC, then case-folded."""
+    return unicodedata.normalize("NFC", text).casefold()
+
+
+def _spellings(raw: str) -> set[str]:
+    """``_aliases`` folded (``_fold``); used only to keep files."""
+    return {_fold(name) for name in _aliases(raw)} | {
+        _fold(unicodedata.normalize("NFD", name)) for name in _aliases(raw)
+    }
+
+
+def _file_id(path: str | Path, *, follow: bool = True) -> FileId | None:
+    try:
+        st = os.stat(path) if follow else os.lstat(path)
+    except (OSError, ValueError):
+        return None
+    return st.st_dev, st.st_ino
+
+
 def _is_protected(path: Path, protected: Sequence[Path]) -> bool:
-    """True when ``path`` is, or lies below, a protected folder."""
-    return any(path == p or path.is_relative_to(p) for p in protected)
+    """True when ``path`` is, or lies below, a protected folder, by spelling
+    (folded) or by the identity of ``path`` or any of its parents."""
+    folded = _fold(str(path))
+    for root in protected:
+        root_folded = _fold(str(root))
+        if folded == root_folded or folded.startswith(root_folded.rstrip("/") + "/"):
+            return True
+    return False
+
+
+class _Ancestry:
+    """Identities of a folder and all its parents, cached per call."""
+
+    def __init__(self) -> None:
+        self._cache: dict[Path, frozenset[FileId]] = {}
+
+    def of(self, path: Path) -> frozenset[FileId]:
+        if path in self._cache:
+            return self._cache[path]
+        own = _file_id(path)
+        parent = path.parent
+        ids = (self.of(parent) if parent != path else frozenset()) | (
+            {own} if own is not None else set()
+        )
+        self._cache[path] = frozenset(ids)
+        return self._cache[path]
+
+
+@dataclass
+class _Keep:
+    """What a job delete must leave alone: the other jobs' paths (spellings
+    and identities) and the protected folders (paths and identities)."""
+
+    names: set[str]
+    ids: set[FileId]
+    protected: tuple[Path, ...]
+    protected_ids: set[FileId]
+    other_folders: list[Path]
+
+    def names_file(self, raw: str) -> bool:
+        return bool(_spellings(raw) & self.names)
+
+
+def _keep_set(refs: PathReferences, protected: tuple[Path, ...]) -> _Keep:
+    raws = [*refs.sources, *refs.upload_files, *refs.clip_files]
+    # The words sidecar next to each source (S3), named nowhere in the rows.
+    raws += [str(words_sidecar_path(raw)) for raw in refs.sources if "\x00" not in raw]
+    names: set[str] = set()
+    ids: set[FileId] = set()
+    for raw in raws:
+        names |= _spellings(raw)
+        if not _is_unsafe(raw) and (file_id := _file_id(raw)) is not None:
+            ids.add(file_id)
+    other_folders = [p for raw in refs.folders if (p := _checked(raw)) is not None]
+    protected_ids = {i for p in protected if (i := _file_id(p)) is not None}
+    return _Keep(names, ids, protected, protected_ids, other_folders)
 
 
 async def delete_job_files(
@@ -727,28 +811,33 @@ async def delete_job_files(
     """Delete the files of one job that is being deleted; return their paths.
 
     Call it before the job's rows are deleted, so a crash leaves a job that
-    can be deleted again. The job must have nothing running (the route
-    answers 409 otherwise). Deleted:
+    can be deleted again (and it is safe to run again). The job must have
+    nothing running: the route answers 409 otherwise. Deleted:
 
-    * every file below the job's ``destination_folder`` (source, words
+    * every file below the job's folder (``destination_folder``: source,
       sidecar, ``clips/``, ``_tmp/`` leftovers, ``exports/`` when the export
       folder is not set), bottom-up, then the emptied folders;
-    * the files the job's rows name outside that folder: its source (an
-      upload's ``uploads/<uuid>.mp4``), the source's sidecar, and the files
-      of its clips, retired ones included.
+    * the files the job's rows name inside that folder (its clips, retired
+      ones included), also when the folder itself may not be walked;
+    * an upload job's source and sidecar below the upload folder, only when
+      the source is the ``video_path`` the upload adapter recorded and its
+      ``upload://`` URL names the same file (``_upload_source``).
 
     Kept, whatever the rows say:
 
-    * everything of an ``inbox://`` job (its files are export copies): only
-      its rows go;
+    * everything of an ``inbox://`` job (its files are export copies);
+    * a named file outside the job's folder, other than that upload source;
     * anything not strictly below a managed root (``roots``, default
       ``managed_roots()``) or inside a protected folder (``protected``,
-      default ``protected_roots()``: the export folder above all);
-    * a file another job or another job's clip, live or retired, still names;
-    * the whole folder walk, when the folder is unsafe, a symlink, not below
-      a managed root, holds a protected folder, or overlaps another job's
-      folder (jobs from before per-job folders shared one): then only the
-      job's own named files go;
+      default ``protected_roots()``: the export folder above all), by
+      spelling or by identity;
+    * a file another job or another job's clip, live or retired, names, or
+      another job's words sidecar, by spelling or by identity;
+    * the job folder, when it is unsafe, not canonical (a symlink anywhere in
+      its path), not strictly below a managed root, inside a protected folder
+      or holding a managed root: then nothing of the job's folder goes;
+    * the walk only (named files still go), when the folder holds a
+      protected folder or overlaps another job's folder;
     * symlinks: never followed and never removed (``delete_below_root``).
 
     A file that cannot be deleted is logged and skipped; the rest go on.
@@ -760,128 +849,176 @@ async def delete_job_files(
     protected = tuple(
         Path(p).resolve() for p in (protected_roots() if protected is None else protected)
     )
-
     own_clips = await store.list_clips(job_id=job.job_id, include_retired=True)
-    keep: set[str] = set()
-    other_folders: list[Path] = []
-    for other in await store.list_jobs(limit=_ALL_JOBS):
-        if other.job_id == job.job_id:
-            continue
-        for raw in (other.video_path, *other.output_paths):
-            if raw:
-                keep |= _aliases(raw)
-        if other.url.startswith(_UPLOAD_SCHEME):
-            keep |= _aliases(urlparse(other.url).path)
-        for raw in (other.destination_folder, other.clips_folder):
-            if raw and (folder := _checked(raw)) is not None:
-                other_folders.append(folder)
-    for clip in await store.list_clips(include_retired=True):
-        if clip.get("job_id") == job.job_id:
-            continue
-        for key in _CLIP_FILE_KEYS:
-            if raw := clip.get(key):
-                keep |= _aliases(raw)
-
-    named = [job.video_path, *job.output_paths]
+    refs = await store.path_references(job.job_id)
+    named = [*job.output_paths]
+    named += [clip.get(key) for clip in own_clips for key in CLIP_FILE_KEYS]
     if job.video_path:
-        named.append(str(words_sidecar_path(job.video_path)))
-    if job.url.startswith(_UPLOAD_SCHEME):
-        named.append(urlparse(job.url).path)
-    named += [clip.get(key) for clip in own_clips for key in _CLIP_FILE_KEYS]
-
+        named += [job.video_path, str(words_sidecar_path(job.video_path))]
     return await asyncio.to_thread(
         _delete_job_files_sync,
-        job.job_id,
-        job.destination_folder,
+        job,
         [raw for raw in named if raw],
-        keep,
-        other_folders,
+        refs,
         roots,
         protected,
     )
 
 
+def _upload_source(job: JobState) -> Path | None:
+    """The upload job's source when it may be deleted, else None: the
+    ``video_path`` the adapter recorded is a regular, non-symlink file
+    strictly below an upload root with an allowed suffix
+    (``upload.uploaded_file``), and the job's ``upload://`` URL names the
+    same file. The URL alone is never enough (threat T1)."""
+    if not job.url.startswith(_UPLOAD_SCHEME) or not job.video_path:
+        return None
+    if _is_unsafe(job.video_path) or os.path.islink(job.video_path):
+        return None
+    source = uploaded_file(job.video_path)
+    if source is None or uploaded_file(job.url) != source:
+        return None
+    return source
+
+
 def _job_folder(
-    job_id: str,
-    raw: str | None,
-    roots: Sequence[Path],
-    protected: Sequence[Path],
-    other_folders: Sequence[Path],
+    job_id: str, raw: str | None, roots: Sequence[Path], keep: _Keep, ancestry: _Ancestry
 ) -> Path | None:
-    """The job's resolved folder when it may be walked and emptied, else None."""
+    """The job's folder when files inside it may be deleted, else None."""
     if not raw:
         return None
-    if _is_unsafe(raw) or os.path.islink(raw):
-        log.warning("delete job %s: kept folder %r: unsafe path or a symlink", job_id, raw)
+    if _is_unsafe(raw):
+        log.warning("delete job %s: kept folder %r: unsafe path", job_id, raw)
         return None
-    folder = _checked(raw)
-    if folder is None or not folder.is_dir():
+    lexical = Path(os.path.normpath(raw))
+    try:
+        folder = lexical.resolve()
+    except (OSError, RuntimeError, ValueError):
         return None
-    if not _is_managed(folder, roots):
-        log.warning("delete job %s: kept folder %s: not below a managed folder", job_id, folder)
+    if folder != lexical:
+        log.warning("delete job %s: kept folder %r: a symlink in its path", job_id, raw)
         return None
-    if _is_protected(folder, protected) or any(p.is_relative_to(folder) for p in protected):
-        log.warning("delete job %s: kept folder %s: it is or holds a protected folder", job_id, folder)
+    if not folder.is_dir():
         return None
-    for other in other_folders:
-        if other == folder or other.is_relative_to(folder) or folder.is_relative_to(other):
-            log.warning(
-                "delete job %s: kept folder %s: another job uses %s; only the job's own files go",
-                job_id,
-                folder,
-                other,
-            )
-            return None
+    if not _is_managed(folder, roots) or any(r.is_relative_to(folder) for r in roots):
+        log.warning("delete job %s: kept folder %r: not strictly below a managed folder", job_id, raw)
+        return None
+    if _is_protected(folder, keep.protected) or ancestry.of(folder) & keep.protected_ids:
+        log.warning("delete job %s: kept folder %r: inside a protected folder", job_id, raw)
+        return None
     return folder
 
 
+def _may_walk(job_id: str, folder: Path, keep: _Keep, ancestry: _Ancestry) -> bool:
+    """Whether the whole folder may be walked: it holds no protected folder
+    and overlaps no other job's folder (jobs from before per-job folders
+    shared one), by spelling or by identity."""
+    if any(p.is_relative_to(folder) for p in keep.protected):
+        log.warning("delete job %s: not walking %r: it holds a protected folder", job_id, str(folder))
+        return False
+    folder_id = _file_id(folder)
+    folder_ancestry = ancestry.of(folder)
+    for other in keep.other_folders:
+        other_id = _file_id(other)
+        if (
+            other == folder
+            or other.is_relative_to(folder)
+            or folder.is_relative_to(other)
+            or (folder_id is not None and folder_id in ancestry.of(other))
+            or (other_id is not None and other_id in folder_ancestry)
+        ):
+            log.warning(
+                "delete job %s: not walking %r: another job uses %r; only the job's own files go",
+                job_id,
+                str(folder),
+                str(other),
+            )
+            return False
+    return True
+
+
 def _delete_job_files_sync(
-    job_id: str,
-    destination_folder: str | None,
+    job: JobState,
     named: Sequence[str],
-    keep: set[str],
-    other_folders: Sequence[Path],
+    refs: PathReferences,
     roots: Sequence[Path],
-    protected: Sequence[Path],
+    protected: tuple[Path, ...],
 ) -> list[str]:
+    job_id = job.job_id
     owner = f"deleted job {job_id}"
+    keep = _keep_set(refs, protected)
+    ancestry = _Ancestry()
+    folder = _job_folder(job_id, job.destination_folder, roots, keep, ancestry)
+    upload_source = _upload_source(job)
+    allowed_outside = (
+        {upload_source, words_sidecar_path(str(upload_source))} if upload_source else set()
+    )
     candidates: list[Path] = []
     folders: list[Path] = []
 
     def _consider(raw: str) -> None:
-        if _aliases(raw) & keep:
-            log.info("delete job %s: kept %s: another job still uses it", job_id, raw)
+        if keep.names_file(raw):
+            log.info("delete job %s: kept %r: another job still uses it", job_id, raw)
             return
         path = _checked(raw)
-        if path is None or not _is_managed(path, roots) or _is_protected(path, protected):
-            log.info("delete job %s: kept %s: outside the managed folders", job_id, raw)
+        if path is None or not _is_managed(path, roots):
+            log.info("delete job %s: kept %r: outside the managed folders", job_id, raw)
+            return
+        if not ((folder is not None and path.is_relative_to(folder)) or path in allowed_outside):
+            log.info("delete job %s: kept %r: outside the job's folder", job_id, raw)
+            return
+        if _is_protected(path, protected) or ancestry.of(path.parent) & keep.protected_ids:
+            log.info("delete job %s: kept %r: inside a protected folder", job_id, raw)
             return
         if os.path.islink(raw):  # `path` is its target, which may be anyone's
-            log.warning("delete job %s: kept %s: it is a symlink", job_id, raw)
+            log.warning("delete job %s: kept %r: it is a symlink", job_id, raw)
             return
         candidates.append(path)
+        folders.append(path.parent)
 
     for raw in named:
         _consider(raw)
-        if (path := _checked(raw)) is not None:
-            folders += [path.parent, path.parent.parent]
 
-    folder = _job_folder(job_id, destination_folder, roots, protected, other_folders)
-    if folder is not None:
+    if folder is not None and _may_walk(job_id, folder, keep, ancestry):
+        walked: list[str] = []
+        walked_folders: list[Path] = []
+        clean = True
         # followlinks=False: a symlinked folder is listed but never entered.
-        for dirpath, dirnames, filenames in os.walk(folder, topdown=False, followlinks=False):
+        for dirpath, dirnames, filenames in os.walk(folder, followlinks=False):
             here = Path(dirpath)
-            folders += [here / name for name in dirnames]
-            for name in filenames:
-                _consider(str(here / name))
-        folders.append(folder)
+            if _file_id(here) in keep.protected_ids:
+                log.warning("delete job %s: not walking %r: it holds a protected folder", job_id, str(folder))
+                clean = False
+                break
+            walked_folders += [here / name for name in dirnames]
+            walked += [str(here / name) for name in filenames]
+        if clean:
+            for raw in walked:
+                _consider(raw)
+            folders += [*walked_folders, folder]
 
     deleted: list[str] = []
+
+    def _not_kept(st: os.stat_result) -> bool:
+        # Read at the moment of deletion (lstat): no other job's file, under
+        # any spelling.
+        return (st.st_dev, st.st_ino) not in keep.ids
+
     for path in dict.fromkeys(candidates):
-        if delete_below_root(path, roots, owner=owner):
+        if delete_below_root(path, roots, owner=owner, accept=_not_kept):
             deleted.append(str(path))
+        elif os.path.lexists(path):
+            log.info("delete job %s: kept %r", job_id, str(path))
+    # Only folders inside the job's folder are emptied; never one outside it.
     _remove_empty_dirs(
-        (f for f in folders if _is_managed(f, roots) and not _is_protected(f, protected)),
+        (
+            f
+            for f in folders
+            if folder is not None
+            and f.is_relative_to(folder)
+            and _is_managed(f, roots)
+            and not _is_protected(f, protected)
+        ),
         roots,
     )
     log.info("delete job %s: removed %d file(s)", job_id, len(deleted))

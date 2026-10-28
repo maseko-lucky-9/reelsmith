@@ -29,12 +29,16 @@ URL = "https://www.youtube.com/watch?v=cancel01"
 JOB = "job-cancel"
 
 
+def _REGISTRIES():
+    return (orch._job_tasks, orch._user_cancelled, orch._threads_running, orch._reprompts_in_flight, orch._deleting)
+
+
 @pytest.fixture(autouse=True)
 def _clean_registries():
-    for registry in (orch._job_tasks, orch._user_cancelled, orch._downloads_running, orch._reprompts_in_flight):
+    for registry in _REGISTRIES():
         registry.clear()
     yield
-    for registry in (orch._job_tasks, orch._user_cancelled, orch._downloads_running, orch._reprompts_in_flight):
+    for registry in _REGISTRIES():
         registry.clear()
 
 
@@ -290,7 +294,7 @@ async def test_user_cancel_stops_the_download_thread_and_the_job_stays_active_un
     try:
         await _request(bus, JOB, tmp_path)
         await _until(adapter.started.is_set)
-        await _until(lambda: JOB in orch._downloads_running)
+        await _until(lambda: JOB in orch._threads_running)
 
         orch.cancel_job(JOB)
         await _until(lambda: JOB not in orch._job_tasks)
@@ -444,3 +448,74 @@ async def test_a_cancel_that_lands_after_the_job_ended_keeps_its_outcome(status,
 
     assert (await store.get(JOB)).status == status
     assert _types(bus, JOB) == []
+
+
+class _GetBlocksStore(InMemoryJobStore):
+    """``get`` of the job blocks until released: a cancel lands on the
+    run's pre-start status read."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.in_get = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def get(self, job_id: str) -> JobState:
+        if job_id == JOB and not self.release.is_set():
+            self.in_get.set()
+            await self.release.wait()
+        return await super().get(job_id)
+
+
+async def test_a_cancel_landing_on_the_pre_start_read_is_recorded(pipeline, tmp_path):
+    bus, store = AsyncEventBus(), _GetBlocksStore()
+    await _create(store, JOB, tmp_path)
+    runner = asyncio.create_task(orch.run_orchestrator(bus, store))
+    try:
+        await _request(bus, JOB, tmp_path)
+        await asyncio.wait_for(store.in_get.wait(), 5)
+
+        assert orch.cancel_job(JOB) is True
+        store.release.set()
+        await _until(lambda: not orch.job_active(JOB))
+
+        assert (await store.get(JOB)).status == "cancelled"
+        assert _types(bus, JOB) == [EventType.VIDEO_REQUESTED, EventType.JOB_CANCELLED]
+    finally:
+        await _stop(runner)
+
+
+async def test_a_worker_thread_keeps_its_job_active_after_its_task_is_cancelled():
+    started, release = threading.Event(), threading.Event()
+
+    def _export() -> str:
+        started.set()
+        release.wait(5)
+        return "done"
+
+    task = asyncio.create_task(orch._job_thread(JOB, _export))
+    await asyncio.to_thread(started.wait, 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert orch.job_active(JOB), "the thread still runs: the job's folder may still be written"
+    release.set()
+    await _until(lambda: not orch.job_active(JOB))
+
+
+async def test_job_threads_are_counted_per_job_and_released_on_error():
+    def _boom() -> None:
+        raise ValueError("boom")
+
+    with pytest.raises(ValueError):
+        await orch._job_thread(JOB, _boom)
+
+    assert orch._threads_running == {}
+
+
+def test_a_delete_claim_is_exclusive():
+    assert orch.claim_delete(JOB) is True
+    assert orch.claim_delete(JOB) is False
+    assert orch.deleting(JOB)
+    orch.release_delete(JOB)
+    assert not orch.deleting(JOB)
