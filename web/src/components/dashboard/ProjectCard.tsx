@@ -4,7 +4,15 @@ import { Ban, Check, Trash2, Video } from 'lucide-react'
 import { toast } from 'sonner'
 import type { JobState, JobStatus } from '@/api/client'
 import { api } from '@/api/client'
-import { CANCEL_REFRESH_MS, forgetJob, isActiveJob, isConflict } from '@/lib/jobStatus'
+import {
+  CANCEL_REFRESH_MS,
+  forgetJob,
+  isActiveJob,
+  isAlreadyBeingDeleted,
+  isConflict,
+  isStillFinishing,
+  needsCancelFirst,
+} from '@/lib/jobStatus'
 
 const STATUS_COLORS: Record<JobStatus, string> = {
   completed: 'bg-emerald-600 text-white',
@@ -54,8 +62,14 @@ export function ProjectCard({ job, selectable = false, selected = false, onToggl
       toast.success('Job deleted')
     },
     onError: (e: Error) => {
-      // 409: a re-render or reprompt of it is still running; offer to cancel that.
-      if (isConflict(e)) {
+      if (isAlreadyBeingDeleted(e)) {
+        // Another request (a double click) is deleting it: as good as done.
+        forgetJob(queryClient, job.job_id)
+      } else if (isStillFinishing(e)) {
+        // Only worker threads are left; cancelling would change nothing.
+        toast.error('Could not delete yet: the job is still finishing; try again in a moment')
+      } else if (needsCancelFirst(e)) {
+        // A re-render or reprompt of it is still running: offer to cancel that.
         toast.error(`Could not delete: ${e.message}`, {
           action: { label: 'Cancel it', onClick: () => cancelMutation.mutate() },
         })

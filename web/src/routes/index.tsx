@@ -17,7 +17,7 @@ import {
 import { rootRoute } from './root'
 import { api } from '@/api/client'
 import { ProjectCard } from '@/components/dashboard/ProjectCard'
-import { forgetJob, isActiveJob } from '@/lib/jobStatus'
+import { forgetJob, isActiveJob, isAlreadyBeingDeleted } from '@/lib/jobStatus'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 
@@ -97,7 +97,11 @@ function LibraryPage() {
     // One failure does not stop the rest.
     const results = await Promise.allSettled(ids.map((id) => api.deleteJob(id)))
     setDeleting(false)
-    const failedIds = ids.filter((_, i) => results[i].status === 'rejected')
+    // "Already being deleted" (another request has it) is not a failure.
+    const failedIds = ids.filter((_, i) => {
+      const result = results[i]
+      return result.status === 'rejected' && !isAlreadyBeingDeleted(result.reason)
+    })
     for (const id of ids) if (!failedIds.includes(id)) forgetJob(queryClient, id)
     if (failedIds.length === 0) {
       toast.success(`Deleted ${ids.length} ${noun}`)

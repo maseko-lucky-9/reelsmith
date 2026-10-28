@@ -16,11 +16,31 @@ export function isConflict(error: unknown): boolean {
   return error instanceof Error && error.message.startsWith('409')
 }
 
-/** Drops the cached detail of a deleted job (its page, clips and events), not just the list. */
+// 409 details of DELETE /api/jobs/{id} (app/routers/jobs.py DELETE_*).
+/** Only worker threads are still finishing: nothing to cancel, try again shortly. */
+export function isStillFinishing(error: unknown): boolean {
+  return isConflict(error) && (error as Error).message.includes('still finishing')
+}
+
+/** Another request is deleting the job right now: as good as deleted. */
+export function isAlreadyBeingDeleted(error: unknown): boolean {
+  return isConflict(error) && (error as Error).message.includes('already being deleted')
+}
+
+/** Something a cancel can stop still runs (the job, a re-render, a reprompt). */
+export function needsCancelFirst(error: unknown): boolean {
+  return isConflict(error) && (error as Error).message.includes('cancel it first')
+}
+
+/**
+ * Drops the cached detail of a deleted job (its page, clips and events), not just the list,
+ * and refreshes the all-clips list, which held its clips.
+ */
 export function forgetJob(queryClient: QueryClient, jobId: string): void {
   for (const key of ['job', 'clips', 'job-events']) {
     queryClient.removeQueries({ queryKey: [key, jobId] })
   }
+  void queryClient.invalidateQueries({ queryKey: ['clips'], exact: true })
 }
 
 /** After a `cancelling` answer the job's status changes only once its tasks unwind. */

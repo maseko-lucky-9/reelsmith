@@ -147,6 +147,24 @@ describe('home page: select and delete', () => {
     expect(qc.getQueryData(['job', 'b'])).toEqual({ cached: true })
   })
 
+  it('counts a job another request is already deleting as deleted, not failed', async () => {
+    vi.mocked(api.deleteJob).mockImplementation((id: string) =>
+      id === 'b'
+        ? Promise.reject(new Error('409 {"detail":"this job is already being deleted"}'))
+        : Promise.resolve(undefined),
+    )
+    await renderHome()
+    fireEvent.click(screen.getByRole('button', { name: 'Select' }))
+    fireEvent.click(card('Talk a'))
+    fireEvent.click(card('Talk b'))
+
+    fireEvent.click(deleteSelectedButton())
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Deleted 2 jobs'))
+    expect(toast.error).not.toHaveBeenCalled()
+    expect(deleteSelectedButton()).toHaveTextContent('Delete selected (0)')
+  })
+
   it('select all toggles: a second click clears the selection', async () => {
     await renderHome()
     fireEvent.click(screen.getByRole('button', { name: 'Select' }))

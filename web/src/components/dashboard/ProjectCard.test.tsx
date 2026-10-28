@@ -147,6 +147,56 @@ describe('ProjectCard', () => {
     await waitFor(() => expect(api.cancelJob).toHaveBeenCalledWith('job-1'))
   })
 
+  it('says try again, with no Cancel action, when only threads are still finishing', async () => {
+    vi.mocked(api.deleteJob).mockRejectedValue(
+      new Error('409 {"detail":"the job is still finishing; try again in a moment"}'),
+    )
+    renderCard({ job: job('cancelled') })
+
+    fireEvent.click(screen.getByRole('button', { name: /delete ocean talk/i }))
+
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith('Could not delete yet: the job is still finishing; try again in a moment'),
+    )
+    expect(vi.mocked(toast.error).mock.calls[0]).toHaveLength(1)
+    expect(api.cancelJob).not.toHaveBeenCalled()
+  })
+
+  it('treats "already being deleted" (a double click) as deleted', async () => {
+    vi.mocked(api.deleteJob).mockRejectedValue(new Error('409 {"detail":"this job is already being deleted"}'))
+    const qc = new QueryClient({ defaultOptions: { mutations: { retry: false } } })
+    qc.setQueryData(['job', 'job-1'], { cached: true })
+    render(
+      <QueryClientProvider client={qc}>
+        <ProjectCard job={job('completed')} />
+      </QueryClientProvider>,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /delete ocean talk/i }))
+
+    await waitFor(() => expect(qc.getQueryData(['job', 'job-1'])).toBeUndefined())
+    expect(toast.error).not.toHaveBeenCalled()
+  })
+
+  it('refreshes the all-clips list after a delete', async () => {
+    const { invalidate } = renderCard({ job: job('completed') })
+
+    fireEvent.click(screen.getByRole('button', { name: /delete ocean talk/i }))
+
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['clips'], exact: true }))
+  })
+
+  it('offers no Cancel for a 409 a cancel cannot fix (a folder that may not be deleted)', async () => {
+    const message = '409 {"detail":"the job\'s folder cannot be deleted safely (a symlink); nothing was deleted"}'
+    vi.mocked(api.deleteJob).mockRejectedValue(new Error(message))
+    renderCard({ job: job('completed') })
+
+    fireEvent.click(screen.getByRole('button', { name: /delete ocean talk/i }))
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(`Could not delete: ${message}`))
+    expect(vi.mocked(toast.error).mock.calls[0]).toHaveLength(1)
+  })
+
   it('reports any other delete failure without an action', async () => {
     vi.mocked(api.deleteJob).mockRejectedValue(new Error('500 boom'))
     renderCard({ job: job('completed') })
