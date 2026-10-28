@@ -21,9 +21,12 @@ export interface ChapterArtifacts {
   error: string | null
 }
 
+/** `cancelled`: stopped by the user (POST /api/jobs/{id}/cancel). Mirrors app/domain/models.py JobStatus. */
+export type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+
 export interface JobState {
   job_id: string
-  status: 'pending' | 'running' | 'completed' | 'failed'
+  status: JobStatus
   current_step: string | null
   url: string
   source: string | null
@@ -171,6 +174,8 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     const text = await res.text().catch(() => res.statusText)
     throw new Error(`${res.status} ${text}`)
   }
+  // 204 No Content (every DELETE): there is no body to parse.
+  if (res.status === 204) return undefined as T
   return res.json() as Promise<T>
 }
 
@@ -195,6 +200,18 @@ export const api = {
   },
 
   getJob: (id: string) => apiFetch<JobState>(`/api/jobs/${id}`),
+
+  /**
+   * 202: `cancelling` (its tasks were told to stop) or `cancelled` (it had none and was
+   * marked at once). 409 when nothing of the job is running.
+   */
+  cancelJob: (id: string) =>
+    apiFetch<{ job_id: string; status: 'cancelling' | 'cancelled' }>(`/api/jobs/${id}/cancel`, {
+      method: 'POST',
+    }),
+
+  /** 204: the job's files, then its rows, are gone (also for an unknown job). 409 while it runs. */
+  deleteJob: (id: string) => apiFetch<void>(`/api/jobs/${id}`, { method: 'DELETE' }),
 
   createJob: (req: CreateJobRequest) =>
     apiFetch<CreateJobResponse>('/api/jobs', { method: 'POST', body: JSON.stringify(req) }),

@@ -1,6 +1,7 @@
 import { createRoute, useNavigate } from '@tanstack/react-router'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useRef, useState, useEffect } from 'react'
+import { toast } from 'sonner'
 import {
   Link2,
   Scissors,
@@ -11,10 +12,12 @@ import {
   Film,
   Sparkles,
   FolderOpen,
+  Trash2,
 } from 'lucide-react'
 import { rootRoute } from './root'
 import { api } from '@/api/client'
 import { ProjectCard } from '@/components/dashboard/ProjectCard'
+import { isActiveJob } from '@/lib/jobStatus'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 
@@ -46,6 +49,10 @@ function LibraryPage() {
   const [url, setUrl] = useState('')
   const [placeholderIdx, setPlaceholderIdx] = useState(0)
   const [activeTab, setActiveTab] = useState<'all' | 'saved'>('all')
+  const [selectMode, setSelectMode] = useState(false)
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set())
+  const [deleting, setDeleting] = useState(false)
+  const queryClient = useQueryClient()
 
   const jobsQuery = useQuery({
     queryKey: ['jobs'],
@@ -54,6 +61,42 @@ function LibraryPage() {
 
   const jobs = jobsQuery.data ?? []
   const clipsTotal = jobs.reduce((acc, j) => acc + (j.output_paths?.length ?? 0), 0)
+  const visibleJobs = activeTab === 'saved' ? jobs.filter((j) => j.status === 'completed') : jobs
+  // A pending or running job cannot be deleted (the API answers 409): cancel it first.
+  const deletableIds = visibleJobs.filter((j) => !isActiveJob(j)).map((j) => j.job_id)
+  // Only ids still listed and still deletable count, so a refetch never deletes a stale pick.
+  const selectedIds = deletableIds.filter((id) => selected.has(id))
+  const allSelected = deletableIds.length > 0 && selectedIds.length === deletableIds.length
+
+  function toggleSelect(jobId: string) {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(jobId)) next.delete(jobId)
+      else next.add(jobId)
+      return next
+    })
+  }
+
+  function toggleSelectMode() {
+    setSelectMode((on) => !on)
+    setSelected(new Set())
+  }
+
+  async function deleteSelected() {
+    const ids = selectedIds
+    if (ids.length === 0) return
+    const noun = ids.length === 1 ? 'job' : 'jobs'
+    if (!window.confirm(`Delete ${ids.length} ${noun} and all their clips and files? This cannot be undone.`)) return
+    setDeleting(true)
+    // One DELETE per job (there is no bulk endpoint); one failure does not stop the rest.
+    const results = await Promise.allSettled(ids.map((id) => api.deleteJob(id)))
+    setDeleting(false)
+    const failed = results.filter((r) => r.status === 'rejected').length
+    if (failed === 0) toast.success(`Deleted ${ids.length} ${noun}`)
+    else toast.error(`Deleted ${ids.length - failed} of ${ids.length}; ${failed} could not be deleted`)
+    setSelected(new Set())
+    void queryClient.invalidateQueries({ queryKey: ['jobs'] })
+  }
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -175,8 +218,49 @@ function LibraryPage() {
               Saved ({jobs.filter((j) => j.status === 'completed').length})
             </button>
           </div>
-          <span className="text-xs text-zinc-500">{clipsTotal} clips created</span>
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-zinc-500">{clipsTotal} clips created</span>
+            {jobs.length > 0 && (
+              <button
+                type="button"
+                onClick={toggleSelectMode}
+                aria-pressed={selectMode}
+                className="text-xs px-2.5 py-1 rounded-md border border-white/15 text-zinc-300 hover:text-white hover:border-white/30 transition-colors"
+              >
+                {selectMode ? 'Done' : 'Select'}
+              </button>
+            )}
+          </div>
         </div>
+
+        {selectMode && (
+          <div
+            className="flex items-center gap-3 px-3 py-2 rounded-lg border border-white/10 text-sm"
+            style={{ background: 'var(--card-bg)' }}
+            role="toolbar"
+            aria-label="Selected projects"
+          >
+            <label className="flex items-center gap-2 text-zinc-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={allSelected}
+                disabled={deletableIds.length === 0}
+                onChange={() => setSelected(allSelected ? new Set() : new Set(deletableIds))}
+              />
+              Select all
+            </label>
+            <span className="text-xs text-zinc-500">{selectedIds.length} selected</span>
+            <button
+              type="button"
+              onClick={() => void deleteSelected()}
+              disabled={selectedIds.length === 0 || deleting}
+              className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-red-600 text-white text-xs font-semibold hover:bg-red-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              Delete selected ({selectedIds.length})
+            </button>
+          </div>
+        )}
 
         {jobsQuery.isLoading && (
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
@@ -201,9 +285,15 @@ function LibraryPage() {
 
         {jobs.length > 0 && (
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-            {(activeTab === 'saved' ? jobs.filter((j) => j.status === 'completed') : jobs).map(
-              (job) => <ProjectCard key={job.job_id} job={job} />,
-            )}
+            {visibleJobs.map((job) => (
+              <ProjectCard
+                key={job.job_id}
+                job={job}
+                selectable={selectMode}
+                selected={selected.has(job.job_id) && !isActiveJob(job)}
+                onToggleSelect={toggleSelect}
+              />
+            ))}
           </div>
         )}
       </section>
