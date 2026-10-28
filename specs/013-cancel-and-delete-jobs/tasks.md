@@ -1,0 +1,10 @@
+# Tasks: Cancel running jobs and delete finished ones
+
+**Input**: [spec.md](spec.md), [plan.md](plan.md)
+
+- [x] T084 [FR-001..005] (done: `_job_tasks`, `_user_cancelled`, `_downloads_running`, `cancel_job`, `job_active` in `app/workers/orchestrator.py`; `cancelled` status, `JobCancelled` event; `download_stop` hook in `_yt_dlp_base`) Cancel a job's pipeline tasks; record a user cancel, keep a shutdown's behaviour. Proving test: `tests/unit/test_orchestrator_cancel.py`, `tests/unit/test_download_tracker.py`
+- [x] T085 [FR-006] (done: `POST /jobs/{id}/cancel`; `JobCancelled` closes the event stream) Cancel route. Proving test: `tests/contract/test_jobs_cancel_delete_router.py`
+- [x] T086 [FR-008..010] (done: `retention.delete_job_files`, `protected_roots`; `JobStoreProtocol.delete` and `list_clips(include_retired=)` on both stores) Delete a job's files safely and its rows. Proving test: `tests/unit/test_retention_delete_job.py`, `tests/unit/test_job_store_delete.py`
+- [x] T087 [FR-007] (done: `DELETE /jobs/{id}`: 409 while active, files then rows, idempotent 204) Delete route. Proving test: `tests/contract/test_jobs_cancel_delete_router.py`
+- [x] T088 [FR-011..013] (done: `apiFetch` 204, `api.cancelJob`/`api.deleteJob`, Cancel and delete on `ProjectCard`, Select mode on the home page, Cancel in the job header) UI. Proving test: `web/src/api/client.test.ts`, `web/src/components/dashboard/ProjectCard.test.tsx`, `web/src/routes/index.test.tsx`, `web/src/routes/jobs.$jobId.test.tsx`
+- [ ] T089 [FR-002,005,007,009] End-to-end check on the owner's stack: `scripts/start.sh`, cancel a running job from its home card (badge `cancelled` within seconds, no ffmpeg/yt-dlp left in `pgrep`, `_tmp` gone), select three finished jobs and delete them (rows gone in `psql`, folders gone, export folder untouched).
