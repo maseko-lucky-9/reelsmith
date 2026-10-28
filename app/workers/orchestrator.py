@@ -9,6 +9,7 @@ import shutil
 import threading
 import time
 import uuid
+import weakref
 from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
 from pathlib import Path
 from typing import Any
@@ -65,6 +66,10 @@ _job_tasks: dict[str, set[asyncio.Task[Any]]] = {}
 # A task cancelled while its job is not in here was cancelled by a shutdown,
 # which keeps the job's status as it was.
 _user_cancelled: set[str] = set()
+# Tasks a user cancel already reached: a second Cancel does not cancel them
+# again. Not ``task.cancelling()``: an internal cancel (a timeout, a failing
+# sibling's TaskGroup) raises it too, and a user cancel must not be skipped.
+_user_cancelled_tasks: weakref.WeakSet[asyncio.Task[Any]] = weakref.WeakSet()
 # Worker threads of each job still running (``_job_thread``), the download
 # included. Cancelling a task cannot stop its thread: the download stops at
 # yt-dlp's next progress tick (``download_stop``), the others run to their
@@ -108,11 +113,11 @@ def cancel_job(job_id: str) -> bool:
         return False
     _user_cancelled.add(job_id)
     for task in tasks:
-        # Idempotent: a task already cancelled is not cancelled again. A
-        # second cancel would break ``to_thread_cancellable``'s wait for its
-        # worker thread, so the task would end (and the job look idle) while
-        # the thread still writes into the job's folder.
-        if task.cancelling() == 0:
+        # One cancel per task per user: a second click changes nothing. (A
+        # further cancel would be harmless too: ``to_thread_cancellable``
+        # keeps waiting for its worker thread through it.)
+        if task not in _user_cancelled_tasks:
+            _user_cancelled_tasks.add(task)
             task.cancel()
     return True
 
@@ -581,6 +586,11 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
             job_id, total_elapsed, len(output_paths), output_paths,
         )
 
+        if job_id in _user_cancelled:
+            # The user's cancel landed while an internal one (a timeout, a
+            # TaskGroup) was in flight and was absorbed by it: it still wins.
+            raise asyncio.CancelledError
+
         def _complete(s: JobState) -> None:
             s.status = "completed"
             s.current_step = "completed"
@@ -600,8 +610,13 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
         log.exception("[%s] Job failed after %.2fs", job_id, time.perf_counter() - job_t0)
         # A cancel (e.g. shutdown) may already be pending — TaskGroup re-arms
         # an outer cancel that hit while a chapter was failing — or arrive
-        # now; record the failure regardless, then let the cancel through.
-        await _finish_then_honour_cancel(_record_failure(bus, store, job_id, str(e)))
+        # now; record the outcome regardless, then let the cancel through. A
+        # user cancel that an internal cancel's error (a timeout, a failing
+        # sibling chapter) overtook is still the outcome: "cancelled".
+        if job_id in _user_cancelled:
+            await _finish_then_honour_cancel(_record_cancel(bus, store, job_id))
+        else:
+            await _finish_then_honour_cancel(_record_failure(bus, store, job_id, str(e)))
     finally:
         if cleanup_root is not None and cleanup_root.exists():
             shutil.rmtree(cleanup_root, ignore_errors=True)

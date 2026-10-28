@@ -73,9 +73,6 @@ TERMINAL_JOB_STATUSES: tuple[str, ...] = ("completed", "failed", "cancelled")
 # bumps it too, so a source outlives its last clip by at least this much.
 QUIET_PERIOD = timedelta(hours=1)
 
-# Where uploads were stored before T031; must match
-# app/services/platforms/upload.py::_LEGACY_UPLOAD_ROOT.
-LEGACY_UPLOAD_ROOT = Path("/tmp/yt/uploads")
 # URL scheme of a job made from an uploaded file (app/routers/uploads.py).
 _UPLOAD_SCHEME = "upload://"
 # URL scheme of a job imported from the export folder

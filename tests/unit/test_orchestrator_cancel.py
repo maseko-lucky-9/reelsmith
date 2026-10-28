@@ -20,7 +20,7 @@ import pytest
 from app.bus.event_bus import AsyncEventBus
 from app.bus.job_store import InMemoryJobStore
 from app.domain.events import Event, EventType
-from app.domain.models import ChapterArtifacts, JobState
+from app.domain.models import ChapterArtifacts, JobState, PipelineOptions
 from app.services.platforms._yt_dlp_base import download_stop
 from app.services.platforms.base import Chapter, DownloadResult
 from app.workers import orchestrator as orch
@@ -599,3 +599,181 @@ def test_work_claims_are_counted():
     assert not orch.job_has_work(JOB)
     orch.release_work(JOB)  # an extra release never goes negative
     assert orch._work_in_flight == {}
+
+
+# ── A user cancel landing on an internal cancel (review round 3) ──────────────
+
+
+async def test_a_user_cancel_during_a_transcription_timeout_still_cancels(monkeypatch):
+    """The auditor's poc_cancel: the decode budget's timeout has cancelled the
+    task and ``to_thread_cancellable`` waits for whisper's next segment
+    boundary. A user cancel landing then must not be absorbed by the
+    timeout: no TimeoutError, no "Full Video" fallback, the task ends
+    cancelled."""
+    from app.services import ffmpeg_tools, transcription_service
+
+    def _slow_to_stop(audio_path, *, language=None, repeatable=False, on_start=None):
+        on_start()
+        event = ffmpeg_tools.current_cancel_event()
+        while not event.is_set():
+            time.sleep(0.01)
+        time.sleep(0.5)  # finishing the current whisper segment
+        raise RuntimeError("stopped")
+
+    monkeypatch.setattr(transcription_service, "transcribe_to_words", _slow_to_stop)
+    monkeypatch.setattr(transcription_service.settings, "transcription_timeout_seconds", 0.2)
+    steps: list[str] = []
+
+    async def _discovery_then_rest() -> str:
+        # _discover_segments' shape: a discovery error never fails the job.
+        try:
+            await transcription_service.transcribe_words_async("a.wav", language=None, audio_duration_s=0.1)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            steps.append(f"fallback after {type(e).__name__}")
+        steps.append("render")
+        return "completed"
+
+    task = asyncio.create_task(_discovery_then_rest())
+    orch._track_job_task(JOB, task)
+    await asyncio.sleep(0.35)  # past the budget, the worker still finishing
+    assert task.cancelling() == 1, "the timeout's own cancel is in flight"
+
+    assert orch.cancel_job(JOB) is True
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 5)
+    assert steps == []
+
+
+class _FailingSiblingAdapter(_Adapter):
+    def extract_chapters(self, info: dict[str, Any]) -> list[Chapter]:
+        return [
+            Chapter(index=0, title="Fails", start=0.0, end=6.0),
+            Chapter(index=1, title="Slow", start=6.0, end=12.0),
+        ]
+
+
+async def test_a_user_cancel_during_a_failing_siblings_cancel_ends_cancelled(monkeypatch, tmp_path):
+    """Chapter 0 fails, the TaskGroup cancels chapter 1, whose render takes a
+    moment to stop; the user cancels meanwhile. The job ends ``cancelled``
+    (with ``JobCancelled``), not ``failed``."""
+    from app.services import ffmpeg_tools
+    from app.services.transcription_service import WordTiming
+
+    sibling_cancelled = threading.Event()
+
+    def _render(video_path, output_path, *args, **kwargs):
+        if Path(output_path).name.startswith("01_"):
+            event = ffmpeg_tools.current_cancel_event()
+            while not event.is_set():
+                time.sleep(0.01)
+            sibling_cancelled.set()
+            time.sleep(0.5)  # an ffmpeg that takes a moment to die
+            return output_path
+        time.sleep(0.1)
+        raise RuntimeError("chapter 0 exploded")
+
+    def _extract_audio(src, start, duration, wav_path):
+        Path(wav_path).write_bytes(b"\x00")
+        return wav_path
+
+    monkeypatch.setattr(orch.settings, "export_base_folder", str(tmp_path / "exports"))
+    monkeypatch.setattr(orch.settings, "max_parallel_chapters", 2)
+    monkeypatch.setattr(orch.folder_service, "create_video_subfolder", _fake_subfolder)
+    monkeypatch.setattr(orch, "resolve_adapter", lambda url: _FailingSiblingAdapter())
+    monkeypatch.setattr(orch.clip_service, "probe_safe_end", lambda path: 12.0)
+    monkeypatch.setattr(orch.clip_service, "extract_audio", _extract_audio)
+    monkeypatch.setattr(
+        orch.transcription_service, "transcribe_to_words", lambda audio_path, **_: [WordTiming("hi", 0.0, 0.5)]
+    )
+    monkeypatch.setattr(orch.render_service, "render_clip", _render)
+    bus, store = AsyncEventBus(), InMemoryJobStore()
+    await store.create(
+        JobState(
+            job_id=JOB,
+            url=URL,
+            source="youtube",
+            download_path=str(tmp_path),
+            pipeline_options=PipelineOptions(thumbnail=False, audio_enhance=False),
+        )
+    )
+    runner = asyncio.create_task(orch.run_orchestrator(bus, store))
+    try:
+        await _request(
+            bus,
+            JOB,
+            tmp_path,
+            pipeline_options=PipelineOptions(thumbnail=False, audio_enhance=False).model_dump(),
+        )
+        await asyncio.to_thread(sibling_cancelled.wait, 10)
+
+        assert orch.cancel_job(JOB) is True
+        await _until(lambda: not orch.job_active(JOB), timeout=10)
+
+        assert (await store.get(JOB)).status == "cancelled"
+        types = _types(bus, JOB)
+        assert EventType.JOB_FAILED not in types
+        assert types[-1] is EventType.JOB_CANCELLED
+    finally:
+        await _stop(runner)
+
+
+class _SwallowingStore(InMemoryJobStore):
+    """``list_clips`` (the manifest step, in the run's own task) blocks, then
+    swallows the cancel that reaches it, as an internal step might."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = asyncio.Event()
+
+    async def list_clips(self, job_id: str | None = None, *args: Any, **kwargs: Any):
+        if job_id == JOB and not self.entered.is_set():
+            self.entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                asyncio.current_task().uncancel()  # absorbed
+        return await super().list_clips(job_id, *args, **kwargs)
+
+
+async def test_a_user_cancel_absorbed_before_completion_still_ends_cancelled(pipeline, tmp_path, monkeypatch):
+    """Should a step swallow the user's CancelledError, the run still does
+    not report ``completed``: the user's intent is checked before the job
+    is marked done."""
+    bus, store = AsyncEventBus(), _SwallowingStore()
+    await _create(store, JOB, tmp_path)
+
+    async def _quick_chapter(**_: Any) -> None:
+        return None
+
+    monkeypatch.setattr(orch, "_process_chapter", _quick_chapter)
+    runner = asyncio.create_task(orch.run_orchestrator(bus, store))
+    try:
+        await _request(bus, JOB, tmp_path)
+        await asyncio.wait_for(store.entered.wait(), 5)
+
+        assert orch.cancel_job(JOB) is True
+        await _until(lambda: not orch.job_active(JOB))
+
+        assert (await store.get(JOB)).status == "cancelled"
+        types = _types(bus, JOB)
+        assert EventType.JOB_COMPLETED not in types
+        assert types[-1] is EventType.JOB_CANCELLED
+    finally:
+        await _stop(runner)
+
+
+async def test_a_second_user_cancel_of_one_task_is_not_sent_again():
+    task = asyncio.create_task(asyncio.Event().wait())
+    orch._track_job_task(JOB, task)
+    calls: list[int] = []
+    real_cancel = task.cancel
+    task.cancel = lambda *a, **kw: calls.append(1) or real_cancel(*a, **kw)  # type: ignore[method-assign]
+
+    assert orch.cancel_job(JOB) and orch.cancel_job(JOB)
+
+    assert calls == [1]
+    with pytest.raises(asyncio.CancelledError):
+        await task

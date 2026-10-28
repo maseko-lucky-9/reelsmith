@@ -32,7 +32,6 @@ from app.domain.models import JobStatus
 from app.services import retention
 from app.services.platforms import upload as upload_adapter
 from app.services.retention import (
-    LEGACY_UPLOAD_ROOT,
     TERMINAL_JOB_STATUSES,
     RetentionReport,
     managed_roots,
@@ -759,8 +758,8 @@ async def test_second_retired_file_sweep_is_a_no_op(factory, root, roots):
 # ── Roots and the janitor tick ────────────────────────────────────────────────
 
 
-def test_legacy_upload_root_matches_the_upload_adapter():
-    assert LEGACY_UPLOAD_ROOT.resolve() == upload_adapter._LEGACY_UPLOAD_ROOT
+def test_the_checked_legacy_root_is_the_one_the_upload_adapter_reads():
+    assert (upload_adapter._LEGACY_BASE / "uploads").resolve() == upload_adapter._LEGACY_UPLOAD_ROOT
 
 
 def _legacy_base(tmp_path, monkeypatch, *, mode: int = 0o755):
