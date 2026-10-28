@@ -39,6 +39,9 @@ class EventType(str, Enum):
     STAGE_SKIPPED = "StageSkipped"
     JOB_COMPLETED = "JobCompleted"
     JOB_FAILED = "JobFailed"
+    # The user cancelled the job (POST /jobs/{id}/cancel); its status is now
+    # "cancelled". A shutdown cancels pipelines without it.
+    JOB_CANCELLED = "JobCancelled"
     # Reprompt (FR-016): the clips of a completed job were re-discovered. The
     # job stays completed either way; a failed reprompt keeps the old clips.
     JOB_REPROMPTED = "JobReprompted"

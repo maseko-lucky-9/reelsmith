@@ -200,6 +200,9 @@ async def to_thread_cancellable(func: Callable[..., T], /, *args, **kwargs) -> T
     * a call still queued behind a busy executor is dropped — it will never
       run, and cancellation does not wait for it;
     * a running call is awaited until its ffmpeg has been killed and reaped.
+      A further cancel during that wait (a user cancel after a timeout's, a
+      second click) cannot cut it short: the wait goes on until the worker
+      has returned, then the cancellation is raised once.
     """
     event = threading.Event()
     ctx = contextvars.copy_context()
@@ -227,11 +230,15 @@ async def to_thread_cancellable(func: Callable[..., T], /, *args, **kwargs) -> T
             if not state["started"]:
                 state["dropped"] = True
         if not state["dropped"]:
-            try:
-                await asyncio.wait({future})
-            finally:
-                if future.done() and not future.cancelled():
-                    future.exception()  # mark retrieved; the cancel wins
+            while not future.done():
+                try:
+                    await asyncio.wait({future})
+                except asyncio.CancelledError:
+                    # Another cancel: the task still ends cancelled (raised
+                    # below), but only once the worker has stopped.
+                    continue
+            if not future.cancelled():
+                future.exception()  # mark retrieved; the cancel wins
         raise
     return future.result()
 

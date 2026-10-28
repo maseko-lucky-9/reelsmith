@@ -16,6 +16,7 @@ Open work is tracked per feature in `specs/*/tasks.md`; this file keeps the fini
 | [010 Map the export folder](../specs/010-map-export-folder/spec.md) | [tasks.md](../specs/010-map-export-folder/tasks.md) | 0 open: T064-T067 done (janitor guard, `scripts/map_inbox_to_db.py`, inbox job titles, enhance guard) |
 | [011 Repair job metadata](../specs/011-repair-job-metadata/spec.md) | [tasks.md](../specs/011-repair-job-metadata/tasks.md) | 0 open: T068-T070 done (titles and durations from the URL, placeholder imports dropped) |
 | [012 TikTok posting and trends](../specs/012-tiktok-posting-and-trends/spec.md) | [tasks.md](../specs/012-tiktok-posting-and-trends/tasks.md) | 13 open: T071-T076 built in PRs (phase 1), T077 go-live (owner decision), T078-T082 phases 2-3, T083 sound on hold |
+| [013 Cancel and delete jobs](../specs/013-cancel-and-delete-jobs/spec.md) | [tasks.md](../specs/013-cancel-and-delete-jobs/tasks.md) | 1 open: T084-T088 and T090-T092 done (cancel route and orchestrator registry, safe job delete hardened in review, home-page select and delete); T089 end-to-end check on the owner's stack |
 | [002-007 roadmap stubs](../specs/README.md) | none yet | stubs only: caption/brand pipeline, analytics, share links, webhooks, API tokens, workspaces |
 
 Constitution: [.specify/memory/constitution.md](../.specify/memory/constitution.md)

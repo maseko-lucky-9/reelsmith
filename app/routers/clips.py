@@ -9,6 +9,7 @@ from starlette.convertors import StringConvertor, register_url_convertor
 
 from app.bus.job_store import JobNotFoundError
 from app.domain.events import Event, EventType
+from app.workers import orchestrator
 
 router = APIRouter(prefix="/clips", tags=["clips"])
 
@@ -119,6 +120,8 @@ async def rerender_clip(
             status_code=409,
             detail=f"job is {job.status}; only a completed job's clips can be re-rendered",
         )
+    if orchestrator.deleting(job.job_id):
+        raise HTTPException(status_code=409, detail="the clip's job is being deleted")
     # Jobs created before jobs.video_path existed have no recorded source.
     if not job.video_path or not Path(job.video_path).is_file():
         raise HTTPException(status_code=409, detail="source video not retained")
@@ -136,10 +139,18 @@ async def rerender_clip(
         "reframe_provider": req.reframe_provider,
         "regenerate_copy": req.regenerate_copy,
     }
-    if hasattr(request.app.state, "job_queue"):
-        await request.app.state.job_queue.put((job.job_id, payload))
-    else:
-        await request.app.state.event_bus.publish(
-            Event(type=EventType.VIDEO_REQUESTED, job_id=job.job_id, payload=payload)
-        )
+    # Claimed with no await since the deleting check above, and released when
+    # the re-render's task ends (or here, if it is never queued): a delete
+    # in between answers 409, and a delete first makes this one 409.
+    orchestrator.claim_work(job.job_id)
+    try:
+        if hasattr(request.app.state, "job_queue"):
+            await request.app.state.job_queue.put((job.job_id, payload))
+        else:
+            await request.app.state.event_bus.publish(
+                Event(type=EventType.VIDEO_REQUESTED, job_id=job.job_id, payload=payload)
+            )
+    except BaseException:
+        orchestrator.release_work(job.job_id)
+        raise
     return {"status": "queued", "clip_id": clip_id}

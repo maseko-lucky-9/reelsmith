@@ -15,10 +15,20 @@ from app.db.session import get_session
 from app.services import audio_enhance_service
 from app.services.retention import is_managed_file
 from app.settings import settings
+from app.workers import orchestrator
 
 router = APIRouter(prefix="/clips", tags=["enhance-speech"])
 
 _AUDIO_PROVIDERS = ("loudnorm", "rnnoise", "passthrough")
+
+
+def _claim_job(clip: ClipRecord) -> None:
+    """Enhancing writes a file into the clip's job folder: refused while the
+    job is being deleted, and counted as work on it (``claim_work``) until
+    released, so a delete meanwhile answers 409."""
+    if orchestrator.deleting(clip.job_id):
+        raise HTTPException(status_code=409, detail="the clip's job is being deleted")
+    orchestrator.claim_work(clip.job_id)
 
 
 def _require_own_file(clip: ClipRecord) -> None:
@@ -58,20 +68,23 @@ async def enhance_speech(
     if not clip.output_path:
         raise HTTPException(status_code=409, detail="clip not rendered yet")
     _require_own_file(clip)
-
-    src = Path(clip.output_path)
-    out = src.with_name(src.stem + ".enhanced" + src.suffix)
-    provider = getattr(settings, "audio_enhance_provider", "loudnorm")
-
+    _claim_job(clip)
     try:
-        audio_enhance_service.enhance(str(src), str(out), provider=provider)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except audio_enhance_service.AudioEnhanceError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        src = Path(clip.output_path)
+        out = src.with_name(src.stem + ".enhanced" + src.suffix)
+        provider = getattr(settings, "audio_enhance_provider", "loudnorm")
 
-    clip.output_path = str(out)
-    await session.commit()
+        try:
+            audio_enhance_service.enhance(str(src), str(out), provider=provider)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except audio_enhance_service.AudioEnhanceError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        clip.output_path = str(out)
+        await session.commit()
+    finally:
+        orchestrator.release_work(clip.job_id)
     return EnhanceResponse(clip_id=clip.id, output_path=str(out), provider=provider)
 
 
@@ -93,16 +106,19 @@ async def enhance_audio(
     if not clip.output_path:
         raise HTTPException(status_code=409, detail="clip not rendered yet")
     _require_own_file(clip)
-
-    src = Path(clip.output_path)
-    out = src.with_name(src.stem + ".enhanced-audio" + src.suffix)
-
+    _claim_job(clip)
     try:
-        audio_enhance_service.enhance(str(src), str(out), provider=body.provider)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except audio_enhance_service.AudioEnhanceError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        src = Path(clip.output_path)
+        out = src.with_name(src.stem + ".enhanced-audio" + src.suffix)
+
+        try:
+            audio_enhance_service.enhance(str(src), str(out), provider=body.provider)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except audio_enhance_service.AudioEnhanceError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+    finally:
+        orchestrator.release_work(clip.job_id)
 
     job_id = str(uuid.uuid4())
     return EnhanceAudioResponse(job_id=job_id, clip_id=clip.id, provider=body.provider)

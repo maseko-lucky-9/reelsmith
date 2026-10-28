@@ -1,8 +1,8 @@
 import { createRoute } from '@tanstack/react-router'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState, useEffect } from 'react'
 import { toast } from 'sonner'
-import { LayoutGrid, List, Search, SlidersHorizontal } from 'lucide-react'
+import { Ban, LayoutGrid, List, Search, SlidersHorizontal } from 'lucide-react'
 import { rootRoute } from './root'
 import { api } from '@/api/client'
 import { useJobSSE } from '@/hooks/useJobSSE'
@@ -14,6 +14,7 @@ import { TimelineErrorBoundary } from '@/components/timeline-error-boundary'
 import { PlatformChip } from '@/components/platform-chip'
 import { RepromptForm } from '@/components/reprompt-form'
 import type { PipelineEvent } from '@/lib/pipelineStages'
+import { isConflict } from '@/lib/jobStatus'
 
 export const jobDetailRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -65,16 +66,37 @@ function JobDetailPage() {
     : undefined
   const reprompting = repromptQueued && !repromptOutcome
 
-  // Stream only while the job can still change; a completed/failed job renders from the
-  // fetch. A reprompt changes a completed job's clips, so it streams until it ends.
+  // Stream only while the job can still change; a completed/failed/cancelled job renders
+  // from the fetch. A reprompt changes a completed job's clips, so it streams until it ends.
   const jobStatus = jobQuery.data?.status
-  useJobSSE(jobId, { enabled: jobStatus === 'pending' || jobStatus === 'running' || reprompting })
+  const jobActive = jobStatus === 'pending' || jobStatus === 'running'
+  useJobSSE(jobId, { enabled: jobActive || reprompting })
+
+  // A cancel ends with JobCancelled (a run) or RepromptFailed (a reprompt), which refetch the job.
+  const cancelMutation = useMutation({
+    mutationFn: () => api.cancelJob(jobId),
+    // A 409 means it already stopped (a second click); the refetch shows it.
+    onError: (e: Error) => {
+      if (!isConflict(e)) toast.error(`Could not cancel: ${e.message}`)
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: ['job', jobId] })
+      void queryClient.invalidateQueries({ queryKey: ['jobs'] })
+    },
+  })
+
+  function onCancel() {
+    const what = reprompting ? 'this reprompt' : 'this job'
+    if (!window.confirm(`Cancel ${what}?`)) return
+    cancelMutation.mutate()
+  }
 
   useEffect(() => {
     if (!repromptOutcome) return
     if (repromptOutcome.type === 'RepromptFailed') {
       const error = repromptOutcome.payload?.error
-      toast.error(`Reprompt failed: ${typeof error === 'string' ? error : 'unknown error'}`)
+      if (repromptOutcome.payload?.reason === 'cancelled') toast.info('Reprompt cancelled; the clips are unchanged')
+      else toast.error(`Reprompt failed: ${typeof error === 'string' ? error : 'unknown error'}`)
     } else {
       toast.success('New clips are ready')
     }
@@ -122,11 +144,12 @@ function JobDetailPage() {
   }
 
   const showTimeline = job.status === 'running' || job.status === 'failed' || job.status === 'pending'
+  const canCancel = jobActive || reprompting
 
   return (
     <div className="space-y-4">
       {/* Header: title + platform chip + duration (visible during processing & after) */}
-      {(job.source || job.title) && (
+      {(job.source || job.title || canCancel) && (
         <div className="flex items-center gap-2 flex-wrap">
           {job.source && <PlatformChip platform={job.source} />}
           <span className="text-sm font-medium text-white truncate max-w-md">
@@ -137,7 +160,24 @@ function JobDetailPage() {
               {formatDuration(job.duration)}
             </span>
           )}
+          {canCancel && (
+            <button
+              type="button"
+              onClick={onCancel}
+              disabled={cancelMutation.isPending}
+              className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/15 text-xs text-zinc-200 hover:text-white hover:border-red-400/60 disabled:opacity-50 transition-colors"
+            >
+              <Ban className="w-3.5 h-3.5" />
+              {cancelMutation.isPending ? 'Cancelling…' : 'Cancel'}
+            </button>
+          )}
         </div>
+      )}
+
+      {job.status === 'cancelled' && (
+        <p className="text-sm text-amber-400" role="status">
+          This job was cancelled{job.current_step ? ` during ${job.current_step}` : ''}. Delete it from the home page to free its files.
+        </p>
       )}
 
       {/* Live progress timeline during pending/running/failed */}

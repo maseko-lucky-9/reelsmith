@@ -9,6 +9,7 @@ vi.mock('@/api/client', () => ({
     getJob: vi.fn(),
     listClips: vi.fn(),
     repromptJob: vi.fn(),
+    cancelJob: vi.fn(),
   },
 }))
 
@@ -278,5 +279,100 @@ describe('JobDetailPage — reprompt', () => {
     expect(toast.error).toHaveBeenCalledWith('Reprompt failed: render exploded')
     expect(submitButton().disabled).toBe(false)
     expect(openStreams()).toEqual([])
+  })
+})
+
+describe('JobDetailPage — cancel (spec 013)', () => {
+  beforeEach(() => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    vi.mocked(api.cancelJob).mockReset().mockResolvedValue({ job_id: 'job-1', status: 'cancelling' })
+  })
+
+  it.each(['pending', 'running'] as const)('offers Cancel in the header of a %s job', async (status) => {
+    await renderPage(status)
+
+    fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }))
+    await flush()
+
+    expect(api.cancelJob).toHaveBeenCalledWith('job-1')
+  })
+
+  it.each(['completed', 'failed', 'cancelled'] as const)('offers no Cancel on a %s job', async (status) => {
+    await renderPage(status)
+
+    expect(screen.queryByRole('button', { name: /^cancel$/i })).toBeNull()
+  })
+
+  it('does not cancel when the confirm is declined', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => false))
+    await renderPage('running')
+
+    fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }))
+    await flush()
+
+    expect(api.cancelJob).not.toHaveBeenCalled()
+  })
+
+  it('swallows the 409 of a second cancel click', async () => {
+    vi.mocked(api.cancelJob).mockRejectedValue(new Error('409 {"detail":"job is cancelled; nothing to cancel"}'))
+    await renderPage('running')
+
+    fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }))
+    await flush()
+
+    expect(api.cancelJob).toHaveBeenCalled()
+    expect(toast.error).not.toHaveBeenCalled()
+  })
+
+  it('reports any other cancel failure', async () => {
+    vi.mocked(api.cancelJob).mockRejectedValue(new Error('500 boom'))
+    await renderPage('running')
+
+    fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }))
+    await flush()
+
+    expect(toast.error).toHaveBeenCalledWith('Could not cancel: 500 boom')
+  })
+
+  it('says a cancelled job was cancelled and opens no stream', async () => {
+    await renderPage('cancelled')
+
+    expect(screen.getByRole('status')).toHaveTextContent(/this job was cancelled/i)
+    expect(openStreams()).toEqual([])
+  })
+
+  it('closes the stream when the job reports JobCancelled', async () => {
+    await renderPage('running')
+    const [stream] = openStreams()
+
+    act(() => {
+      stream.emit('JobCancelled', 'ev-c', { cancelled_step: 'download' })
+    })
+    await flush()
+
+    expect(stream.closed).toBe(true)
+  })
+
+  it('offers Cancel while a reprompt runs and reports its cancel as a cancel, not a failure', async () => {
+    vi.mocked(api.repromptJob).mockResolvedValue({
+      job_id: 'job-1',
+      status: 'queued',
+      prompt: 'gender equality',
+      pipeline_options: {},
+    })
+    await renderPage('completed')
+    await submitReprompt()
+    const [stream] = openStreams()
+
+    fireEvent.click(screen.getByRole('button', { name: /^cancel$/i }))
+    await flush()
+    act(() => {
+      stream.emit('RepromptFailed', 'ev-r', { error: 'cancelled', reason: 'cancelled' })
+    })
+    await flush()
+
+    expect(api.cancelJob).toHaveBeenCalledWith('job-1')
+    expect(toast.info).toHaveBeenCalledWith('Reprompt cancelled; the clips are unchanged')
+    expect(toast.error).not.toHaveBeenCalled()
   })
 })

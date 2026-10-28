@@ -109,6 +109,8 @@ async def reprompt_job(
         raise HTTPException(status_code=409, detail="source video not retained")
     if not has_span and (reason := orchestrator.reprompt_unavailable_reason()):
         raise HTTPException(status_code=409, detail=reason)
+    if orchestrator.deleting(job_id):
+        raise HTTPException(status_code=409, detail="this job is being deleted")
     if not orchestrator.claim_reprompt(job_id):
         raise HTTPException(
             status_code=409, detail="a reprompt of this job is already running"

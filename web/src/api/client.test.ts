@@ -34,3 +34,34 @@ describe('api.listJobs', () => {
     expect([q.get('limit'), q.get('offset'), q.get('search')]).toEqual(['5', '10', 'rice'])
   })
 })
+
+describe('api.cancelJob / api.deleteJob (spec 013)', () => {
+  it('cancels with a POST to the job cancel route', async () => {
+    fetchMock.mockResolvedValue({ ok: true, status: 202, json: async () => ({ job_id: 'j1', status: 'cancelling' }) })
+
+    const body = await api.cancelJob('j1')
+
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/api/jobs/j1/cancel')
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: 'POST' })
+    expect(body).toEqual({ job_id: 'j1', status: 'cancelling' })
+  })
+
+  it('deletes with a DELETE and resolves on 204 without reading a body', async () => {
+    const json = vi.fn(async () => {
+      throw new SyntaxError('Unexpected end of JSON input')
+    })
+    fetchMock.mockResolvedValue({ ok: true, status: 204, json })
+
+    await expect(api.deleteJob('j1')).resolves.toBeUndefined()
+
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/api/jobs/j1')
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: 'DELETE' })
+    expect(json).not.toHaveBeenCalled()
+  })
+
+  it('rejects a 409 with the status and the detail', async () => {
+    fetchMock.mockResolvedValue({ ok: false, status: 409, text: async () => '{"detail":"cancel it first"}' })
+
+    await expect(api.deleteJob('j1')).rejects.toThrow('409 {"detail":"cancel it first"}')
+  })
+})
