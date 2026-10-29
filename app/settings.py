@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _REPO_ANTON = Path(__file__).resolve().parent / "assets" / "fonts" / "Anton-Regular.ttf"
@@ -94,6 +95,30 @@ class Settings(BaseSettings):
     # order) | "ollama" (the ollama_* settings below; needs ollama_enabled).
     # Any failure keeps the heuristic's order.
     segment_rerank_provider: str = "none"
+
+    # ── AI scene search (spec 014, ADR-013) ───────────────────────────────
+    # A job or reprompt prompt finds the matching moments by what is seen
+    # (video embeddings) and said (transcript sentences), and a local vision
+    # model judges the best few. "auto" (default): on when the request has a
+    # prompt and scene_python exists, else today's behaviour | "mlx": on
+    # whenever there is a prompt | "off". The prompt then overrides YouTube
+    # chapters and the keyword proposer; any failure falls back to them.
+    scene_search_provider: str = "auto"
+    # Interpreter of the sidecar venv that runs scripts/scene_index.py
+    # (mlx + mlx-vlm; built by scripts/setup_scene_venv.sh).
+    scene_python: str = str(_PROJECT_ROOT / ".venv-mlx" / "bin" / "python")
+    # Embedding model (Hugging Face id or local dir): 768-d, 8 s chunks.
+    scene_model: str = "mlx-community/Qwen3-VL-Embedding-2B-8bit"
+    # Budget for indexing one source (about 4.4 s per source minute).
+    scene_index_timeout_seconds: int = 3600
+    # Vision judge through Ollama: qwen2.5vl:7b passed the precision gate
+    # (0.844); gemma4:latest is faster but less precise (0.66).
+    ollama_vision_model: str = "qwen2.5vl:7b"
+    # Most candidates the judge sees per search, one call each, in order.
+    scene_judge_max_candidates: int = 8
+    # Wall-clock budget for all judge calls of one search; candidates not
+    # judged by then keep their similarity order.
+    scene_judge_budget_seconds: int = 120
 
     # ── Reframe ───────────────────────────────────────────────────────────
     # "letterbox" (default: scaled inset over the blurred background) |
@@ -239,6 +264,14 @@ class Settings(BaseSettings):
     caption_words_per_segment: int = 3
     download_timeout_seconds: int = 600
     render_timeout_seconds: int = 3600
+
+    @field_validator("scene_python")
+    @classmethod
+    def _scene_python_absolute(cls, value: str) -> str:
+        """A relative ``YTVIDEO_SCENE_PYTHON`` is taken from the project root,
+        not the server's working directory."""
+        path = Path(value).expanduser()
+        return str(path if path.is_absolute() else _PROJECT_ROOT / path)
 
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

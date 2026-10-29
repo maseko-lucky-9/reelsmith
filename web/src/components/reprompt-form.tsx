@@ -68,8 +68,13 @@ export function RepromptForm({ jobId, busy, onQueued }: Props) {
         maxLength={2000}
         rows={2}
         placeholder="e.g. the moments about gender equality"
+        aria-describedby="reprompt-prompt-help"
         className={`w-full px-3 py-1.5 ${inputClass}`}
       />
+      <p id="reprompt-prompt-help" className="text-xs text-zinc-500">
+        Describe what to find, by what is seen or said. With AI scene search on the server, the
+        source is indexed once, so a new prompt takes seconds.
+      </p>
       <div className="flex items-end gap-3 flex-wrap">
         <label className="flex flex-col gap-1 text-xs text-zinc-400">
           Min length (s)

@@ -21,6 +21,7 @@ Spec numbers and ADR numbers (`docs/decisions/NNN-*.md`) are separate sequences.
 | 011 repair-job-metadata | Implemented (T068-T070) | [spec](011-repair-job-metadata/spec.md) · [tasks](011-repair-job-metadata/tasks.md) |
 | 012 tiktok-posting-and-trends | Phase 1 built, not live (T071-T076; T077 go-live is an owner decision); phases 2-4 planned | [spec](012-tiktok-posting-and-trends/spec.md) · [tasks](012-tiktok-posting-and-trends/tasks.md) · [baseline](012-tiktok-posting-and-trends/baseline.md) |
 | 013 cancel-and-delete-jobs | Implemented (T084-T088, T090-T092 review rounds; T089 end-to-end check open) | [spec](013-cancel-and-delete-jobs/spec.md) · [plan](013-cancel-and-delete-jobs/plan.md) · [tasks](013-cancel-and-delete-jobs/tasks.md) |
+| 014 ai-scene-search | Implemented (T093-T106; T107 owner-stack check, T108-T110 follow-ups open) | [spec](014-ai-scene-search/spec.md) · [plan](014-ai-scene-search/plan.md) · [tasks](014-ai-scene-search/tasks.md) |
 
 ## Roadmap stubs
 

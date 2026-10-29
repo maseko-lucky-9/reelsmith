@@ -80,6 +80,18 @@ async def test_find_job_by_url_prefers_newest_match(store):
     assert found is not None and found.job_id == "new"
 
 
+async def test_find_job_by_url_with_where_takes_the_newest_match_of_any_age(store):
+    for job_id, prompt in (("red", "a red car"), ("boat", "a blue boat"), ("plain", None)):
+        await store.create(JobState(job_id=job_id, url="https://yt.test/x", download_path="/tmp", prompt=prompt))
+        await store.update(job_id, lambda s: setattr(s, "status", "completed"))
+
+    found = await store.find_job_by_url("https://yt.test/x", ACTIVE, where=lambda j: j.prompt == "a red car")
+    assert found is not None and found.job_id == "red"
+    assert await store.find_job_by_url("https://yt.test/x", ACTIVE, where=lambda j: j.prompt == "x") is None
+    newest = await store.find_job_by_url("https://yt.test/x", ACTIVE)
+    assert newest is not None and newest.job_id == "plain"
+
+
 async def test_find_job_by_url_sees_jobs_beyond_the_newest_200(store):
     await _job(store, "oldest", "https://yt.test/first", "completed")
     for i in range(205):

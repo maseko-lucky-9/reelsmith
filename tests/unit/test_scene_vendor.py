@@ -39,9 +39,11 @@ from scripts.scene_index import (
     install_signal_handlers,
     load_index,
     plan_spans,
+    read_texts,
     resolve_model,
     sweep_stale_temp_dirs,
     write_index,
+    write_vectors,
 )
 
 # --- expected_chunk_spans -------------------------------------------------
@@ -368,3 +370,35 @@ def test_judge_scores_count_precision_recall_and_accuracy():
     assert scores["precision"] == pytest.approx(2 / 3)  # 2 of the 3 'match' verdicts were right
     assert scores["recall"] == pytest.approx(2 / 4)  # 2 of the 4 real matches were found
     assert scores["accuracy"] == pytest.approx(3 / 6)
+
+
+# --- embed-texts (spec 014) ---------------------------------------------------
+
+
+def test_embed_texts_takes_its_positionals_after_double_dash():
+    args = _build_parser().parse_args(["embed-texts", "--model", "m", "--", "-texts.json", "--out.npy"])
+    assert (args.command, str(args.texts), str(args.out), args.model) == (
+        "embed-texts", "-texts.json", "--out.npy", "m",
+    )  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [("not json", "cannot read"), ("[]", "non-empty JSON list"), ('{"a": 1}', "non-empty JSON list"),
+     ('["ok", ""]', "non-empty string"), ('["ok", 3]', "non-empty string")],
+)  # fmt: skip
+def test_read_texts_rejects_anything_but_a_list_of_strings(tmp_path, content, message):
+    path = tmp_path / "texts.json"
+    path.write_text(content)
+    with pytest.raises(SceneIndexError, match=message):
+        read_texts(path)
+
+
+def test_read_texts_and_write_vectors_round_trip(tmp_path):
+    path = tmp_path / "texts.json"
+    path.write_text('["a dog", "--help"]')
+    assert read_texts(path) == ["a dog", "--help"]
+    out = tmp_path / "sub" / "out.npy"
+    write_vectors(out, np.ones((2, 768)))
+    assert np.load(out).dtype == np.float32 and np.load(out).shape == (2, 768)
+    assert [p.name for p in out.parent.iterdir()] == ["out.npy"]  # no temp file left

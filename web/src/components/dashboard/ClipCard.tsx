@@ -4,6 +4,7 @@ import { Play, ThumbsUp, ThumbsDown } from 'lucide-react'
 import type { ClipRecord } from '@/api/client'
 import { api } from '@/api/client'
 import { formatTimestamp } from '@/lib/scoreToGrade'
+import { SceneMatch } from './SceneMatch'
 
 interface ClipCardProps {
   clip: ClipRecord
@@ -93,6 +94,10 @@ export function ClipCard({ clip, jobId }: ClipCardProps) {
           {String(clip.score_breakdown.category)}
         </span>
       )}
+
+      <div className="px-0.5">
+        <SceneMatch clip={clip} />
+      </div>
     </div>
   )
 }

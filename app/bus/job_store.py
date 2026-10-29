@@ -80,7 +80,10 @@ class JobStoreProtocol(Protocol):
         self, limit: int = 20, offset: int = 0, search: str = ""
     ) -> list[JobState]: ...
     async def find_job_by_url(
-        self, url: str, statuses: Collection[str]
+        self,
+        url: str,
+        statuses: Collection[str],
+        where: Callable[[JobState], bool] | None = None,
     ) -> JobState | None: ...
     async def fail_interrupted_jobs(self) -> list[str]: ...
     async def get_clip(
@@ -206,16 +209,20 @@ class InMemoryJobStore:
             return jobs[offset : offset + limit]
 
     async def find_job_by_url(
-        self, url: str, statuses: Collection[str]
+        self,
+        url: str,
+        statuses: Collection[str],
+        where: Callable[[JobState], bool] | None = None,
     ) -> JobState | None:
-        """Newest job whose URL equals ``url`` exactly and whose status is in
-        ``statuses``; None if there is none."""
+        """Newest job whose URL equals ``url`` exactly, whose status is in
+        ``statuses`` and, given ``where``, for which ``where`` is true; None
+        if there is none."""
         async with self._lock:
             return next(
                 (
                     job
                     for job in reversed(self._jobs.values())
-                    if job.url == url and job.status in statuses
+                    if job.url == url and job.status in statuses and (where is None or where(job))
                 ),
                 None,
             )
@@ -566,26 +573,34 @@ class SqlJobStore:
             return [_record_to_state(r, with_chapters=False) for r in result.scalars().all()]
 
     async def find_job_by_url(
-        self, url: str, statuses: Collection[str]
+        self,
+        url: str,
+        statuses: Collection[str],
+        where: Callable[[JobState], bool] | None = None,
     ) -> JobState | None:
-        """Newest job whose URL equals ``url`` exactly and whose status is in
-        ``statuses``; None if there is none. One row, whatever the table size."""
+        """Newest job whose URL equals ``url`` exactly, whose status is in
+        ``statuses`` and, given ``where``, for which ``where`` is true; None
+        if there is none. One row without ``where``; with it, the jobs of
+        that one URL, whatever the table size."""
         from sqlalchemy import select
         from sqlalchemy.orm import selectinload
 
         from app.db.models import JobRecord
 
+        query = (
+            select(JobRecord)
+            .options(selectinload(JobRecord.clips))
+            .where(JobRecord.youtube_url == url)
+            .where(JobRecord.status.in_(list(statuses)))
+            .order_by(JobRecord.created_at.desc())
+        )
         async with self._factory() as session:
-            result = await session.execute(
-                select(JobRecord)
-                .options(selectinload(JobRecord.clips))
-                .where(JobRecord.youtube_url == url)
-                .where(JobRecord.status.in_(list(statuses)))
-                .order_by(JobRecord.created_at.desc())
-                .limit(1)
-            )
-            record = result.scalar_one_or_none()
-        return _record_to_state(record, with_chapters=False) if record is not None else None
+            if where is None:
+                record = (await session.execute(query.limit(1))).scalar_one_or_none()
+                return _record_to_state(record, with_chapters=False) if record is not None else None
+            records = (await session.execute(query)).scalars().all()
+        states = (_record_to_state(r, with_chapters=False) for r in records)
+        return next((s for s in states if where(s)), None)
 
     async def fail_interrupted_jobs(self) -> list[str]:
         """Mark every pending/running job failed (one UPDATE); return their ids.

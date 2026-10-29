@@ -121,6 +121,24 @@ async def test_a_url_job_loses_its_whole_folder_and_nothing_else(root):
     assert (root / "uploads").is_dir() and root.is_dir()
 
 
+async def test_the_scene_index_goes_with_the_job_folder(root):
+    """Spec 014: ``<job folder>/scenes/`` (and a fresh index a crash left) is
+    inside the folder, so the walk removes it; nothing else is needed."""
+    store = InMemoryJobStore()
+    paths = _url_job_folder(root)
+    scene_files = [
+        _file(paths["folder"] / "scenes" / name)
+        for name in ("chunks.json", "embeddings.npy", "meta.json", "sentences.json", "sentence_embeddings.npy")
+    ]
+    stale = _file(paths["folder"] / ".scenes-1a2b3c4d" / "chunks.json")
+    job = await _job(store, JOB, destination_folder=str(paths["folder"]), video_path=str(paths["source"]))
+
+    deleted = await delete_job_files(job, store)
+
+    assert not paths["folder"].exists()
+    assert {str(p) for p in [*scene_files, stale]} <= set(deleted)
+
+
 async def test_a_second_delete_finds_nothing_and_does_not_fail(root):
     store = InMemoryJobStore()
     paths = _url_job_folder(root)

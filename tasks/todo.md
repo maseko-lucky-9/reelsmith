@@ -17,6 +17,7 @@ Open work is tracked per feature in `specs/*/tasks.md`; this file keeps the fini
 | [011 Repair job metadata](../specs/011-repair-job-metadata/spec.md) | [tasks.md](../specs/011-repair-job-metadata/tasks.md) | 0 open: T068-T070 done (titles and durations from the URL, placeholder imports dropped) |
 | [012 TikTok posting and trends](../specs/012-tiktok-posting-and-trends/spec.md) | [tasks.md](../specs/012-tiktok-posting-and-trends/tasks.md) | 13 open: T071-T076 built in PRs (phase 1), T077 go-live (owner decision), T078-T082 phases 2-3, T083 sound on hold |
 | [013 Cancel and delete jobs](../specs/013-cancel-and-delete-jobs/spec.md) | [tasks.md](../specs/013-cancel-and-delete-jobs/tasks.md) | 1 open: T084-T088 and T090-T092 done (cancel route and orchestrator registry, safe job delete hardened in review, home-page select and delete); T089 end-to-end check on the owner's stack |
+| [014 AI scene search](../specs/014-ai-scene-search/spec.md) | [tasks.md](../specs/014-ai-scene-search/tasks.md) | 4 open: T093-T106 done (a prompt picks clips by what is seen and said, Qwen3-VL sidecar index reused per job, qwen2.5vl judge, prompt boxes, emotion chips); T107 end-to-end on the owner's stack, T108 emotion recall, T109 tighter speech windows, T110 judge precision re-run |
 | [002-007 roadmap stubs](../specs/README.md) | none yet | stubs only: caption/brand pipeline, analytics, share links, webhooks, API tokens, workspaces |
 
 Constitution: [.specify/memory/constitution.md](../.specify/memory/constitution.md)

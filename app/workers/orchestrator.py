@@ -4,6 +4,7 @@ import asyncio
 import concurrent.futures
 import contextlib
 import logging
+import math
 import re
 import shutil
 import threading
@@ -34,6 +35,7 @@ from app.services import (
     ollama_service,
     reframe_service,
     render_service,
+    scene_search,
     segment_discovery,
     segment_proposer,
     segment_rerank,
@@ -445,7 +447,37 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
         # source; each chapter then reuses them instead of re-transcribing.
         source_words: list[transcription_service.WordTiming] | None = None
 
-        if not chapters:
+        # AI scene search (spec 014): a prompt picks the clips by what is
+        # seen and said, whatever the source's chapters and segment mode.
+        # None: it could not run, so today's path below runs; []: nothing
+        # matched, which also falls back.
+        prompt: str | None = payload.get("prompt")
+        scene_chapters: list[dict[str, Any]] | None = None
+        if opts.segment_proposer and scene_search.enabled(prompt):
+            assert prompt is not None
+            scene_chapters, source_words, why = await _scene_chapters(
+                job_id=job_id,
+                video_path=video_path,
+                job_folder=destination,
+                safe_end=safe_end,
+                cleanup_root=cleanup_root,
+                opts=opts,
+                language=language,
+                prompt=prompt,
+                words=None,
+                first_index=0,
+                bus=bus,
+            )
+            if scene_chapters == []:
+                log.info("[%s] No moment matched the prompt; using the source's chapters or discovery", job_id)
+                await _emit(
+                    bus, EventType.STAGE_SKIPPED, job_id,
+                    stage_id="scene_search", reason=f"no moment matched the prompt{why}",
+                )
+
+        if scene_chapters:
+            chapters = scene_chapters
+        elif not chapters:
             if not opts.segment_proposer:
                 # segment_proposer off → single full-video pseudo-chapter
                 chapters = [_full_video_chapter(safe_end)]
@@ -463,8 +495,9 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
                     cleanup_root=cleanup_root,
                     opts=opts,
                     language=language,
-                    prompt=payload.get("prompt"),
+                    prompt=prompt,
                     bus=bus,
+                    words=source_words,
                 )
             else:
                 # Provider "chapter", transcription off or segment_mode
@@ -673,6 +706,7 @@ async def _discover_segments(
     language: str | None,
     prompt: str | None,
     bus: AsyncEventBus,
+    words: list[transcription_service.WordTiming] | None = None,
 ) -> tuple[list[dict[str, Any]], list[transcription_service.WordTiming] | None]:
     """Chapters for the best-scoring windows of a source without chapters.
 
@@ -685,9 +719,11 @@ async def _discover_segments(
     Emits ``SegmentsProposed`` and one ``SegmentScored`` per kept segment.
 
     Returns the chapters and the full-source words (``None`` when the source
-    was not transcribed). A source shorter than the minimum clip length, no
-    kept segment, or any failure yields the single "Full Video" chapter, so
-    discovery never fails the job; cancellation propagates.
+    was not transcribed). ``words`` given (scene search transcribed the
+    source and then could not run) skips the transcription. A source shorter
+    than the minimum clip length, no kept segment, or any failure yields the
+    single "Full Video" chapter, so discovery never fails the job;
+    cancellation propagates.
     """
     full_video = [_full_video_chapter(safe_end)]
     min_secs, max_secs = segment_discovery.clip_length_range(opts)
@@ -707,7 +743,6 @@ async def _discover_segments(
         job_id, settings.segment_provider, min_secs, max_secs,
     )
     step_t0 = time.perf_counter()
-    words: list[transcription_service.WordTiming] | None = None
     wav_path = cleanup_root / "discover_source.wav"
     try:
         audio_path = await ffmpeg_tools.to_thread_cancellable(
@@ -715,17 +750,18 @@ async def _discover_segments(
         )
         if audio_path is None:
             raise RuntimeError("source has no audio stream")
-        words = await transcription_service.transcribe_words_async(
-            audio_path, language=language, audio_duration_s=safe_end, repeatable=True
-        )
-        try:
-            await _job_thread(
-                job_id,
-                segment_discovery.write_words_sidecar, video_path, words
+        if words is None:
+            words = await transcription_service.transcribe_words_async(
+                audio_path, language=language, audio_duration_s=safe_end, repeatable=True
             )
-        except OSError as e:
-            # Only re-renders lose out: they transcribe their window again.
-            log.warning("[%s] Could not save the words sidecar: %s", job_id, e)
+            try:
+                await _job_thread(
+                    job_id,
+                    segment_discovery.write_words_sidecar, video_path, words
+                )
+            except OSError as e:
+                # Only re-renders lose out: they transcribe their window again.
+                log.warning("[%s] Could not save the words sidecar: %s", job_id, e)
         proposer = segment_proposer.get_segment_proposer(
             min_secs=min_secs, max_secs=max_secs
         )
@@ -766,6 +802,237 @@ async def _discover_segments(
     if not chapters:
         log.warning("[%s] No segment kept; one Full Video clip", job_id)
         return full_video, words
+    return chapters, words
+
+
+SCENE_PROGRESS_INTERVAL = 1.0
+"""Least seconds between two ``SceneIndexProgress`` events (the first and the
+last are always sent)."""
+
+
+async def _index_scenes(
+    *, job_id: str, video_path: str, index_dir: Path, bus: AsyncEventBus
+) -> scene_search.SceneIndex | None:
+    """The source's scene index (spec 014), built or reused.
+
+    The sidecar (``scripts/scene_index.py`` in ``settings.scene_python``) is
+    a child process: a cancel of the job SIGTERMs it (it removes its temp
+    files), and SIGKILLs it after a grace period. Its progress lines become
+    ``SceneIndexProgress`` events (``done``, ``total`` chunks), at most one
+    a second; the end is ``ScenesIndexed`` (``chunks``, ``reused``,
+    ``seconds``). A failure is logged and reported as ``StageSkipped``
+    (``scene_search``) and returns None, so the job falls back; cancellation
+    propagates.
+    """
+    log.info(
+        "[%s] Step: index scenes  model=%s  dir=%s",
+        job_id, settings.scene_model, index_dir,
+    )  # fmt: skip
+    step_t0 = time.perf_counter()
+    last_sent = -math.inf
+
+    async def _progress(done: int, total: int) -> None:
+        nonlocal last_sent
+        now = time.monotonic()
+        if done in (0, total) or now - last_sent >= SCENE_PROGRESS_INTERVAL:
+            last_sent = now
+            await _emit(bus, EventType.SCENE_INDEX_PROGRESS, job_id, done=done, total=total)
+
+    try:
+        index, reused = await scene_search.ensure_index(video_path, index_dir, on_progress=_progress)
+    except (scene_search.SceneSearchError, OSError) as e:
+        log.warning("[%s] Scene indexing failed (%s); the prompt falls back to chapters/discovery", job_id, e)
+        await _emit(
+            bus, EventType.STAGE_SKIPPED, job_id,
+            stage_id="scene_search", reason="scene indexing failed",
+        )  # fmt: skip
+        return None
+    seconds = round(time.perf_counter() - step_t0, 2)
+    log.info(
+        "[%s] Scenes %s (%.2fs)  chunks=%d",
+        job_id, "reused" if reused else "indexed", seconds, len(index.spans),
+    )  # fmt: skip
+    await _emit(
+        bus, EventType.SCENES_INDEXED, job_id,
+        chunks=len(index.spans), reused=reused, seconds=seconds,
+    )  # fmt: skip
+    return index
+
+
+async def _transcribe_source(
+    *, job_id: str, video_path: str, safe_end: float, cleanup_root: Path, language: str | None
+) -> list[transcription_service.WordTiming] | None:
+    """Words of the whole source, saved as its ``.words.json`` sidecar; None
+    (logged) when it has no audio or transcription fails."""
+    wav_path = cleanup_root / "scene_source.wav"
+    try:
+        audio_path = await ffmpeg_tools.to_thread_cancellable(
+            clip_service.extract_audio, video_path, 0.0, safe_end, str(wav_path)
+        )
+        if audio_path is None:
+            log.info("[%s] Source has no audio stream; scene search matches what is seen only", job_id)
+            return None
+        words = await transcription_service.transcribe_words_async(
+            audio_path, language=language, audio_duration_s=safe_end, repeatable=True
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 — speech is optional for scene search
+        log.warning("[%s] Transcription failed; scene search matches what is seen only", job_id, exc_info=True)
+        return None
+    finally:
+        wav_path.unlink(missing_ok=True)
+    try:
+        await _job_thread(job_id, segment_discovery.write_words_sidecar, video_path, words)
+    except OSError as e:
+        log.warning("[%s] Could not save the words sidecar: %s", job_id, e)
+    return words
+
+
+async def _scene_chapters(
+    *,
+    job_id: str,
+    video_path: str,
+    job_folder: str,
+    safe_end: float,
+    cleanup_root: Path,
+    opts: PipelineOptions,
+    language: str | None,
+    prompt: str,
+    words: list[transcription_service.WordTiming] | None,
+    first_index: int,
+    bus: AsyncEventBus,
+) -> tuple[list[dict[str, Any]] | None, list[transcription_service.WordTiming] | None, str]:
+    """``_scene_search_stage``, guarded: any error but cancellation is logged,
+    reported as ``StageSkipped`` (``scene_search``) and returns ``(None,
+    words, "")``, so scene search never fails a job (spec 014 FR-009).
+
+    The third item is why nothing matched when the chapters are ``[]``: ""
+    or ``JUDGE_UNAVAILABLE`` (candidates there were, but the judge never
+    answered and none was strong enough to stand without it)."""
+    state: dict[str, Any] = {"words": words, "why": ""}
+    try:
+        chapters, words = await _scene_search_stage(
+            job_id=job_id, video_path=video_path, job_folder=job_folder, safe_end=safe_end,
+            cleanup_root=cleanup_root, opts=opts, language=language, prompt=prompt,
+            words=words, first_index=first_index, bus=bus, state=state,
+        )  # fmt: skip
+        return chapters, words, state["why"]
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001 — scene search must never fail the job
+        log.warning(
+            "[%s] Scene search failed (%s); the prompt falls back to chapters/discovery",
+            job_id, e, exc_info=True,
+        )  # fmt: skip
+        # A fixed reason: the event goes to every SSE client; details stay in the log.
+        await _emit(
+            bus, EventType.STAGE_SKIPPED, job_id,
+            stage_id="scene_search", reason="scene search failed",
+        )  # fmt: skip
+        return None, state["words"], ""
+
+
+# Appended to the no-match reason when the judge never answered.
+JUDGE_UNAVAILABLE = " (the judge was unavailable)"
+
+
+async def _scene_search_stage(
+    *,
+    job_id: str,
+    video_path: str,
+    job_folder: str,
+    safe_end: float,
+    cleanup_root: Path,
+    opts: PipelineOptions,
+    language: str | None,
+    prompt: str,
+    words: list[transcription_service.WordTiming] | None,
+    first_index: int,
+    bus: AsyncEventBus,
+    state: dict[str, Any],
+) -> tuple[list[dict[str, Any]] | None, list[transcription_service.WordTiming] | None]:
+    """Chapters for the moments of the source that match ``prompt`` (spec 014).
+
+    Indexes the source into ``<job_folder>/scenes/`` (``_index_scenes``,
+    reused when current) while the source is transcribed (when ``words`` is
+    None and the job transcribes); embeds the prompt and the transcript
+    sentences; ranks the moments (``scene_search.search``); lets the vision
+    judge look at the best few (``segment_rerank.judge_scenes``); keeps the
+    best with discovery's selection (``select_discovered``). Chapter indexes
+    start at ``first_index``; each carries the judge's title, reason and
+    emotion when it judged. Emits ``SegmentsProposed`` and one
+    ``SegmentScored`` per chapter, as discovery does.
+
+    Returns ``(chapters, words)``: ``chapters`` is None when scene search
+    could not run (the caller falls back; ``words`` spares it a second
+    transcription) and ``[]`` when no moment survived the judge.
+    """
+    min_secs, max_secs = segment_discovery.clip_length_range(opts)
+    index_dir = scene_search.scenes_dir(job_folder)
+    step_t0 = time.perf_counter()
+
+    async def _words() -> list[transcription_service.WordTiming] | None:
+        if words is not None or not opts.transcription:
+            return words
+        return await _transcribe_source(
+            job_id=job_id, video_path=video_path, safe_end=safe_end,
+            cleanup_root=cleanup_root, language=language,
+        )  # fmt: skip
+
+    # Indexing (GPU, child process) and transcription (CPU) run side by side.
+    async with asyncio.TaskGroup() as group:
+        index_task = group.create_task(
+            _index_scenes(job_id=job_id, video_path=video_path, index_dir=index_dir, bus=bus)
+        )
+        words_task = group.create_task(_words())
+    index, words = index_task.result(), words_task.result()
+    state["words"] = words
+    if index is None:
+        return None, words
+    try:
+        sentences = scene_search.sentences_from_words(words or [])
+        prompt_vec, sentence_vecs = await scene_search.prompt_and_sentence_vectors(index_dir, prompt, sentences)
+    except (scene_search.SceneSearchError, OSError) as e:
+        log.warning("[%s] Prompt embedding failed (%s); the prompt falls back to chapters/discovery", job_id, e)
+        await _emit(
+            bus, EventType.STAGE_SKIPPED, job_id,
+            stage_id="scene_search", reason="prompt embedding failed",
+        )  # fmt: skip
+        return None, words
+    # numpy over every chunk and sentence: off the event loop for long sources.
+    candidates = await _job_thread(
+        job_id, scene_search.search, index, prompt_vec, sentences=sentences,
+        sentence_vecs=sentence_vecs, min_s=min_secs, max_s=max_secs, duration=safe_end,
+    )  # fmt: skip
+    judge_t0 = time.perf_counter()
+    judge_stats: dict[str, int] = {}
+    ranked = await segment_rerank.judge_scenes(
+        candidates, prompt=prompt, video_path=video_path, job_id=job_id, stats=judge_stats
+    )
+    if candidates and not ranked and judge_stats.get("judged") == 0:
+        state["why"] = JUDGE_UNAVAILABLE
+    kept = segment_discovery.select_discovered(ranked, safe_end)
+    chapters = [
+        {**c, "index": first_index + c["index"]}
+        for c in segment_discovery.segments_to_chapters(kept, safe_end)
+    ]
+    log.info(
+        "[%s] Scene search done (%.2fs, judge %.2fs)  sentences=%d  candidates=%d  judged_kept=%d  kept=%s",
+        job_id, time.perf_counter() - step_t0, time.perf_counter() - judge_t0, len(sentences),
+        len(candidates), len(ranked),
+        [(c["start"], c["end"], c["virality_score"], c["title"]) for c in chapters],
+    )  # fmt: skip
+    await _emit(
+        bus, EventType.SEGMENTS_PROPOSED, job_id,
+        count=len(chapters), candidates=len(candidates),
+    )  # fmt: skip
+    for c in chapters:
+        await _emit(
+            bus, EventType.SEGMENT_SCORED, job_id,
+            index=c["index"], start=c["start"], end=c["end"],
+            score=c["virality_score"], breakdown=c["score_breakdown"],
+        )  # fmt: skip
     return chapters, words
 
 
@@ -953,10 +1220,13 @@ def reprompt_in_flight(job_id: str) -> bool:
     return job_id in _reprompts_in_flight
 
 
-def reprompt_unavailable_reason() -> str | None:
+def reprompt_unavailable_reason(prompt: str | None = None) -> str | None:
     """Why a reprompt cannot propose clips (provider ``chapter`` has no
     proposer), or None when it can. A reprompt of an explicit time range
-    needs no proposer."""
+    needs no proposer, and one whose ``prompt`` scene search takes
+    (``scene_search.enabled``) needs none either."""
+    if scene_search.enabled(prompt):
+        return None
     if settings.segment_provider == "chapter":
         return (
             "clip discovery is off (segment_provider=chapter); set "
@@ -1181,7 +1451,7 @@ async def _reprompt_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> 
         span_start = payload.get("start_seconds")
         span_end = payload.get("end_seconds")
         has_span = span_start is not None and span_end is not None
-        if not has_span and (reason := reprompt_unavailable_reason()):
+        if not has_span and (reason := reprompt_unavailable_reason(prompt)):
             raise RuntimeError(reason)
         opts = _effective_options(job.pipeline_options.model_dump())
         if length_min is not None:
@@ -1213,18 +1483,43 @@ async def _reprompt_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> 
                 {**_span_chapter(span_start, span_end, safe_end), "index": first_index}
             ]
         else:
-            chapters, words = await _propose_reprompt_chapters(
-                job_id=job_id,
-                video_path=video_path,
-                safe_end=safe_end,
-                cleanup_root=cleanup_root,
-                opts=opts,
-                language=language,
-                prompt=prompt,
-                words=words,
-                first_index=first_index,
-                bus=bus,
-            )
+            scene_chapters: list[dict[str, Any]] | None = None
+            if scene_search.enabled(prompt):
+                # Reuses <job folder>/scenes/ when the source is unchanged,
+                # so only the prompt is embedded: seconds, not minutes.
+                assert prompt is not None
+                scene_chapters, words, why = await _scene_chapters(
+                    job_id=job_id,
+                    video_path=video_path,
+                    job_folder=job.destination_folder or str(Path(clips_folder).parent),
+                    safe_end=safe_end,
+                    cleanup_root=cleanup_root,
+                    opts=opts,
+                    language=language,
+                    prompt=prompt,
+                    words=words,
+                    first_index=first_index,
+                    bus=bus,
+                )
+                if scene_chapters == []:
+                    raise RuntimeError(f"no moment of the source matched the prompt{why}")
+            if scene_chapters:
+                chapters = scene_chapters
+            else:
+                if reason := reprompt_unavailable_reason():
+                    raise RuntimeError(f"scene search could not run, and {reason}")
+                chapters, words = await _propose_reprompt_chapters(
+                    job_id=job_id,
+                    video_path=video_path,
+                    safe_end=safe_end,
+                    cleanup_root=cleanup_root,
+                    opts=opts,
+                    language=language,
+                    prompt=prompt,
+                    words=words,
+                    first_index=first_index,
+                    bus=bus,
+                )
         await _emit(bus, EventType.CHAPTERS_DETECTED, job_id, chapters=chapters)
 
         # ── New clips, hidden until every one has rendered ────────────────────

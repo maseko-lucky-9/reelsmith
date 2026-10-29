@@ -13,7 +13,7 @@ import { JobProgressTimeline } from '@/components/job-progress-timeline'
 import { TimelineErrorBoundary } from '@/components/timeline-error-boundary'
 import { PlatformChip } from '@/components/platform-chip'
 import { RepromptForm } from '@/components/reprompt-form'
-import type { PipelineEvent } from '@/lib/pipelineStages'
+import { sceneIndexLabel, sceneIndexProgress, type PipelineEvent } from '@/lib/pipelineStages'
 import { isConflict } from '@/lib/jobStatus'
 
 export const jobDetailRoute = createRoute({
@@ -65,6 +65,8 @@ function JobDetailPage() {
     ? eventsQuery.data.find((e) => e.type === 'JobCompleted' || e.type === 'RepromptFailed')
     : undefined
   const reprompting = repromptQueued && !repromptOutcome
+  // A reprompt whose source has no current scene index builds one first (spec 014).
+  const repromptScenes = reprompting ? sceneIndexProgress(eventsQuery.data) : null
 
   // Stream only while the job can still change; a completed/failed/cancelled job renders
   // from the fetch. A reprompt changes a completed job's clips, so it streams until it ends.
@@ -276,6 +278,11 @@ function JobDetailPage() {
 
       {job.status === 'completed' && (
         <RepromptForm jobId={jobId} busy={reprompting} onQueued={onRepromptQueued} />
+      )}
+      {reprompting && repromptScenes && (
+        <p role="status" className="text-xs text-zinc-400 tabular-nums">
+          {sceneIndexLabel(repromptScenes)}
+        </p>
       )}
 
       {/* Section header */}

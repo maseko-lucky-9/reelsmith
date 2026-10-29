@@ -351,10 +351,14 @@ export const api = {
   },
 
   // ── TikTok — direct upload ───────────────────────────────────────────────
-  /** POST /api/uploads — multipart upload of a local video file. */
-  uploadVideo: async (file: File): Promise<{ job_id: string; upload_path: string; status: string }> => {
+  /** POST /api/uploads — multipart upload of a local video file, with an optional prompt (spec 014). */
+  uploadVideo: async (
+    file: File,
+    prompt?: string,
+  ): Promise<{ job_id: string; upload_path: string; status: string }> => {
     const fd = new FormData()
     fd.append('file', file)
+    if (prompt) fd.append('prompt', prompt)
     const res = await apiUpload('/api/uploads', fd)
     return res.json() as Promise<{ job_id: string; upload_path: string; status: string }>
   },

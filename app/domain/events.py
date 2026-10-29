@@ -31,6 +31,11 @@ class EventType(str, Enum):
     CLIP_RENDERED = "ClipRendered"
     THUMBNAIL_GENERATED = "ThumbnailGenerated"
     SEGMENTS_PROPOSED = "SegmentsProposed"
+    # AI scene search (spec 014): the source's scene index is being built
+    # (payload ``done``, ``total`` chunks; at most one a second), then is
+    # ready (``chunks``, ``reused``, ``seconds``).
+    SCENE_INDEX_PROGRESS = "SceneIndexProgress"
+    SCENES_INDEXED = "ScenesIndexed"
     SEGMENT_SCORED = "SegmentScored"
     UPLOAD_RECEIVED = "UploadReceived"
     SOCIAL_CONTENT_GENERATED = "SocialContentGenerated"

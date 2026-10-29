@@ -38,6 +38,22 @@ router = APIRouter(prefix="/clips", tags=["bulk-export"])
 
 _STREAM_CHUNK_BYTES = 1024 * 1024
 
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def csv_safe(value: object) -> object:
+    """A text cell a spreadsheet cannot run: one starting with ``= + - @``,
+    a tab or a carriage return gets a leading ``'`` (CSV formula injection;
+    titles and summaries come from model output and transcripts). Other
+    values are returned unchanged.
+
+    Only for this zip's manifest, which people open in a spreadsheet. The
+    job's ``manifest.csv`` (``manifest_service``) stays raw: it is machine
+    read, and its description is posted as the caption."""
+    if isinstance(value, str) and value.startswith(_FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
 
 def _build_manifest(clips: list[ClipRecord]) -> bytes:
     """The zip's ``manifest.csv``. ``broll_credits`` is the job manifest's
@@ -52,11 +68,14 @@ def _build_manifest(clips: list[ClipRecord]) -> bytes:
     ])
     for c in clips:
         w.writerow([
-            c.id, c.title or "", c.summary or "", c.start, c.end,
-            c.output_path or "", c.thumbnail_path or "",
-            c.virality_score or 0,
-            ",".join(c.hashtags or []),
-            json.dumps(broll_credits(c.broll_assets)),
+            csv_safe(cell)
+            for cell in (
+                c.id, c.title or "", c.summary or "", c.start, c.end,
+                c.output_path or "", c.thumbnail_path or "",
+                c.virality_score or 0,
+                ",".join(c.hashtags or []),
+                json.dumps(broll_credits(c.broll_assets)),
+            )
         ])
     return buf.getvalue().encode("utf-8")
 

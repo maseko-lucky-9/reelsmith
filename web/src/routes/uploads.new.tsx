@@ -11,6 +11,7 @@ import { rootRoute } from './root'
 import { api } from '@/api/client'
 import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
+import { ScenePromptField } from '@/components/scene-prompt-field'
 
 export const uploadsNewRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -32,6 +33,7 @@ function UploadNewPage() {
   const [file, setFile] = useState<File | null>(null)
   const [dragging, setDragging] = useState(false)
   const [uploading, setUploading] = useState(false)
+  const [prompt, setPrompt] = useState('')
 
   function handleFiles(files: FileList | null) {
     if (!files || files.length === 0) return
@@ -62,7 +64,7 @@ function UploadNewPage() {
     if (!file) return
     setUploading(true)
     try {
-      const res = await api.uploadVideo(file)
+      const res = await api.uploadVideo(file, prompt.trim() || undefined)
       toast.success('Upload queued — watching progress…')
       void navigate({ to: '/jobs/$jobId', params: { jobId: res.job_id } })
     } catch (err: unknown) {
@@ -133,6 +135,8 @@ function UploadNewPage() {
             onChange={(e) => handleFiles(e.target.files)}
           />
         </div>
+
+        <ScenePromptField id="upload-prompt" value={prompt} onChange={setPrompt} />
 
         <Button
           className="w-full"
