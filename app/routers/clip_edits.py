@@ -39,27 +39,38 @@ copy), for a clip whose sidecar path is refused, or while the clip's job is
 busy or being deleted; a failed or timed-out one answers with no words,
 never an error.
 Default caption items carry their words' timings (``words``).
+
+Timeline schema v2 (spec 016, T127; ``timeline_render_service``): a timeline
+with ``"schema_version": 2`` holds video segments in source seconds, captions
+with words, text overlays, voice-over ``audio`` items, ``caption_style`` and
+``mute_source``. ``PUT`` validates every timeline (v1 or v2) before storing it
+and answers 422 with the reason; a v1 timeline is stored as sent. The server
+supplies the bounds: the source video's range (its probed duration, else the
+job's recorded duration, else the clip's own window) and the clip's folder,
+the only place a voice-over ``src`` name may resolve.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ClipEdit, ClipRecord, JobRecord
 from app.db.session import get_session
-from app.services import clip_words
+from app.services import clip_words, ffmpeg_tools
 from app.services.retention import is_managed_file
 from app.services.timeline_render_service import (
     TimelineError,
     build_render_plan,
+    validate_timeline,
 )
 from app.services.transcription_service import WordTiming
 from app.settings import settings
@@ -70,16 +81,32 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/clips", tags=["clip-edits"])
 
 
-_VALID_TRACK_KINDS: set[str] = {"video", "caption", "text-overlay"}
+_VALID_TRACK_KINDS: set[str] = {"video", "caption", "text-overlay", "audio"}
+
+# Top-level timeline keys stored only when the client sent them, so a v1
+# timeline is stored exactly as sent.
+_OPTIONAL_TIMELINE_KEYS = ("schema_version", "caption_style", "mute_source")
 
 
 class TimelineTrack(BaseModel):
-    kind: Literal["video", "caption", "text-overlay"]
+    kind: Literal["video", "caption", "text-overlay", "audio"]
     items: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class TimelinePayload(BaseModel):
     tracks: list[TimelineTrack] = Field(default_factory=list)
+    # Absent: v1. Kinds, item shapes and bounds per version are checked by
+    # timeline_render_service.validate_timeline.
+    schema_version: Literal[1, 2] | None = None
+    caption_style: str | None = None
+    mute_source: StrictBool | None = None
+
+    def stored(self) -> dict[str, Any]:
+        data = self.model_dump()
+        for key in _OPTIONAL_TIMELINE_KEYS:
+            if key not in self.model_fields_set:
+                data.pop(key)
+        return data
 
 
 class ClipEditUpsert(BaseModel):
@@ -152,6 +179,44 @@ async def _clip_words(
     return words or []
 
 
+def _clip_folder(clip: ClipRecord) -> Path | None:
+    """The folder of the clip's rendered file: where voice-over files live."""
+    clip_file = _clip_file(clip)
+    return Path(clip_file).parent if clip_file else None
+
+
+def _positive(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) and number > 0 else None
+
+
+async def _source(
+    session: AsyncSession, clip: ClipRecord
+) -> tuple[str | None, tuple[float, float] | None]:
+    """The clip's source video (when on disk) and the source window a v2
+    segment must lie in: ``[0, duration]`` of the source (probed, else the
+    job's recorded duration), else the clip's own window, else unknown."""
+    job = await session.get(JobRecord, clip.job_id)
+    raw = job.video_path if job is not None else None
+    path = raw if raw and "\x00" not in raw and os.path.isabs(raw) and Path(raw).is_file() else None
+    duration: float | None = None
+    if path is not None:
+        try:
+            duration = _positive(await asyncio.to_thread(ffmpeg_tools.duration, path))
+        except Exception as exc:  # noqa: BLE001 - fall back to the recorded duration
+            log.info("clip %s: source duration probe failed (%s)", clip.id, exc)
+    if duration is None and job is not None and isinstance(job.state, dict):
+        duration = _positive(job.state.get("duration"))
+    if duration is not None:
+        return path, (0.0, duration)
+    start, end = float(clip.start or 0.0), float(clip.end or 0.0)
+    if end > start >= 0:
+        return path, (start, end)
+    return path, None
+
+
 @router.get("/{clip_id}/edit")
 async def get_clip_edit(clip_id: str, session: AsyncSession = Depends(get_session)):
     clip = await _load_clip(session, clip_id)
@@ -182,10 +247,10 @@ async def upsert_clip_edit(
     body: ClipEditUpsert,
     session: AsyncSession = Depends(get_session),
 ):
-    await _load_clip(session, clip_id)
+    clip = await _load_clip(session, clip_id)
     edit = await _load_edit(session, clip_id)
 
-    timeline_dict = body.timeline.model_dump()
+    timeline_dict = body.timeline.stored()
 
     # Defensive: discriminator validity is enforced by Pydantic, but we
     # double-check for forward compat (kind allowlist may grow before the
@@ -196,6 +261,16 @@ async def upsert_clip_edit(
                 status_code=422,
                 detail=f"unknown track kind: {track['kind']!r}",
             )
+    _, source_range = await _source(session, clip)
+    try:
+        await asyncio.to_thread(
+            validate_timeline,
+            timeline_dict,
+            source_range=source_range,
+            clip_folder=_clip_folder(clip),
+        )
+    except TimelineError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     if edit is None:
         edit = ClipEdit(clip_id=clip_id, timeline=timeline_dict, version=1)
@@ -228,8 +303,16 @@ async def get_render_plan(
     if edit is None:
         raise HTTPException(status_code=404, detail="no edit state for clip")
     base = clip.output_path or ""
+    source_path, source_range = await _source(session, clip)
     try:
-        plan = build_render_plan(edit.timeline, base)
+        plan = await asyncio.to_thread(
+            build_render_plan,
+            edit.timeline,
+            base,
+            source_path=source_path,
+            source_range=source_range,
+            clip_folder=_clip_folder(clip),
+        )
     except TimelineError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return plan.to_dict()
