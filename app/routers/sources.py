@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
-import sys
+import math
 import unicodedata
 from typing import Annotated, Any
 
@@ -23,6 +23,7 @@ from fastapi import APIRouter, HTTPException, Path, Query
 from pydantic import BaseModel
 
 from app.services import source_check
+from app.services.loop_local import LoopLocalSemaphore
 from app.services.yt_dlp_metadata import run_bounded
 from app.settings import settings
 
@@ -35,6 +36,15 @@ DEFAULT_LIMIT = 12
 MAX_LIMIT = 50
 _TITLE_MAX_CHARS = 300
 _STDERR_TAIL_CHARS = 300
+# yt-dlp searches at once; a further one is refused (429) rather than queued behind them.
+MAX_CONCURRENT_SEARCHES = 2
+_SEARCH_SLOTS = LoopLocalSemaphore(MAX_CONCURRENT_SEARCHES)
+
+# Characters a query may not contain: control, surrogate, private-use and unassigned
+# characters, line and paragraph separators, and the invisible formatting characters that
+# reorder or hide text. Zero-width joiners (U+200D, U+200C) stay: emoji sequences need them.
+_FORBIDDEN_CATEGORIES = frozenset({"Cc", "Cs", "Co", "Cn", "Zl", "Zp"})
+_FORBIDDEN_FORMAT_CHARS = frozenset("\u200b\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\ufeff")
 
 
 class YoutubeSearchItem(BaseModel):
@@ -55,11 +65,18 @@ class CleanCheckResponse(BaseModel):
     confidence: float
     reason: str
     frames_checked: int
+    # Why ``clean`` is null: stream_blocked, stream_failed, frames_failed, ollama_unavailable,
+    # reply_unusable, inconclusive, timeout or internal. Null when the check was made.
+    cause: str | None = None
+
+
+def _forbidden(ch: str) -> bool:
+    return unicodedata.category(ch) in _FORBIDDEN_CATEGORIES or ch in _FORBIDDEN_FORMAT_CHARS
 
 
 def _validated_query(q: str) -> str:
     """``q`` without surrounding blanks; 400 when it cannot be a plain search term."""
-    if any(unicodedata.category(ch).startswith("C") for ch in q):
+    if any(_forbidden(ch) for ch in q):
         raise HTTPException(status_code=400, detail="q must not contain control characters")
     term = " ".join(q.split())
     if not term:
@@ -71,6 +88,15 @@ def _validated_query(q: str) -> str:
 
 def _as_text(value: object, limit: int) -> str:
     return value[:limit] if isinstance(value, str) else ""
+
+
+def _seconds(value: object) -> int | None:
+    """``value`` as whole seconds; ``None`` unless it is a finite, non-negative number."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return int(value)
 
 
 def _item(entry: object) -> YoutubeSearchItem | None:
@@ -86,7 +112,7 @@ def _item(entry: object) -> YoutubeSearchItem | None:
         id=video_id,
         title=_as_text(entry.get("title"), _TITLE_MAX_CHARS),
         channel=_as_text(channel, _TITLE_MAX_CHARS),
-        duration_seconds=int(duration) if isinstance(duration, int | float) and duration >= 0 else None,
+        duration_seconds=_seconds(duration),
         thumbnail_url=f"https://i.ytimg.com/vi/{video_id}/mqdefault.jpg",
         url=f"https://www.youtube.com/watch?v={video_id}",
     )
@@ -98,22 +124,18 @@ async def search_youtube(
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
 ) -> YoutubeSearchResponse:
     term = _validated_query(q)
-    argv = [
-        sys.executable,
-        "-m",
-        "yt_dlp",
-        "--flat-playlist",
-        "--no-warnings",
-        "-J",
-        "--",
-        f"ytsearch{limit}:{term}",
-    ]
-    try:
-        returncode, stdout, stderr = await run_bounded(argv, timeout=settings.youtube_search_timeout_seconds)
-    except TimeoutError:
-        raise HTTPException(status_code=504, detail="YouTube search timed out") from None
+    argv = source_check.yt_dlp_argv("--flat-playlist", "--no-warnings", "-J", "--", f"ytsearch{limit}:{term}")
+    slot = _SEARCH_SLOTS.get()
+    if slot.locked():
+        raise HTTPException(status_code=429, detail="too many searches are running; try again shortly")
+    async with slot:
+        try:
+            returncode, stdout, stderr = await run_bounded(argv, timeout=settings.youtube_search_timeout_seconds)
+        except TimeoutError:
+            log.warning("youtube search timed out after %ss", settings.youtube_search_timeout_seconds)
+            raise HTTPException(status_code=504, detail="YouTube search timed out") from None
     if returncode != 0:
-        log.info(
+        log.warning(
             "youtube search failed  rc=%s  stderr=%s",
             returncode,
             stderr.decode("utf-8", "replace")[-_STDERR_TAIL_CHARS:],
@@ -143,4 +165,5 @@ async def check_youtube_clean(video_id: Annotated[str, Path()]) -> CleanCheckRes
         confidence=result.confidence,
         reason=result.reason,
         frames_checked=result.frames_checked,
+        cause=result.cause,
     )

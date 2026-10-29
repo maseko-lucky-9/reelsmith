@@ -18,6 +18,12 @@ vi.mock('@/api/client', () => ({
   },
 }))
 
+// A busy server is retried after a pause of seconds; here, of milliseconds.
+vi.mock('@/lib/youtubeSources', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/youtubeSources')>()),
+  busyRetryDelay: () => 5,
+}))
+
 import { api } from '@/api/client'
 import { youtubeSourcesRoute } from './sources.youtube'
 import { formatDuration, MAX_CONCURRENT_CHECKS } from '@/lib/youtubeSources'
@@ -69,7 +75,7 @@ describe('YouTube source search page', () => {
 
     await renderSearch([item('AAAAAAAAAAA', 'Sleep talk', { duration_seconds: 3725 })])
 
-    expect(api.searchYoutube).toHaveBeenCalledWith('ted talk', 12)
+    expect(api.searchYoutube).toHaveBeenCalledWith('ted talk', 12, expect.any(AbortSignal))
     const c = card('Sleep talk')
     expect(within(c).getByText('Channel AAAAAAAAAAA')).toBeInTheDocument()
     expect(within(c).getByText('1:02:05')).toBeInTheDocument()
@@ -122,7 +128,7 @@ describe('YouTube source search page', () => {
   })
 
   it('shows a video whose check request failed as unchecked, not hidden', async () => {
-    vi.mocked(api.checkYoutubeClean).mockImplementation(() => Promise.reject(new Error('429 busy')))
+    vi.mocked(api.checkYoutubeClean).mockImplementation(() => Promise.reject(new Error('500 boom')))
 
     await renderSearch([item('FAILED_00001', 'Failed check video')])
 
@@ -133,6 +139,8 @@ describe('YouTube source search page', () => {
     await act(async () => {})
     expect(screen.getByText('Failed check video')).toBeInTheDocument()
     expect(screen.queryByText(/hidden\)/)).toBeNull()
+    // An error that is not "busy" is an answer: it is asked once, not retried.
+    expect(api.checkYoutubeClean).toHaveBeenCalledTimes(1)
   })
 
   it('"Use this video" opens the workflow with that watch URL', async () => {
@@ -196,6 +204,150 @@ describe('YouTube source search page', () => {
 
     expect(screen.getByRole('button', { name: 'Search' })).toBeDisabled()
     expect(api.searchYoutube).not.toHaveBeenCalled()
+  })
+})
+
+describe('YouTube source search page: queue, busy server and retry', () => {
+  const ids = ['VIDEO_AAAAA', 'VIDEO_BBBBB', 'VIDEO_CCCCC', 'VIDEO_DDDDD', 'VIDEO_EEEEE']
+  const named = () => ids.map((id, i) => item(id, `Video ${'ABCDE'[i]}`))
+
+  /** Check calls that are still open, and the most there ever were at once. */
+  function trackedChecks(answer: (id: string, call: number) => Promise<SourceCleanCheck> | 'hang') {
+    const state = { open: 0, maxOpen: 0, calls: new Map<string, number>(), settle: new Map<string, () => void>() }
+    vi.mocked(api.checkYoutubeClean).mockImplementation((id) => {
+      const call = (state.calls.get(id) ?? 0) + 1
+      state.calls.set(id, call)
+      state.open += 1
+      state.maxOpen = Math.max(state.maxOpen, state.open)
+      const result = answer(id, call)
+      const release = () => {
+        state.open -= 1
+      }
+      if (result === 'hang') {
+        return new Promise<SourceCleanCheck>((resolve) => {
+          state.settle.set(id, () => {
+            release()
+            resolve(check(true))
+          })
+        })
+      }
+      return result.finally(release)
+    })
+    return state
+  }
+
+  it('a failed check frees its slot and the next video in line is checked', async () => {
+    const state = trackedChecks((id) => (id === ids[0] ? Promise.reject(new Error('500 boom')) : 'hang'))
+
+    await renderSearch(named())
+
+    await waitFor(() => expect(state.calls.has(ids[3])).toBe(true))
+    expect(state.calls.has(ids[4])).toBe(false)
+    expect(state.maxOpen).toBeLessThanOrEqual(MAX_CONCURRENT_CHECKS)
+  })
+
+  it('a busy server (429) is asked again, keeping the slot, and the answer then shows', async () => {
+    const state = trackedChecks((id, call) =>
+      id === ids[0] && call < 3 ? Promise.reject(new Error('429 too many checks')) : id === ids[0] ? Promise.resolve(check(true)) : 'hang',
+    )
+
+    await renderSearch(named())
+
+    await waitFor(() =>
+      expect(within(card('Video A')).getByTestId('clean-badge')).toHaveAttribute('data-state', 'clean'),
+    )
+    expect(state.calls.get(ids[0])).toBe(3)
+    // While A was being retried it still held its slot, so D was not started early.
+    expect(state.maxOpen).toBeLessThanOrEqual(MAX_CONCURRENT_CHECKS)
+  })
+
+  it('gives up on a server that stays busy after a few tries and shows the video as unchecked', async () => {
+    const state = trackedChecks((id) => (id === ids[0] ? Promise.reject(new Error('429 too many checks')) : 'hang'))
+
+    await renderSearch(named())
+
+    await waitFor(() =>
+      expect(within(card('Video A')).getByTestId('clean-badge')).toHaveAttribute('data-state', 'unknown'),
+    )
+    expect(state.calls.get(ids[0])).toBe(4) // the first try and 3 retries
+  })
+
+  it('a retry click shows Checking and runs the check again', async () => {
+    const state = trackedChecks((id, call) =>
+      id === ids[0] ? (call === 1 ? Promise.resolve(check(null)) : 'hang') : 'hang',
+    )
+    await renderSearch(named().slice(0, 1))
+    await waitFor(() =>
+      expect(within(card('Video A')).getByTestId('clean-badge')).toHaveAttribute('data-state', 'unknown'),
+    )
+
+    fireEvent.click(within(card('Video A')).getByTestId('clean-badge'))
+
+    await waitFor(() => expect(state.calls.get(ids[0])).toBe(2))
+    const badge = within(card('Video A')).getByTestId('clean-badge')
+    expect(badge).toHaveAttribute('data-state', 'pending')
+    expect(badge).toHaveTextContent('Checking')
+    await act(async () => state.settle.get(ids[0])!())
+    await waitFor(() =>
+      expect(within(card('Video A')).getByTestId('clean-badge')).toHaveAttribute('data-state', 'clean'),
+    )
+  })
+
+  it('a retry waits its turn behind the videos still in line, never exceeding 3 checks at once', async () => {
+    const state = trackedChecks((id, call) =>
+      id === ids[0] ? (call === 1 ? Promise.resolve(check(null)) : 'hang') : 'hang',
+    )
+    await renderSearch(named())
+    await waitFor(() => expect(state.calls.has(ids[3])).toBe(true)) // A answered, B C D are running
+
+    fireEvent.click(within(card('Video A')).getByTestId('clean-badge'))
+
+    await act(async () => {})
+    expect(within(card('Video A')).getByTestId('clean-badge')).toHaveTextContent('Waiting')
+    expect(state.calls.get(ids[0])).toBe(1)
+
+    await act(async () => state.settle.get(ids[1])!())
+    await waitFor(() => expect(state.calls.has(ids[4])).toBe(true)) // E, still in line, goes first
+    expect(state.calls.get(ids[0])).toBe(1)
+
+    await act(async () => state.settle.get(ids[2])!())
+    await waitFor(() => expect(state.calls.get(ids[0])).toBe(2)) // then the retry
+    expect(state.maxOpen).toBeLessThanOrEqual(MAX_CONCURRENT_CHECKS)
+  })
+
+  it('names the cause on the Unchecked badge instead of always blaming Ollama', async () => {
+    vi.mocked(api.checkYoutubeClean).mockImplementation(() =>
+      Promise.resolve({ ...check(null), cause: 'stream_blocked' }),
+    )
+
+    await renderSearch([item('UNKNOWN_0001', 'Blocked video')])
+
+    await waitFor(() => {
+      const title = within(card('Blocked video')).getByTestId('clean-badge').getAttribute('title') ?? ''
+      expect(title).toMatch(/YouTube refused/)
+      expect(title).not.toMatch(/Ollama/)
+    })
+  })
+
+  it('points at Ollama only when the cause is the model', async () => {
+    vi.mocked(api.checkYoutubeClean).mockImplementation(() =>
+      Promise.resolve({ ...check(null), cause: 'ollama_unavailable' }),
+    )
+
+    await renderSearch([item('UNKNOWN_0002', 'Model down video')])
+
+    await waitFor(() =>
+      expect(within(card('Model down video')).getByTestId('clean-badge').getAttribute('title')).toMatch(/Ollama/),
+    )
+  })
+
+  it('passes an AbortSignal so a request is cancelled when its card goes away', async () => {
+    vi.mocked(api.checkYoutubeClean).mockImplementation(never)
+
+    await renderSearch([item('AAAAAAAAAAA', 'First')])
+
+    await waitFor(() => expect(api.checkYoutubeClean).toHaveBeenCalled())
+    expect(vi.mocked(api.checkYoutubeClean).mock.calls[0][1]).toBeInstanceOf(AbortSignal)
   })
 })
 

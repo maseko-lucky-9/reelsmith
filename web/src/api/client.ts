@@ -158,6 +158,11 @@ export interface SourceCleanCheck {
   confidence: number
   reason: string
   frames_checked: number
+  /**
+   * Why `clean` is null: stream_blocked (YouTube refused the stream request), stream_failed,
+   * frames_failed, ollama_unavailable, reply_unusable, inconclusive, timeout or internal.
+   */
+  cause?: string | null
 }
 
 /** One AI-generated shot — a prompt plus a target duration in seconds. */
@@ -252,14 +257,14 @@ export const api = {
   },
 
   /** 400 for an unusable query, 502/504 when YouTube or yt-dlp fails. */
-  searchYoutube: (q: string, limit = 12) => {
+  searchYoutube: (q: string, limit = 12, signal?: AbortSignal) => {
     const params = new URLSearchParams({ q, limit: String(limit) })
-    return apiFetch<{ items: YoutubeSearchItem[] }>(`/api/sources/youtube/search?${params}`)
+    return apiFetch<{ items: YoutubeSearchItem[] }>(`/api/sources/youtube/search?${params}`, { signal })
   },
 
   /** Whether the video carries burned-in captions; takes seconds (a vision model looks at 4 frames). */
-  checkYoutubeClean: (videoId: string) =>
-    apiFetch<SourceCleanCheck>(`/api/sources/youtube/${encodeURIComponent(videoId)}/clean`),
+  checkYoutubeClean: (videoId: string, signal?: AbortSignal) =>
+    apiFetch<SourceCleanCheck>(`/api/sources/youtube/${encodeURIComponent(videoId)}/clean`, { signal }),
 
   listClips: (params?: { job_id?: string; min_score?: number; search?: string }) => {
     const q = new URLSearchParams()

@@ -6,8 +6,10 @@ of the bad-input cases is that nothing hostile reaches a subprocess argv.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
+from urllib.parse import quote
 
 import pytest
 from fastapi.testclient import TestClient
@@ -90,7 +92,8 @@ def test_search_maps_yt_dlp_entries_to_items(client, monkeypatch):
         ]
     }
     ((argv, timeout),) = recorder.calls
-    assert argv[:3] == [sys.executable, "-m", "yt_dlp"]
+    # An isolated interpreter and no user config, then the module and its options.
+    assert argv[:5] == [sys.executable, "-I", "-m", "yt_dlp", "--ignore-config"]
     # The term is the last argument, behind "--", prefixed so it is never a URL or an option.
     assert argv[-2:] == ["--", "ytsearch5:lex fridman"]
     assert "--flat-playlist" in argv and "-J" in argv
@@ -114,7 +117,7 @@ def test_search_passes_shell_metacharacters_as_one_inert_argument(client, monkey
 
     argv = recorder.calls[0][0]
     assert argv[-1] == "ytsearch12:cats; rm -rf / && $(id) `id` | tee x"
-    assert len(argv) == 8
+    assert len(argv) == 10
 
 
 def test_search_timeout_is_504_and_failure_is_502(client, monkeypatch):
@@ -171,6 +174,104 @@ def test_search_missing_q_is_422(client):
     assert client.get("/sources/youtube/search").status_code == 422
 
 
+def test_search_stops_at_limit_even_if_yt_dlp_returns_more(client, monkeypatch):
+    entries = [{"id": f"{i:011d}", "title": f"T{i}"} for i in range(5)]
+    _install(monkeypatch, Recorder(_flat_search(*entries)))
+
+    items = client.get("/sources/youtube/search", params={"q": "x", "limit": 2}).json()["items"]
+
+    assert [i["id"] for i in items] == ["00000000000", "00000000001"]
+
+
+def test_search_cuts_a_long_title_and_nulls_a_negative_or_missing_duration(client, monkeypatch):
+    _install(
+        monkeypatch,
+        Recorder(
+            _flat_search(
+                {"id": ID_A, "title": "t" * 1000, "channel": "c" * 1000, "duration": -5},
+                {"id": ID_B, "title": "no duration"},
+                {"id": "CCCCCCCCCCC", "title": True, "duration": True},
+            )
+        ),
+    )
+
+    items = client.get("/sources/youtube/search", params={"q": "x"}).json()["items"]
+
+    assert len(items[0]["title"]) == 300 and len(items[0]["channel"]) == 300
+    assert [i["duration_seconds"] for i in items] == [None, None, None]
+    assert items[2]["title"] == ""
+
+
+def test_search_with_an_infinite_duration_is_not_a_500(client, monkeypatch):
+    # json.loads reads 1e309 as infinity; int(inf) raises OverflowError.
+    _install(monkeypatch, Recorder(b'{"entries": [{"id": "%s", "title": "t", "duration": 1e309}]}' % ID_A.encode()))
+
+    response = client.get("/sources/youtube/search", params={"q": "x"})
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["duration_seconds"] is None
+
+
+def test_search_failure_is_502_even_when_stdout_holds_valid_json(client, monkeypatch):
+    _install(monkeypatch, Recorder(_flat_search({"id": ID_A, "title": "t"}), returncode=1))
+
+    assert client.get("/sources/youtube/search", params={"q": "x"}).status_code == 502
+
+
+def test_search_keeps_an_emoji_sequence_with_its_zero_width_joiner(client, monkeypatch):
+    recorder = _install(monkeypatch, Recorder(_flat_search()))
+    family = "\U0001f468\u200d\U0001f469\u200d\U0001f467 vlog"
+
+    response = client.get("/sources/youtube/search", params={"q": family})
+
+    assert response.status_code == 200
+    assert recorder.calls[0][0][-1] == f"ytsearch12:{family}"
+
+
+@pytest.mark.parametrize(
+    "q",
+    ["a\u202eb", "a\u200bb", "a\ufeffb", "a\u2028b", "a\u2029b", "a\ue000b", "a\x85b", "a\x7fb"],
+)
+def test_search_refuses_invisible_reordering_and_separator_characters(client, monkeypatch, q):
+    recorder = _install(monkeypatch, Recorder(_flat_search()))
+
+    assert client.get("/sources/youtube/search", params={"q": q}).status_code == 400
+    assert recorder.calls == []
+
+
+def test_a_third_search_at_once_is_refused_with_429_not_queued(client, monkeypatch):
+    started = asyncio.Event()
+    release = asyncio.Event()
+    running = 0
+
+    async def slow(argv, *, timeout):
+        nonlocal running
+        running += 1
+        started.set()
+        await release.wait()
+        return 0, _flat_search(), b""
+
+    async def scenario() -> list[int]:
+        monkeypatch.setattr(sources, "run_bounded", slow)
+        import httpx
+
+        transport = httpx.ASGITransport(app=create_app())
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as http:
+            first = asyncio.create_task(http.get("/sources/youtube/search", params={"q": "a"}))
+            second = asyncio.create_task(http.get("/sources/youtube/search", params={"q": "b"}))
+            while running < 2:
+                await asyncio.sleep(0.01)
+            try:
+                # Refused at once; a limit that queued it instead would stall here.
+                refused = await asyncio.wait_for(http.get("/sources/youtube/search", params={"q": "c"}), 3)
+            finally:
+                release.set()
+            done = await asyncio.gather(first, second)
+            return [refused.status_code, *(r.status_code for r in done)]
+
+    assert asyncio.run(scenario()) == [429, 200, 200]
+
+
 # ── clean ─────────────────────────────────────────────────────────────────────
 
 
@@ -190,7 +291,13 @@ def test_clean_returns_the_check(client, check_calls):
     response = client.get(f"/sources/youtube/{ID_A}/clean")
 
     assert response.status_code == 200
-    assert response.json() == {"clean": True, "confidence": 0.9, "reason": "no captions", "frames_checked": 4}
+    assert response.json() == {
+        "clean": True,
+        "confidence": 0.9,
+        "reason": "no captions",
+        "frames_checked": 4,
+        "cause": None,
+    }
     assert check_calls == [ID_A]
 
 
@@ -218,6 +325,36 @@ def test_the_id_pattern_refuses_a_trailing_newline():
     assert source_check.VIDEO_ID_RE.fullmatch("abcdefghijk") is not None
 
 
+# Eleven characters each, so a length check alone lets them through.
+HOSTILE_ELEVEN = [
+    "abcdefghi;k",
+    "abcd&t=1s_x",
+    "abc/../x/yz",
+    "abcdefghij%",
+    "abcdefghijé",
+    "abcdefghi k",
+    "abcdefghi.k",
+]
+
+
+@pytest.mark.parametrize("video_id", HOSTILE_ELEVEN)
+def test_clean_refuses_an_eleven_character_id_outside_the_id_alphabet(client, check_calls, monkeypatch, video_id):
+    ran: list[list[str]] = []
+
+    async def spy(argv, *, timeout):
+        ran.append(list(argv))
+        return 1, b"", b""
+
+    monkeypatch.setattr(source_check, "run_bounded", spy)
+    assert len(video_id) == 11
+
+    response = client.get(f"/sources/youtube/{quote(video_id, safe='')}/clean")
+
+    assert response.status_code == 400
+    assert check_calls == []
+    assert ran == []
+
+
 def test_clean_accepts_ids_with_dash_and_underscore(client, check_calls):
     assert client.get("/sources/youtube/-_-_-_-_-_-/clean").status_code == 200
     assert check_calls == ["-_-_-_-_-_-"]
@@ -234,11 +371,17 @@ def test_clean_answers_429_when_too_many_checks_run(client, monkeypatch):
 
 def test_clean_unavailable_is_a_200_with_null(client, monkeypatch):
     async def unavailable(video_id: str, **_kwargs):
-        return source_check.UNAVAILABLE
+        return source_check.unavailable("stream_blocked")
 
     monkeypatch.setattr(source_check, "check_clean", unavailable)
 
     response = client.get(f"/sources/youtube/{ID_A}/clean")
 
     assert response.status_code == 200
-    assert response.json() == {"clean": None, "confidence": 0.0, "reason": "check unavailable", "frames_checked": 0}
+    assert response.json() == {
+        "clean": None,
+        "confidence": 0.0,
+        "reason": "check unavailable",
+        "frames_checked": 0,
+        "cause": "stream_blocked",
+    }

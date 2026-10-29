@@ -39,7 +39,11 @@ def _ollama_has_the_model() -> bool:
     return any(m.get("name") == settings.source_check_model for m in tags.get("models", []))
 
 
-requires_model = pytest.mark.skipif(not _ollama_has_the_model(), reason="Ollama or the vision model is not available")
+@pytest.fixture
+def requires_model() -> None:
+    """Skip, at run time (collection makes no network call), unless Ollama has the vision model."""
+    if not _ollama_has_the_model():
+        pytest.skip("Ollama or the vision model is not available")
 
 
 def _frame(text: str | None) -> bytes:
@@ -60,8 +64,7 @@ def _frame(text: str | None) -> bytes:
     return buffer.getvalue()
 
 
-@requires_model
-async def test_the_real_model_tells_a_burned_in_subtitle_from_a_plain_picture():
+async def test_the_real_model_tells_a_burned_in_subtitle_from_a_plain_picture(requires_model):
     async with httpx.AsyncClient(timeout=120) as client:
         plain = await source_check.judge_frame(client, _frame(None))
         subtitled = await source_check.judge_frame(client, _frame("and they are standing around your bed"))
@@ -79,8 +82,7 @@ async def _stream_or_skip(video_id: str) -> None:
         raise
 
 
-@requires_model
-async def test_a_real_video_with_burned_in_captions_is_not_clean():
+async def test_a_real_video_with_burned_in_captions_is_not_clean(requires_model):
     await _stream_or_skip(CAPTIONED_VIDEO)
     source_check.clear_cache()
 
@@ -90,8 +92,7 @@ async def test_a_real_video_with_burned_in_captions_is_not_clean():
     assert result.frames_checked >= 2
 
 
-@requires_model
-async def test_a_real_talk_without_captions_is_clean():
+async def test_a_real_talk_without_captions_is_clean(requires_model):
     await _stream_or_skip(CLEAN_VIDEO)
     source_check.clear_cache()
 

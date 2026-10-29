@@ -1,5 +1,5 @@
 import { createRoute, useNavigate } from '@tanstack/react-router'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useState } from 'react'
 import { Captions, Check, CircleHelp, Loader2, Search } from 'lucide-react'
 import { rootRoute } from './root'
@@ -7,7 +7,14 @@ import { api } from '@/api/client'
 import type { SourceCleanCheck, YoutubeSearchItem } from '@/api/client'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
-import { MAX_CONCURRENT_CHECKS, formatDuration } from '@/lib/youtubeSources'
+import {
+  MAX_BUSY_RETRIES,
+  MAX_CONCURRENT_CHECKS,
+  busyRetryDelay,
+  formatDuration,
+  isBusyError,
+  unavailableHint,
+} from '@/lib/youtubeSources'
 
 export const youtubeSourcesRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -27,18 +34,27 @@ function YoutubeSourcesPage() {
   const [settledIds, setSettledIds] = useState<ReadonlySet<string>>(new Set())
   // Videos the user found to have captions, reported by their cards.
   const [captionedIds, setCaptionedIds] = useState<ReadonlySet<string>>(new Set())
+  // Videos whose check the user asked to run again, oldest request first: they queue behind the rest.
+  const [retryOrder, setRetryOrder] = useState<readonly string[]>([])
 
   const search = useQuery({
     queryKey: ['youtube-search', submitted],
-    queryFn: () => api.searchYoutube(submitted, RESULT_LIMIT),
+    queryFn: ({ signal }) => api.searchYoutube(submitted, RESULT_LIMIT, signal),
     enabled: submitted !== '',
     staleTime: 5 * 60_000,
     retry: false,
+    refetchOnWindowFocus: false,
   })
+  const queryClient = useQueryClient()
 
   const items = search.data?.items ?? []
+  // The queue: results in order, videos the user asked to retry after all of them, in click order.
+  const queue = [
+    ...items.filter((i) => !retryOrder.includes(i.id)),
+    ...retryOrder.flatMap((id) => items.filter((i) => i.id === id)),
+  ]
   // The first MAX_CONCURRENT_CHECKS videos still without an answer may run their check.
-  const admitted = new Set(items.filter((i) => !settledIds.has(i.id)).slice(0, MAX_CONCURRENT_CHECKS).map((i) => i.id))
+  const admitted = new Set(queue.filter((i) => !settledIds.has(i.id)).slice(0, MAX_CONCURRENT_CHECKS).map((i) => i.id))
   const hidden = hideCaptioned ? items.filter((i) => captionedIds.has(i.id)) : []
   const shown = items.filter((i) => !hidden.includes(i))
 
@@ -52,6 +68,22 @@ function YoutubeSourcesPage() {
       return next
     })
   }, [])
+
+  // A retry goes through the same queue as a first check: the video leaves the settled set and
+  // joins the end of the queue, its query starts over, and it runs once it is among the first
+  // MAX_CONCURRENT_CHECKS without an answer.
+  const retryCheck = useCallback(
+    (id: string) => {
+      setRetryOrder((prev) => [...prev.filter((x) => x !== id), id])
+      setSettledIds((prev) => {
+        const next = new Set(prev)
+        next.delete(id)
+        return next
+      })
+      void queryClient.resetQueries({ queryKey: ['youtube-clean', id] })
+    },
+    [queryClient],
+  )
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -132,6 +164,7 @@ function YoutubeSourcesPage() {
                 admitted={admitted.has(item.id)}
                 hidden={hidden.includes(item)}
                 onSettled={markSettled}
+                onRetry={() => retryCheck(item.id)}
                 onUse={() => void navigate({ to: '/workflow', search: { url: item.url } })}
               />
             ))}
@@ -147,22 +180,28 @@ function SourceCard({
   admitted,
   hidden,
   onSettled,
+  onRetry,
   onUse,
 }: {
   item: YoutubeSearchItem
   admitted: boolean
   hidden: boolean
   onSettled: (id: string, captioned: boolean) => void
+  onRetry: () => void
   onUse: () => void
 }) {
   const check = useQuery<SourceCleanCheck>({
     queryKey: ['youtube-clean', item.id],
-    queryFn: () => api.checkYoutubeClean(item.id),
+    // The signal cancels the request when the card goes away (a new search, leaving the page).
+    queryFn: ({ signal }) => api.checkYoutubeClean(item.id, signal),
     enabled: admitted,
     // One answer per video for the session: no polling, no refetch on focus.
     staleTime: Infinity,
     gcTime: 60 * 60_000,
-    retry: false,
+    // Only "the server is busy" (429) is tried again, a few times, with a growing pause; the video
+    // keeps its slot meanwhile. Anything else is an answer: unchecked.
+    retry: (failureCount, error) => isBusyError(error) && failureCount < MAX_BUSY_RETRIES,
+    retryDelay: (attempt) => busyRetryDelay(attempt),
     refetchOnWindowFocus: false,
   })
   const settled = check.isSuccess || check.isError
@@ -187,7 +226,7 @@ function SourceCard({
           {formatDuration(item.duration_seconds)}
         </span>
         <div className="absolute top-2 left-2">
-          <CleanBadge check={check.data} pending={!settled} waiting={!admitted} onRetry={() => void check.refetch()} />
+          <CleanBadge check={check.data} pending={!settled} waiting={!admitted} onRetry={onRetry} />
         </div>
       </div>
       <div className="p-3 flex flex-col gap-2 flex-1">
@@ -260,7 +299,7 @@ function CleanBadge({
       className={`${base} bg-black/70 text-zinc-300 hover:text-white`}
       data-testid="clean-badge"
       data-state="unknown"
-      title="The check could not be made (is Ollama running with the vision model?). Click to retry."
+      title={`${unavailableHint(check?.cause)} Click to retry.`}
     >
       <CircleHelp className="w-3 h-3" />
       Unchecked

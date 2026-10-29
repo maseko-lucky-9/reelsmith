@@ -12,7 +12,18 @@ data. The id is validated by the caller before it reaches a subprocess argv,
 and no title is ever put into the model prompt. A check that cannot be made
 (Ollama down, no stream, no frames, out of time) is ``CleanCheck`` with
 ``clean=None``: the caller shows "unknown", never an error. Only definite
-answers are cached.
+answers are cached, for ``CACHE_TTL_SECONDS``.
+
+Resource use (the server shares one process with the job pipeline):
+
+* yt-dlp and ffmpeg run as killable child processes (``run_bounded``), never on
+  the default thread pool the pipeline's ``asyncio.to_thread`` calls share.
+* At most ``MAX_CONCURRENT_GRABS`` ffmpeg children run at once across all checks.
+* Ollama serves one request at a time, so ``_OLLAMA_SLOT`` lets one check talk to
+  it at a time. The ``source_check_timeout_seconds`` budget covers a check's own
+  work (stream, frames) and, separately, its time with the model; time queued
+  behind another check is not counted. The queue is at most
+  ``MAX_CONCURRENT_CHECKS - 1`` checks long, so the total stays bounded.
 """
 
 from __future__ import annotations
@@ -25,6 +36,7 @@ import math
 import re
 import sys
 import tempfile
+import time
 from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -34,6 +46,7 @@ from typing import Any
 import httpx
 
 from app.services import ffmpeg_tools
+from app.services.loop_local import LoopLocalSemaphore
 from app.services.yt_dlp_metadata import run_bounded
 from app.settings import settings
 
@@ -53,11 +66,28 @@ MIN_FRAMES_JUDGED = 2
 # Checks running at once; a further one is refused (``CheckBusyError``).
 MAX_CONCURRENT_CHECKS = 4
 CACHE_SIZE = 256
+CACHE_TTL_SECONDS = 24 * 3600.0
+# ffmpeg children running at once, across all checks.
+MAX_CONCURRENT_GRABS = 2
 
 _YT_DLP_TIMEOUT_SECONDS = 30.0
 _FFMPEG_FRAME_TIMEOUT_SECONDS = 30.0
 _REASON_CHARS = 200
 UNAVAILABLE_REASON = "check unavailable"
+
+# Why a check was unavailable: a short machine-readable code next to the generic reason.
+CAUSE_STREAM_BLOCKED = "stream_blocked"  # YouTube refused the stream request (bot check, HTTP 429)
+CAUSE_STREAM_FAILED = "stream_failed"  # yt-dlp failed or named no usable stream
+CAUSE_FRAMES_FAILED = "frames_failed"  # fewer than MIN_FRAMES_JUDGED frames could be read
+CAUSE_OLLAMA_UNAVAILABLE = "ollama_unavailable"  # Ollama down, refused, or the model is missing
+CAUSE_REPLY_UNUSABLE = "reply_unusable"  # too few replies were the schema
+CAUSE_INCONCLUSIVE = "inconclusive"  # two frames judged and they disagree
+CAUSE_TIMEOUT = "timeout"
+CAUSE_INTERNAL = "internal"
+
+_GRAB_SLOTS = LoopLocalSemaphore(MAX_CONCURRENT_GRABS)
+_OLLAMA_SLOT = LoopLocalSemaphore(1)
+_now = time.monotonic
 
 _PROMPT = (
     "You look at one frame of a video and decide whether subtitles are burned into the picture.\n"
@@ -89,15 +119,18 @@ _SCHEMA: dict[str, Any] = {
 
 @dataclass(frozen=True, slots=True)
 class CleanCheck:
-    """The answer: ``clean`` is ``None`` when the check could not be made."""
+    """The answer: ``clean`` is ``None`` when the check could not be made, and ``cause`` says why."""
 
     clean: bool | None
     confidence: float
     reason: str
     frames_checked: int
+    cause: str | None = None
 
 
-UNAVAILABLE = CleanCheck(clean=None, confidence=0.0, reason=UNAVAILABLE_REASON, frames_checked=0)
+def unavailable(cause: str) -> CleanCheck:
+    """The answer of a check that could not be made."""
+    return CleanCheck(clean=None, confidence=0.0, reason=UNAVAILABLE_REASON, frames_checked=0, cause=cause)
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,12 +145,16 @@ class CheckBusyError(RuntimeError):
 
 
 class CheckUnavailableError(RuntimeError):
-    """A step of the check could not be done; the message says which."""
+    """A step of the check could not be done; the message says which, ``cause`` is its code."""
+
+    def __init__(self, message: str, cause: str = CAUSE_INTERNAL) -> None:
+        super().__init__(message)
+        self.cause = cause
 
 
 # ── Cache ─────────────────────────────────────────────────────────────────────
 
-_cache: OrderedDict[str, CleanCheck] = OrderedDict()
+_cache: OrderedDict[str, tuple[float, CleanCheck]] = OrderedDict()
 _inflight: dict[str, asyncio.Task[CleanCheck]] = {}
 
 
@@ -126,14 +163,19 @@ def clear_cache() -> None:
 
 
 def _cache_get(video_id: str) -> CleanCheck | None:
-    hit = _cache.get(video_id)
-    if hit is not None:
-        _cache.move_to_end(video_id)
-    return hit
+    entry = _cache.get(video_id)
+    if entry is None:
+        return None
+    stored_at, result = entry
+    if _now() - stored_at > CACHE_TTL_SECONDS:
+        del _cache[video_id]
+        return None
+    _cache.move_to_end(video_id)
+    return result
 
 
 def _cache_put(video_id: str, result: CleanCheck) -> None:
-    _cache[video_id] = result
+    _cache[video_id] = (_now(), result)
     _cache.move_to_end(video_id)
     while len(_cache) > CACHE_SIZE:
         _cache.popitem(last=False)
@@ -142,15 +184,23 @@ def _cache_put(video_id: str, result: CleanCheck) -> None:
 # ── Steps ─────────────────────────────────────────────────────────────────────
 
 
-async def resolve_stream(video_id: str) -> tuple[str, float]:
-    """``(stream URL, duration in seconds)`` of the <= 480p stream of ``video_id``.
+def yt_dlp_argv(*args: str) -> list[str]:
+    # -I: no PYTHON* variables, no user site, no cwd on sys.path. --ignore-config:
+    # no yt-dlp.conf of the user (or of a directory the server runs in) can add options.
+    return [sys.executable, "-I", "-m", "yt_dlp", "--ignore-config", *args]
 
-    ``video_id`` MUST already match ``VIDEO_ID_RE``: it is placed in an argv.
-    """
-    argv = [
-        sys.executable,
-        "-m",
-        "yt_dlp",
+
+def _is_blocked(stderr_text: str) -> bool:
+    lowered = stderr_text.lower()
+    return "confirm you" in lowered or "429" in lowered or "too many requests" in lowered
+
+
+async def resolve_stream(video_id: str) -> tuple[str, float]:
+    """``(stream URL, duration in seconds)`` of the <= 480p stream of ``video_id``."""
+    if not VIDEO_ID_RE.fullmatch(video_id):
+        # The id goes into an argv: refuse here too, whatever the caller checked.
+        raise ValueError("video_id is not an 11-character YouTube id")
+    argv = yt_dlp_argv(
         "--no-playlist",
         "--no-warnings",
         "-f",
@@ -161,22 +211,26 @@ async def resolve_stream(video_id: str) -> tuple[str, float]:
         "urls",
         "--",
         f"https://www.youtube.com/watch?v={video_id}",
-    ]
-    returncode, stdout, stderr = await run_bounded(argv, timeout=_YT_DLP_TIMEOUT_SECONDS)
+    )
+    try:
+        returncode, stdout, stderr = await run_bounded(argv, timeout=_YT_DLP_TIMEOUT_SECONDS)
+    except TimeoutError:
+        raise CheckUnavailableError(f"yt-dlp took longer than {_YT_DLP_TIMEOUT_SECONDS:g}s", CAUSE_TIMEOUT) from None
     if returncode != 0:
         text = stderr.decode("utf-8", errors="replace").strip()
         errors = [ln for ln in text.splitlines() if ln.startswith("ERROR")]
-        raise CheckUnavailableError(f"yt-dlp rc={returncode}: {(errors[-1] if errors else text)[:300]}")
+        cause = CAUSE_STREAM_BLOCKED if _is_blocked(text) else CAUSE_STREAM_FAILED
+        raise CheckUnavailableError(f"yt-dlp rc={returncode}: {(errors[-1] if errors else text)[:300]}", cause)
     lines = [ln.strip() for ln in stdout.decode("utf-8", errors="replace").splitlines() if ln.strip()]
     try:
         duration = float(lines[0])
     except IndexError, ValueError:
-        raise CheckUnavailableError("yt-dlp reported no duration (live stream?)") from None
+        raise CheckUnavailableError("yt-dlp reported no duration (live stream?)", CAUSE_STREAM_FAILED) from None
     if not math.isfinite(duration) or duration <= 0:
-        raise CheckUnavailableError("yt-dlp reported no duration (live stream?)")
+        raise CheckUnavailableError("yt-dlp reported no duration (live stream?)", CAUSE_STREAM_FAILED)
     url = next((ln for ln in lines[1:] if ln.startswith("https://")), None)
     if url is None:
-        raise CheckUnavailableError("yt-dlp named no https stream")
+        raise CheckUnavailableError("yt-dlp named no https stream", CAUSE_STREAM_FAILED)
     return url, duration
 
 
@@ -184,25 +238,22 @@ def frame_times(duration: float) -> list[float]:
     return [round(duration * p, 2) for p in FRAME_POSITIONS]
 
 
-def _grab_one(source: str, t: float, out: Path) -> bytes:
+async def _grab_one(source: str, t: float, out: Path) -> bytes:
     # -ss before -i: ffmpeg seeks in the container and reads only the byte
     # ranges it needs, so a remote stream is not downloaded.
     argv = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", f"{t:.2f}"]
     if source.startswith("https://"):
         argv += ["-protocol_whitelist", "https,tls,tcp,crypto"]
-    argv += [
-        "-i",
-        source,
-        "-frames:v",
-        "1",
-        "-vf",
-        f"scale={FRAME_WIDTH}:-2",
-        "-q:v",
-        "4",
-        "-y",
-        str(out),
-    ]
-    ffmpeg_tools.run(argv, timeout=_FFMPEG_FRAME_TIMEOUT_SECONDS)
+    argv += ["-i", source, "-frames:v", "1", "-vf", f"scale={FRAME_WIDTH}:-2", "-q:v", "4", "-y", str(out)]
+    # The bundled binary (ffmpeg_tools.resolve_argv), as a killable child process of the
+    # event loop: no worker thread of the shared default pool is held while it runs.
+    async with _GRAB_SLOTS.get():
+        returncode, _stdout, stderr = await run_bounded(
+            ffmpeg_tools.resolve_argv(argv), timeout=_FFMPEG_FRAME_TIMEOUT_SECONDS
+        )
+    if returncode != 0:
+        tail = stderr.decode("utf-8", errors="replace").strip()[-300:]
+        raise CheckUnavailableError(f"ffmpeg rc={returncode} at {t:.2f}s: {tail}", CAUSE_FRAMES_FAILED)
     return out.read_bytes()
 
 
@@ -213,17 +264,14 @@ async def extract_frames(source: str, duration: float) -> list[bytes]:
     out; the other frames are kept.
     """
     with tempfile.TemporaryDirectory(prefix="source_check_") as tmp:
-        jobs = [
-            ffmpeg_tools.to_thread_cancellable(_grab_one, source, t, Path(tmp) / f"f{i}.jpg")
-            for i, t in enumerate(frame_times(duration))
-        ]
+        jobs = [_grab_one(source, t, Path(tmp) / f"f{i}.jpg") for i, t in enumerate(frame_times(duration))]
         results = await asyncio.gather(*jobs, return_exceptions=True)
     frames: list[bytes] = []
     for result in results:
         if isinstance(result, asyncio.CancelledError):
             raise result
         if isinstance(result, BaseException):
-            log.info("source_check: frame grab failed: %s", result)
+            log.warning("source_check: frame grab failed: %s", result)
         elif result:
             frames.append(result)
     return frames
@@ -279,7 +327,7 @@ async def judge_frame(client: httpx.AsyncClient, jpeg: bytes) -> FrameVerdict | 
         response.raise_for_status()
         reply = response.json()
     except (httpx.HTTPError, ValueError) as error:
-        raise CheckUnavailableError(f"Ollama: {type(error).__name__}: {error}") from error
+        raise CheckUnavailableError(f"Ollama: {type(error).__name__}: {error}", CAUSE_OLLAMA_UNAVAILABLE) from error
     if not isinstance(reply, dict):
         return None
     return parse_verdict(reply.get("response"))
@@ -316,8 +364,11 @@ def decide(verdicts: Sequence[FrameVerdict]) -> CleanCheck:
     """
     judged = len(verdicts)
     if judged < MIN_FRAMES_JUDGED:
-        return UNAVAILABLE
+        return unavailable(CAUSE_REPLY_UNUSABLE)
     flagged = [v for v in verdicts if v.captions]
+    if judged == MIN_FRAMES_JUDGED and 0 < len(flagged) < judged:
+        # Two frames that disagree are no majority.
+        return unavailable(CAUSE_INCONCLUSIVE)
     clean = len(flagged) < FLAGGED_FRAMES_TO_REJECT
     agreeing = [v for v in verdicts if v.captions != clean]
     mean_confidence = sum(v.confidence for v in agreeing) / len(agreeing) if agreeing else 0.0
@@ -335,20 +386,27 @@ def decide(verdicts: Sequence[FrameVerdict]) -> CleanCheck:
 async def _check_uncached(video_id: str, transport: httpx.AsyncBaseTransport | None) -> CleanCheck:
     timeout = settings.source_check_timeout_seconds
     try:
+        # Own work: the stream URL and the frames.
         async with asyncio.timeout(timeout):
             stream_url, duration = await resolve_stream(video_id)
             frames = await extract_frames(stream_url, duration)
-            if len(frames) < MIN_FRAMES_JUDGED:
-                raise CheckUnavailableError(f"only {len(frames)} frame(s) could be read")
-            async with httpx.AsyncClient(timeout=timeout, transport=transport) as client:
-                return decide(await judge_frames(client, frames))
+        if len(frames) < MIN_FRAMES_JUDGED:
+            raise CheckUnavailableError(f"only {len(frames)} frame(s) could be read", CAUSE_FRAMES_FAILED)
+        # Ollama serves one request at a time: wait for it (bounded by the other, at most
+        # MAX_CONCURRENT_CHECKS - 1, checks), then give this check's own judging its budget.
+        async with _OLLAMA_SLOT.get():
+            async with asyncio.timeout(timeout):
+                async with httpx.AsyncClient(timeout=timeout, transport=transport) as client:
+                    return decide(await judge_frames(client, frames))
     except TimeoutError:
-        log.info("source_check %s: no answer within %ss", video_id, timeout)
+        log.warning("source_check %s: a step did not finish within the %ss budget", video_id, timeout)
+        return unavailable(CAUSE_TIMEOUT)
     except CheckUnavailableError as error:
-        log.info("source_check %s: unavailable: %s", video_id, error)
+        log.warning("source_check %s: unavailable (%s): %s", video_id, error.cause, error)
+        return unavailable(error.cause)
     except Exception:
         log.warning("source_check %s failed", video_id, exc_info=True)
-    return UNAVAILABLE
+        return unavailable(CAUSE_INTERNAL)
 
 
 async def check_clean(video_id: str, *, transport: httpx.AsyncBaseTransport | None = None) -> CleanCheck:
@@ -357,7 +415,7 @@ async def check_clean(video_id: str, *, transport: httpx.AsyncBaseTransport | No
     A definite answer is cached per id (``CACHE_SIZE`` entries, least recently
     used out first); two requests for one id share one check. Raises
     ``CheckBusyError`` when ``MAX_CONCURRENT_CHECKS`` other videos are being
-    checked. Never raises for a failed check: that is ``UNAVAILABLE``.
+    checked. Never raises for a failed check: that is an ``unavailable(cause)`` answer.
     """
     cached = _cache_get(video_id)
     if cached is not None:
