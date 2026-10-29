@@ -1,0 +1,61 @@
+# Implementation Plan: AI scene search from a prompt
+
+**Spec**: [spec.md](spec.md) | **Decision**: [ADR-013](../../docs/decisions/013-local-scene-search-models.md)
+
+## Design
+
+- **Sidecar.** `scripts/scene_index.py` (`.venv-mlx`) gains `embed-texts [--model M] -- <texts.json> <out.npy>`: a JSON list of non-empty strings in, an n x 768 float32 L2-normalised `.npy` out (temp file + rename), progress lines on stdout. Every text uses the query instruction, so the prompt and transcript sentences compare text to text. The API venv only reads `.npy`/`.json` with numpy.
+- **Killable child.** `app/services/child_process.run_streaming` runs the sidecar in its own session, hands each stdout line to a callback (progress), keeps a stderr tail, and on timeout, cancel or a callback error stops the child: SIGTERM, a 5 s grace, then SIGKILL to the whole process group, reaped through further cancels (`stop_uninterrupted`). `yt_dlp_metadata.run_bounded` is unchanged (it never needed a polite stop).
+- **Service.** `app/services/scene_search.py` (stateless, numpy): `enabled(prompt)`, `ensure_index` (reuse when `meta.json` = format, model, chunk length, source size + mtime; else index into `.scenes-<hex>` beside `scenes/`, validate, swap in; stale `.scenes-*` from a crash are removed first), `prompt_and_sentence_vectors` (one `embed-texts` call; sentence vectors cached in `scenes/sentences.json` + `sentence_embeddings.npy`), `sentences_from_words`, `search`, `shape_window`.
+- **Scoring.** `calibrate(raw, floor, match) = clip((raw - floor) / (2 (match - floor)), 0, 1)`: unrelated -> 0, a typical labelled match -> 0.5, strong matches still rank above typical ones (a clamp at the match level tied many moments at 100 in the first sweep). Per chunk `max(visual, speech)`; hits at >= 0.35 merge; windows per FR-006; each candidate carries `focus` (its best chunk and hit neighbours, at most 3 chunks) and `focus_text` (what is said there).
+- **Judge.** `segment_rerank.judge_scenes`: sequential calls, budget and cap from settings; frames of `focus` (PyAV `grab_frame`, 512 px JPEG) for a visual-led candidate, the `focus_text` as a text-only prompt for a speech-led one; `JudgeUnavailable` (connect, HTTP, timeout) stops judging, an unusable reply skips one candidate. Measured instruction text kept; the query moved into a `<query>` data block.
+- **Orchestrator.** `_scene_chapters` runs `_index_scenes` and `_transcribe_source` side by side in a `TaskGroup` (each returns None on failure, so only cancellation crosses it), embeds, searches, judges, then `select_discovered` + `segments_to_chapters`. `_run_job` calls it before the chapter/discovery branch when `segment_proposer` is on and `scene_search.enabled(prompt)`; None or `[]` falls through to today's path, and a failed index hands its words to `_discover_segments(words=...)`. `_reprompt_job` calls it with the job folder (`destination_folder`, else the clips folder's parent) and the sidecar words; `[]` fails the reprompt. `reprompt_unavailable_reason(prompt)` is None when scene search takes the prompt; the router passes the resolved prompt.
+- **Storage.** No migration: title and summary are existing columns; `reason` and `emotion` ride in `score_breakdown` (JSON, both engines), next to the numeric `visual`, `speech`, `judge`. `<job folder>/scenes/` goes with the job folder on delete (spec 013 walk; test added).
+- **Web.** `SceneIndexProgress` and `ScenesIndexed` join `NON_STAGE_EVENT_TYPES`; `sceneIndexProgress(events)` feeds the progress bar label/percent, the active chapters row and a status line during a reprompt. `ScenePromptField` on `/jobs/new` and `/uploads/new` (`api.uploadVideo(file, prompt)`), `SceneMatch` (emotion chip + reason) on `ClipCard` and `ClipListRow`, help text on the reprompt form.
+- **Tests.** Offline: fixture vectors (`tests/unit/test_scene_search.py`), injected Ollama transport (`test_scene_judge.py`), a fake sidecar with the real CLI's argv and files (`tests/fixtures/fake_scene_index.py`) for the index, cache, cancel and orchestrator tests, real child processes for `child_process`. Opt-in: `tests/integration/test_scene_search_real.py` (real model, generated two-scene clip, no database).
+
+## Calibration (T098)
+
+Measured on the ADR-013 labelled set: the six sources indexed with the 8-bit model (101 chunks), transcribed with faster-whisper base (the Tesla clip has no audio: 141 sentences from five sources), prompts and sentences embedded with `embed-texts`. Raw cosines, percentiles 10 / 25 / 50 / 75 / 90:
+
+| Side | Inside the label | Outside |
+|---|---|---|
+| Visual, all prompts | 0.144 / 0.171 / **0.268** / 0.301 / 0.347 (n=64) | 0.057 / 0.086 / **0.126** / 0.164 / 0.202 (n=705) |
+| Visual, visual prompts | 0.193 / 0.249 / 0.294 / 0.312 / 0.357 (n=37) | 0.064 / 0.091 / 0.126 / 0.163 / 0.205 (n=404) |
+| Speech, speech prompts | 0.423 / 0.506 / **0.581** / 0.781 / 0.893 (n=20) | 0.275 / 0.374 / **0.451** / 0.521 / 0.581 (n=266) |
+| Speech side of visual/emotion prompts | 0.272 / 0.308 / 0.345 / 0.413 / 0.506 (n=58) | 0.222 / 0.264 / 0.316 / 0.377 / 0.433 (n=695) |
+
+So text-to-text cosines run about 0.3 above text-to-video ones: the sides need their own scale. Floors and matches are the bold medians (0.13 / 0.27 visual, 0.45 / 0.58 speech). A moment counts as found when its window overlaps a label by `min(2 s, half the span)` (clip range 8-60 s):
+
+| Hit threshold | 0.20 | 0.25 | 0.30 | **0.35** | 0.40 | 0.50 |
+|---|---|---|---|---|---|---|
+| Top-1 / top-3 found (34 prompts) | 0.91 / 0.94 | 0.91 / 0.94 | 0.91 / 0.94 | **0.88 / 0.91** | 0.88 / 0.91 | 0.88 / 0.94 |
+
+At 0.35 by category: visual 0.95 / 0.95 (n=20), speech 0.89 / 1.00 (n=9), emotion 0.60 / 0.60 (n=5). With the speech side switched off, speech prompts fall to 0.56 / 0.67, so the transcript side is what answers "where does he say X". 0.35 (sentrysearch's MLX start value) is kept: the curve is flat around it and the constants were not tuned on held-out data. Chunk-to-chunk cosine inside one source has a median of 0.71-0.89 (0.99 at p90 on a static prayer clip), so `DEDUPE_COSINE` is 0.95 and applies to visual moments only (a talking head would dedupe every spoken moment).
+
+## End-to-end with the real models (T106)
+
+`orchestrator._scene_chapters` on a copy of the satellite talk (372 s, 720x960, 47 chunks; part of the labelled set, the prompts below are new), qwen2.5vl:7b, clip range 20-60 s, M5 Pro 24 GB:
+
+| Step | Time |
+|---|---|
+| Index alone (`scene_index.py index`, nothing else running) | 29.2 s wall: 2.4 s load + 24.7 s embedding = 3.99 s per source minute; peak RSS 0.62 GB, MLX peak 3.79 GB |
+| Index in the pipeline, beside whisper (18.6 s, 1193 words) | 47.0 s |
+| Index while the full pytest suite also ran | 112.4 s |
+| Prompt + 77 sentences, one `embed-texts` call | about 12 s (model load included) |
+| Judge, vision call (4 frames) | 9.3-10.7 s each (one 1.4 s); 13-25 s while other jobs ran |
+| Judge, text call (speech-led) | 1.0-2.4 s each |
+| Search with the index reused | 8.9-75 s, almost all judge time |
+
+| Prompt | Kept | Judge | Looked at the frames |
+|---|---|---|---|
+| visual: "a row of large white satellite dishes at dusk" | 262.6-290.4 s | match 0.90: "a row of large white satellite dishes at dusk" | Right: dishes at dusk 273-287 s, the row at 284 s; the first ~8 s are a tablet close-up |
+| speech: "they decoded a stranger's voice phone call on the cellular network" | 196.8-251.5 s, "Decoding a Stranger's Voice Call", emotion excitement | match 0.90 (text) | Right: the sentence is at 220.1-225.1 s; the clip is wide (sentence snapping up to 60 s) |
+| emotion: "a person who looks excited and happy" | nothing (2 candidates, both rejected at 0.50) | | Miss: the candidates show the professor talking calmly; the laughing woman at 210-219 s was not a candidate. A job would fall back to its chapters |
+| extra: "a woman laughing" | 176.8-201.7 s, emotion happy | match 0.90: "smiling and appears to be laughing" | Partial: a woman smiles at 185-190 s; the clearly laughing woman at 210-219 s was missed |
+
+Two changes came out of this run. First version: 0 of 3 found, because the judge saw 4 frames spread over a 25-55 s clip window and missed the shot; it now looks at the matched span (`focus`). Second: the vision judge rejected the speech moment (confidence 0.18: frames of a talking head cannot show a phone call), so speech-led candidates are judged on their transcript.
+
+## Verification
+
+`pytest` (offline), `ruff check app tests scripts`, `pytest -m integration tests/integration/test_scene_search_real.py` (no database), `cd web && pnpm test && pnpm build`; every new test mutation-checked (38 mutations, all red: 30 backend, 8 frontend).

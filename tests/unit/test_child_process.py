@@ -6,6 +6,7 @@ import asyncio
 import os
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -85,7 +86,7 @@ async def test_a_child_ignoring_sigterm_and_its_grandchild_are_killed_after_the_
         from pathlib import Path
         out = Path(sys.argv[1])
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        grand = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        grand = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
         (out / "pids").write_text(f"{os.getpid()} {grand.pid}")
         time.sleep(60)
         """,
@@ -95,9 +96,12 @@ async def test_a_child_ignoring_sigterm_and_its_grandchild_are_killed_after_the_
     )
     await _wait_for(tmp_path / "pids")
     child, grandchild = (int(p) for p in (tmp_path / "pids").read_text().split())
+    started = time.monotonic()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+    # A grandchild that kept the pipes open would hold the cancel until it ended.
+    assert time.monotonic() - started < 10
     assert not _alive(child)
     for _ in range(100):  # the grandchild is reaped by init, not by us
         if not _alive(grandchild):
