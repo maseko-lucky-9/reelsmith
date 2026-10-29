@@ -54,3 +54,13 @@ Always run `pytest` after code changes before committing.
 - New work: `/speckit-specify` → `/speckit-plan` → `/speckit-tasks` → `/speckit-implement`, one `specs/NNN-<slug>/` per feature.
 - Open tasks live in each `specs/*/tasks.md`; `tasks/todo.md` indexes them and holds the finished history. `specs/README.md` indexes the specs and the roadmap stubs (002-007). Decisions: `docs/decisions/` (ADR-001…008).
 - Opt-in stages (defaults off): clip discovery and reprompt (`YTVIDEO_SEGMENT_PROVIDER=local_heuristic`), a local-LLM re-rank of the discovered clips (`YTVIDEO_SEGMENT_RERANK_PROVIDER=ollama`), face-tracked reframe (`YTVIDEO_REFRAME_PROVIDER=face_track`), B-roll (`YTVIDEO_BROLL_PROVIDER=local|pexels`).
+
+## Ship profile
+
+```yaml
+base: main
+test: pytest -q
+deploy: none
+url: []
+# shape (detected 2026-10-29: GitHub · PR CI: github-hosted · deploys: none)
+```
