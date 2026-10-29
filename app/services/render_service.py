@@ -74,17 +74,52 @@ overlaid on the composite BEFORE the captions, so captions stay on top::
   frame's timestamp (the inserts never drive output frames), so the settb
   grid, frame count and duration are those of the render without B-roll.
   Insert audio is never mapped (only ``-map 0:a:0?``).
+
+Edited timeline (``plan``, spec 016): the editor's render plan in the SAME
+single pass. The source is read once over the span of its segments, each
+segment is cut out with trim/atrim and the pieces are concatenated::
+
+    -ss S0 -t SPAN -i SRC   -i bg.png   [-f concat ... captions]
+    [-i overlay_N.png ...]  [-i voiceover_N ...]
+
+    [0:v] split=N [sv0][sv1]...       (N > 1)
+    [sv0] trim=start=A:end=B, setpts=PTS-STARTPTS, INSET0   [g0]
+    [0:a] asplit=N ... atrim=start=A:end=B, asetpts=...     [h0]
+    [g0][h0][g1][h1] concat=n=N:v=1:a=1                     [in][sa]
+    [bg][in] overlay ... [b] -> captions [c] -> overlays [oK] -> even crop [v]
+
+    [k:a] atrim=end=LEN, asetpts, volume=GAIN, adelay=MS:all=1  [voK]
+    [sa] apad=whole_dur=T, volume='if(between(t,..)+..,DUCK,1)' [base]
+    [base][vo0]... amix=inputs=..:duration=first:normalize=0    [a]
+
+* Segments must be in source order and must not overlap: the source is
+  read forward once, so a branch never buffers frames for a later segment.
+* The concat output is the inset; the background grid, nearest sync, even
+  crop and encoder are the single-window graph's. ``-t`` is the sum of the
+  segment lengths.
+* Captions are the plan's (per-word timings), drawn as PNGs by
+  ``create_subtitle_image`` in the ``caption_style`` preset's colours and
+  size: never a second ``ass=`` pass. Text overlays are PIL-drawn PNG inputs
+  gated with ``enable='between(t,S,E)'``; no client text enters the graph.
+* Voice-overs start at their reel time (``adelay``), the source is ducked to
+  ``VOICEOVER_DUCK_VOLUME`` while one plays and dropped when ``mute_source``
+  (a silent base then keeps the audio track). A source without audio and no
+  voice-over gives a reel without audio, as the single-window path does.
+* The crop track's t=0 is ``render_clip``'s ``start``; each segment's pan
+  expression is that track re-based to the segment (``segment_crop_track``).
 """
 
 import logging
 import math
 import os
+from bisect import bisect_left, bisect_right
 import tempfile
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pysrt
 from PIL import Image
@@ -92,7 +127,19 @@ from webvtt import WebVTT
 
 import app.logging_config  # noqa: F401
 from app.services import caption_track, clip_service, ffmpeg_tools
+from app.services.subtitle_image_service import (
+    CaptionStyle,
+    caption_style_for_preset,
+    create_text_overlay_image,
+)
 from app.settings import settings
+
+if TYPE_CHECKING:  # pragma: no cover - import only for typing
+    from app.services.timeline_render_service import (
+        CaptionItem,
+        RenderPlan,
+        TextOverlayItem,
+    )
 
 log = logging.getLogger(__name__)
 
@@ -522,6 +569,402 @@ def build_trim_argv(
     ]  # fmt: skip
 
 
+# ── Edited timeline (plan) render ─────────────────────────────────────────────
+
+VOICEOVER_DUCK_VOLUME = 0.25
+"""Source audio level (about -12 dB) while a voice-over plays."""
+_SILENCE = "anullsrc=r=48000:cl=stereo"
+_SEGMENT_TOLERANCE = 1e-3
+"""Float slack for segments touching each other or the render window."""
+
+
+@dataclass(frozen=True)
+class SourceWindow:
+    """``[start, end)`` of the source video, in source seconds."""
+
+    start: float
+    end: float
+
+    @property
+    def length(self) -> float:
+        return self.end - self.start
+
+
+@dataclass(frozen=True)
+class OverlayImage:
+    """A server-drawn PNG at ``(x, y)`` on the canvas over ``[start, end]``
+    (seconds on the edited reel's clock)."""
+
+    path: str
+    x: int
+    y: int
+    start: float
+    end: float
+
+
+@dataclass(frozen=True)
+class VoiceOver:
+    """An audio file played from ``start`` (reel seconds) for at most
+    ``end - start`` seconds, scaled by ``gain``."""
+
+    path: str
+    start: float
+    end: float
+    gain: float = 1.0
+
+
+def _same_path(a: str, b: str) -> bool:
+    if "\x00" in a or "\x00" in b:
+        return False
+    return os.path.realpath(a) == os.path.realpath(b)
+
+
+def plan_segments(
+    plan: "RenderPlan", video_path: str, span: tuple[float, float] | None = None
+) -> list[SourceWindow]:
+    """The source windows a plan plays, in order, read from ``video_path``.
+
+    v2: the plan's segments; a plan whose ``source_path`` is another file is
+    refused. v1: each video item reads ``[trim_start, trim_start + length)``
+    of its ``src``, in reel order (placement gaps close up). A v1 ``src`` is
+    a client string, so it is never rendered as given: it must be
+    ``video_path`` itself (the job's own source), otherwise ``ValueError``.
+
+    Windows must be non-empty, in source order and not overlap; with
+    ``span`` every window must also lie inside it. Raises ``ValueError``.
+    """
+    if plan.schema_version >= 2:
+        if plan.source_path not in (None, "main") and not _same_path(plan.source_path, video_path):
+            raise ValueError("the plan reads a different source video than the one being rendered")
+        windows = [SourceWindow(seg.start, seg.end) for seg in plan.segments]
+    else:
+        windows = []
+        for item in sorted(plan.video, key=lambda v: v.start):
+            if not _same_path(item.src, video_path):
+                raise ValueError(
+                    f"video item src {item.src!r:.80} is not this job's source video; refusing to render it"
+                )
+            windows.append(SourceWindow(item.trim_start, item.trim_start + (item.end - item.start)))
+    if not windows:
+        raise ValueError("the plan has no video segment to render")
+    out: list[SourceWindow] = []
+    for idx, win in enumerate(windows):
+        if not (math.isfinite(win.start) and math.isfinite(win.end)):
+            raise ValueError(f"segment {idx}: times are not finite")
+        if win.start < 0 or win.end <= win.start:
+            raise ValueError(f"segment {idx}: invalid window [{win.start}, {win.end})")
+        if span is not None and (
+            win.start < span[0] - _SEGMENT_TOLERANCE or win.end > span[1] + _SEGMENT_TOLERANCE
+        ):
+            raise ValueError(
+                f"segment {idx}: [{win.start:g}, {win.end:g}) is outside the render window "
+                f"[{span[0]:g}, {span[1]:g})"
+            )
+        if out and win.start < out[-1].end - _SEGMENT_TOLERANCE:
+            raise ValueError(f"segment {idx}: segments must be in source order and must not overlap")
+        start = max(win.start, out[-1].end) if out else win.start
+        if win.end <= start:
+            raise ValueError(f"segment {idx}: empty after its predecessor")
+        out.append(SourceWindow(start, win.end))
+    return out
+
+
+def plan_caption_entries(
+    captions: Sequence["CaptionItem"], style: CaptionStyle
+) -> list[clip_service.CaptionEntry]:
+    """Caption schedule for the plan's captions (reel seconds).
+
+    Each caption shows its words (the edited spelling); with a highlighting
+    style each word is highlighted from its start until the next word's
+    start (the last word until the caption ends), and the caption shows
+    plain before its first word. A non-highlighting preset shows the caption
+    whole over ``[start, end)``.
+    """
+    entries: list[clip_service.CaptionEntry] = []
+    for cap in captions:
+        words = cap.words
+        if not words or cap.end <= cap.start:
+            continue
+        text = " ".join(w.word for w in words)
+        if not style.highlights:
+            entries.append(clip_service.CaptionEntry(text, None, cap.start, cap.end - cap.start))
+            continue
+        if words[0].start > cap.start:
+            entries.append(clip_service.CaptionEntry(text, None, cap.start, words[0].start - cap.start))
+        for j, word in enumerate(words):
+            until = words[j + 1].start if j + 1 < len(words) else cap.end
+            if until > word.start:
+                entries.append(clip_service.CaptionEntry(text, j, word.start, until - word.start))
+    return entries
+
+
+def write_overlay_images(
+    overlays: Sequence["TextOverlayItem"], geometry: clip_service.ReelGeometry, out_dir: str | Path
+) -> list[OverlayImage]:
+    """Draw each text overlay to ``out_dir/overlay_NNN.png`` (server-built
+    names) and place it: ``x``/``y`` are the text's centre as fractions of
+    the canvas (clamped to [0, 1]), the image is kept inside the canvas and
+    its corner is even (4:2:0). Overlays that draw nothing are dropped."""
+    canvas_w, canvas_h = geometry.canvas_size
+    placed: list[OverlayImage] = []
+    for k, item in enumerate(overlays):
+        if item.end <= item.start:
+            continue
+        img = create_text_overlay_image(item.text, item.font_size, item.color)
+        if img is None:
+            continue
+
+        def corner(frac: float, size: int, canvas: int) -> int:
+            centre = min(max(frac, 0.0), 1.0) * canvas
+            return even_floor(int(min(max(centre - size / 2, 0), max(canvas - size, 0))))
+
+        path = Path(out_dir) / f"overlay_{k:03d}.png"
+        img.save(path, compress_level=1)
+        placed.append(
+            OverlayImage(
+                str(path),
+                corner(item.x, img.width, canvas_w),
+                corner(item.y, img.height, canvas_h),
+                item.start,
+                item.end,
+            )
+        )
+    return placed
+
+
+def _track_value(knots: Sequence[CropKeyframe], t: float, *, left: bool) -> float:
+    """``crop_x_expr``'s value at ``t`` (``left``: the limit from below, so a
+    hard cut AT ``t`` still gives the value before it)."""
+    times = [k[0] for k in knots]
+    i = (bisect_left if left else bisect_right)(times, t) - 1
+    if i < 0:
+        return knots[0][1]
+    if i >= len(knots) - 1:
+        return knots[-1][1]
+    (ta, xa), (tb, xb) = knots[i], knots[i + 1]
+    return xa + (xb - xa) * (t - ta) / (tb - ta)
+
+
+def segment_crop_track(track: CropTrack, offset: float, length: float) -> list[CropKeyframe]:
+    """``track`` (t = seconds from the span start) as a segment showing span
+    time ``[offset, offset + length)`` sees it from its own t=0.
+
+    The segment's track holds the track's value at its start and end and
+    every keyframe strictly between, shifted by ``-offset``, so the pan is
+    the same picture over the segment (hard cuts included).
+    """
+    knots = list(track)
+    end = offset + length
+    out: list[CropKeyframe] = [(0.0, _track_value(knots, offset, left=False))]
+    out += [(min(t - offset, length), x) for t, x in knots if offset < t < end]
+    out.append((length, _track_value(knots, end, left=True)))
+    if len(out) > MAX_CROP_KEYFRAMES:
+        # ponytail: a segment holding nearly all of a full 64-keyframe track
+        # plus its two boundary values is thinned evenly (endpoints kept),
+        # which can smooth over one pan step; decimating by error (as
+        # reframe_service.decimate does) would keep it.
+        step = (len(out) - 1) / (MAX_CROP_KEYFRAMES - 1)
+        out = [out[round(i * step)] for i in range(MAX_CROP_KEYFRAMES)]
+    return out
+
+
+def build_plan_argv(
+    src: str,
+    output_path: str,
+    *,
+    segments: Sequence[SourceWindow],
+    fps: Fraction,
+    geometry: clip_service.ReelGeometry,
+    background_png: str,
+    captions: caption_track.CaptionTrack | None,
+    captions_dir: str | None,
+    source_has_audio: bool,
+    mute_source: bool = False,
+    crop_track: CropTrack | None = None,
+    crop_origin: float = 0.0,
+    overlays: Sequence[OverlayImage] = (),
+    voiceovers: Sequence[VoiceOver] = (),
+) -> list[str]:
+    """ffmpeg argv for an edited timeline (module docstring, "Edited
+    timeline"). ``segments`` come from ``plan_segments``; ``crop_track``
+    times are seconds from ``crop_origin`` (source seconds). Every path is
+    an argv element (``-i``), never filtergraph text."""
+    if not segments:
+        raise ValueError("at least one segment is required")
+    canvas_w, _canvas_h = geometry.canvas_size
+    fps = grid_rate(fps)
+    timebase = math.lcm(fps.numerator, 1000)
+    step = fps.denominator * (timebase // fps.numerator)
+    n = len(segments)
+    span_start = segments[0].start
+    span = segments[-1].end - span_start
+    total = sum(seg.length for seg in segments)
+    use_source_audio = source_has_audio and not mute_source
+
+    def t_(v: float) -> str:
+        return _num(v, _TIME_DECIMALS)
+
+    knots: list[CropKeyframe] | None = None
+    if crop_track is None:
+        inset_top = inset_y(geometry)
+    else:
+        inset_top = 0
+        knots = _normalise_track(crop_track, float(geometry.source_size[0] - pan_crop(geometry).width))
+
+    graph = [f"[1:v]loop=loop=-1:size=1:start=0,settb=expr=1/{timebase},setpts=N*{step}[bg]"]
+    inputs = [
+        "-ss", f"{span_start:.6f}", "-t", f"{span:.6f}", "-i", src,
+        "-i", background_png,
+    ]  # fmt: skip
+    n_inputs = 2
+    video_in, audio_in = ["0:v"], ["0:a"]
+    if n > 1:
+        video_in = [f"sv{i}" for i in range(n)]
+        graph.append(f"[0:v]split={n}" + "".join(f"[{label}]" for label in video_in))
+        if use_source_audio:
+            audio_in = [f"sa{i}" for i in range(n)]
+            graph.append(f"[0:a]asplit={n}" + "".join(f"[{label}]" for label in audio_in))
+    pieces: list[str] = []
+    for i, seg in enumerate(segments):
+        a, b = seg.start - span_start, seg.end - span_start
+        if knots is None:
+            inset = f"scale={canvas_w}:-2"
+        else:
+            inset = _pan_chain(geometry, segment_crop_track(knots, seg.start - crop_origin, seg.length))
+        graph.append(f"[{video_in[i]}]trim=start={t_(a)}:end={t_(b)},setpts=PTS-STARTPTS,{inset}[g{i}]")
+        pieces.append(f"[g{i}]")
+        if use_source_audio:
+            graph.append(f"[{audio_in[i]}]atrim=start={t_(a)}:end={t_(b)},asetpts=PTS-STARTPTS[h{i}]")
+            pieces.append(f"[h{i}]")
+    graph.append(
+        "".join(pieces)
+        + f"concat=n={n}:v=1:a={int(use_source_audio)}[in]"
+        + ("[sa]" if use_source_audio else "")
+    )
+    graph.append(f"[bg][in]overlay=x=0:y={inset_top}:ts_sync_mode=nearest[b]")
+    composite = "b"
+    if captions is not None:
+        if captions_dir is None:
+            raise ValueError("captions_dir is required when captions are given")
+        inputs += [
+            "-f", "concat", "-safe", "0",
+            "-i", str(Path(captions_dir) / captions.list_name),
+        ]  # fmt: skip
+        graph.append(
+            f"[b][{n_inputs}:v]overlay=x={captions.x}:y={captions.y}:eof_action=pass[c]"
+        )
+        n_inputs += 1
+        composite = "c"
+    for k, ov in enumerate(overlays):
+        inputs += ["-i", ov.path]
+        graph.append(
+            f"[{composite}][{n_inputs}:v]overlay=x={ov.x}:y={ov.y}"
+            f":enable='between(t,{t_(ov.start)},{t_(ov.end)})'[o{k}]"
+        )
+        n_inputs += 1
+        composite = f"o{k}"
+    graph.append(f"[{composite}]{_EVEN_CROP}[v]")
+
+    audio_out: str | None = None
+    if voiceovers:
+        labels = []
+        for k, vo in enumerate(voiceovers):
+            inputs += ["-i", vo.path]
+            graph.append(
+                f"[{n_inputs}:a]atrim=end={t_(vo.end - vo.start)},asetpts=PTS-STARTPTS,"
+                f"volume={_num(vo.gain, 3)},adelay=delays={round(vo.start * 1000)}:all=1[vo{k}]"
+            )
+            n_inputs += 1
+            labels.append(f"[vo{k}]")
+        if use_source_audio:
+            speaking = "+".join(
+                f"between(t,{t_(vo.start)},{t_(vo.end)})" for vo in voiceovers if vo.gain > 0
+            )
+            duck = (
+                f",volume=volume='if({speaking},{_num(VOICEOVER_DUCK_VOLUME, 3)},1)':eval=frame"
+                if speaking
+                else ""
+            )
+            graph.append(f"[sa]apad=whole_dur={t_(total)}{duck}[base]")
+        else:
+            graph.append(f"{_SILENCE},atrim=end={t_(total)}[base]")
+        graph.append(
+            "[base]" + "".join(labels) + f"amix=inputs={1 + len(labels)}:duration=first:normalize=0[a]"
+        )
+        audio_out = "[a]"
+    elif use_source_audio:
+        audio_out = "[sa]"
+    elif source_has_audio:  # muted, no voice-over: keep a silent track
+        graph.append(f"{_SILENCE},atrim=end={t_(total)}[a]")
+        audio_out = "[a]"
+
+    maps = ["-map", "[v]"] + (["-map", audio_out] if audio_out else [])
+    return [
+        "ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+        *inputs,
+        "-filter_complex", ";".join(graph),
+        *maps,
+        "-t", f"{total:.6f}", "-r", _rate(fps),
+        *_VIDEO_CODEC_ARGS, "-threads", str(_threads()),
+        *(_AUDIO_CODEC_ARGS if audio_out else ()),
+        output_path,
+    ]  # fmt: skip
+
+
+def _render_plan(
+    video_path: str,
+    output_path: str,
+    start: float,
+    end: float,
+    plan: "RenderPlan",
+    target_aspect_ratio: float,
+    crop_track: CropTrack | None,
+) -> str:
+    segments = plan_segments(plan, video_path, span=(start, end))
+    total = sum(seg.length for seg in segments)
+    voiceovers = [VoiceOver(a.path, a.start, a.end, a.gain) for a in plan.audio]
+    for vo in voiceovers:
+        if not Path(vo.path).is_file():
+            raise ValueError(f"voice-over {Path(vo.path).name!r} does not exist")
+    style = caption_style_for_preset(plan.caption_style)
+    entries = plan_caption_entries(plan.captions, style)
+    log.info(
+        "Plan render  segments=%d  duration=%.3f  captions=%d  overlays=%d  voiceovers=%d  style=%s",
+        len(segments), total, len(entries), len(plan.overlays), len(voiceovers), plan.caption_style,
+    )
+    fps = ffmpeg_tools.fps(video_path)
+    source_has_audio = ffmpeg_tools.has_audio(video_path)
+    geometry = clip_service.reel_geometry(*ffmpeg_tools.video_size(video_path), target_aspect_ratio)
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="reelsmith-render-") as work:
+        background_png = str(Path(work) / "background.png")
+        span_start = segments[0].start
+        background_still(
+            video_path, span_start, segments[-1].end - span_start, geometry, target_aspect_ratio
+        ).save(background_png, compress_level=1)
+        track = caption_track.build_caption_track(entries, geometry, total, work, style=style)
+        overlays = write_overlay_images(plan.overlays, geometry, work)
+        argv = build_plan_argv(
+            video_path,
+            output_path,
+            segments=segments,
+            fps=fps,
+            geometry=geometry,
+            background_png=background_png,
+            captions=track,
+            captions_dir=work,
+            source_has_audio=source_has_audio,
+            mute_source=plan.mute_source,
+            crop_track=crop_track,
+            crop_origin=start,
+            overlays=overlays,
+            voiceovers=voiceovers,
+        )
+        _run_atomically(argv, output_path)
+    log.info("Render complete  output=%s", output_path)
+    return output_path
+
+
 def _run_atomically(argv: list[str], output_path: str) -> None:
     """Run a render whose argv ends with ``output_path`` without ever leaving a
     partial file there: ffmpeg writes a hidden temp in the same directory,
@@ -551,6 +994,7 @@ def render_clip(
     caption_words_per_segment: int = 3,
     crop_track: CropTrack | None = None,
     broll: Sequence[BrollInsert] | None = None,
+    plan: "RenderPlan | None" = None,
 ) -> str:
     """Render ``[start, end)`` of ``video_path`` to ``output_path``.
 
@@ -568,12 +1012,27 @@ def render_clip(
     its window, under the captions and over the letterbox or pan composite;
     see ``validate_broll`` for the rules (checked before any work starts).
     The output size, frame grid and audio are unchanged.
+
+    ``plan`` (a ``timeline_render_service.RenderPlan``) renders an edited
+    timeline as a reel in the same one pass: its segments (which must lie in
+    ``[start, end)``) concatenated, its captions in its ``caption_style``,
+    its text overlays and voice-overs (module docstring, "Edited timeline").
+    ``crop_track`` then holds seconds from ``start`` (computed over the
+    whole window) and is re-based per segment. ``captions_path``,
+    ``word_timings`` and ``caption_words_per_segment`` are ignored (the
+    plan's captions replace them); ``broll`` is refused.
     """
     log.info(
         "Rendering clip %s [%.3f, %.3f] -> %s", video_path, start, end, output_path
     )
     if start < 0 or end <= start:
         raise ValueError(f"invalid render window start={start} end={end}")
+    if plan is not None:
+        if broll:
+            raise ValueError("broll is not supported with an edited timeline plan")
+        return _render_plan(
+            video_path, output_path, start, end, plan, target_aspect_ratio, crop_track
+        )
     duration = end - start
     inserts = validate_broll(broll, duration)
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
