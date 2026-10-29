@@ -13,6 +13,7 @@ import {
   Sparkles,
   FolderOpen,
   Trash2,
+  Search,
 } from 'lucide-react'
 import { rootRoute } from './root'
 import { api } from '@/api/client'
@@ -172,6 +173,14 @@ function LibraryPage() {
               title="Coming soon"
             >
               Google Drive
+            </button>
+            <button
+              type="button"
+              onClick={() => void navigate({ to: '/sources/youtube' })}
+              className="flex-1 flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl border border-white/15 text-zinc-200 text-sm hover:text-white hover:border-white/30 transition-colors"
+            >
+              <Search className="w-3.5 h-3.5" />
+              Search YouTube
             </button>
           </div>
 

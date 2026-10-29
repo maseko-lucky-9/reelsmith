@@ -232,6 +232,14 @@ class Settings(BaseSettings):
     ollama_enabled: bool = True
     ollama_timeout_seconds: int = 60
 
+    # ── YouTube source search (spec 015) ──────────────────────────────────
+    # The vision model that looks for burned-in captions in a search result
+    # (``ollama_model`` is the text model).
+    source_check_model: str = "qwen2.5vl:7b"
+    # Whole-check budget: stream URL, four frames, four vision calls.
+    source_check_timeout_seconds: int = 60
+    youtube_search_timeout_seconds: int = 30
+
     # ── Export ────────────────────────────────────────────────────────────
     export_base_folder: str = ""
 

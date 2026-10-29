@@ -21,6 +21,7 @@ Spec numbers and ADR numbers (`docs/decisions/NNN-*.md`) are separate sequences.
 | 011 repair-job-metadata | Implemented (T068-T070) | [spec](011-repair-job-metadata/spec.md) · [tasks](011-repair-job-metadata/tasks.md) |
 | 012 tiktok-posting-and-trends | Phase 1 built, not live (T071-T076; T077 go-live is an owner decision); phases 2-4 planned | [spec](012-tiktok-posting-and-trends/spec.md) · [tasks](012-tiktok-posting-and-trends/tasks.md) · [baseline](012-tiktok-posting-and-trends/baseline.md) |
 | 013 cancel-and-delete-jobs | Implemented (T084-T088, T090-T092 review rounds; T089 end-to-end check open) | [spec](013-cancel-and-delete-jobs/spec.md) · [plan](013-cancel-and-delete-jobs/plan.md) · [tasks](013-cancel-and-delete-jobs/tasks.md) |
+| 015 youtube-source-search | Implemented, not verified live (T111-T121, T123, T124; T122 and T125 open: YouTube refused the stream request from the build machine every time) | [spec](015-youtube-source-search/spec.md) · [plan](015-youtube-source-search/plan.md) · [tasks](015-youtube-source-search/tasks.md) |
 
 ## Roadmap stubs
 
