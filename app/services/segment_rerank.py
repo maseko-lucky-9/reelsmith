@@ -585,8 +585,11 @@ async def judge_scenes(
     Judges at most ``scene_judge_max_candidates`` of them, in order, one
     call each, within ``scene_judge_budget_seconds``. A match gets its
     blended score and the judge's title, reason and emotion; a non-match is
-    dropped; a candidate not judged (budget, Ollama down, unusable reply,
-    beyond the cap) keeps its score. Never raises, except cancellation.
+    dropped; a candidate not judged (budget, Ollama down, unusable reply)
+    keeps its score. Candidates beyond the cap rank below every judged one,
+    so they are dropped once the judge has answered at all (rejecting the
+    best 8 must not hand the clips to the 9th); they stay only when nothing
+    was judged. Never raises, except cancellation.
     """
     pool = list(candidates)
     if not pool:
@@ -599,10 +602,14 @@ async def judge_scenes(
     limit = max(0, settings.scene_judge_max_candidates)
     deadline = clock() + settings.scene_judge_budget_seconds
     kept: list[ProposedSegment] = []
+    beyond_cap: list[ProposedSegment] = []
     judged = 0
     stopped: str | None = None
     for position, seg in enumerate(pool):
-        if position >= limit or stopped:
+        if position >= limit:
+            beyond_cap.append(seg)
+            continue
+        if stopped:
             kept.append(seg)
             continue
         remaining = deadline - clock()
@@ -650,4 +657,7 @@ async def judge_scenes(
             "[%s] Scene judge stopped after %d of %d candidate(s) (%s; model %s); the rest keep their similarity order",
             job_id, judged, min(limit, len(pool)), stopped, settings.ollama_vision_model,
         )  # fmt: skip
+    if judged == 0:
+        # The judge never answered: everything keeps its similarity order.
+        kept.extend(beyond_cap)
     return sorted(kept, key=lambda s: (-s.score, s.start, s.end))

@@ -110,6 +110,51 @@ async def test_a_child_ignoring_sigterm_and_its_grandchild_are_killed_after_the_
     assert not _alive(grandchild)
 
 
+async def test_a_long_line_without_newline_is_no_error(tmp_path):
+    """Review finding: a 200 KB carriage-return progress bar on stderr (a model
+    download) must not raise LimitOverrunError and fail the caller."""
+    argv = _script(
+        tmp_path,
+        """
+        import sys
+        sys.stderr.write("x" * 200_000)
+        sys.stderr.write("\\rdownloading 50%\\rdone\\n")
+        print("y" * 100_000, flush=True)
+        print("ok", flush=True)
+        """,
+    )
+    lines: list[str] = []
+    code, err = await child_process.run_streaming(argv, timeout=30, on_line=lines.append)
+    assert code == 0 and lines[-1] == "ok" and len(lines[0]) == 100_000
+    assert err.splitlines()[-2:] == ["downloading 50%", "done"]
+
+
+async def test_the_group_dies_even_when_the_child_obeys_sigterm(tmp_path):
+    """Review finding: a child that exits on SIGTERM must not leave its grandchild."""
+    argv = _script(
+        tmp_path,
+        """
+        import os, subprocess, sys, time
+        from pathlib import Path
+        grand = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        (Path(sys.argv[1]) / "pids").write_text(f"{os.getpid()} {grand.pid}")
+        time.sleep(30)
+        """,
+    )
+    task = asyncio.create_task(child_process.run_streaming(argv, timeout=60, on_line=lambda line: None))
+    await _wait_for(tmp_path / "pids")
+    _, grandchild = (int(p) for p in (tmp_path / "pids").read_text().split())
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    for _ in range(100):
+        if not _alive(grandchild):
+            break
+        await asyncio.sleep(0.02)
+    assert not _alive(grandchild)
+
+
 async def test_a_timeout_stops_the_child_and_raises(tmp_path):
     argv = _script(
         tmp_path,

@@ -903,6 +903,42 @@ async def _scene_chapters(
     first_index: int,
     bus: AsyncEventBus,
 ) -> tuple[list[dict[str, Any]] | None, list[transcription_service.WordTiming] | None]:
+    """``_scene_search_stage``, guarded: any error but cancellation is logged,
+    reported as ``StageSkipped`` (``scene_search``) and returns ``(None,
+    words)``, so scene search never fails a job (spec 014 FR-009)."""
+    state: dict[str, Any] = {"words": words}
+    try:
+        return await _scene_search_stage(
+            job_id=job_id, video_path=video_path, job_folder=job_folder, safe_end=safe_end,
+            cleanup_root=cleanup_root, opts=opts, language=language, prompt=prompt,
+            words=words, first_index=first_index, bus=bus, state=state,
+        )  # fmt: skip
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001 — scene search must never fail the job
+        log.exception("[%s] Scene search failed; the prompt falls back to chapters/discovery", job_id)
+        await _emit(
+            bus, EventType.STAGE_SKIPPED, job_id,
+            stage_id="scene_search", reason=f"scene search failed: {e}",
+        )  # fmt: skip
+        return None, state["words"]
+
+
+async def _scene_search_stage(
+    *,
+    job_id: str,
+    video_path: str,
+    job_folder: str,
+    safe_end: float,
+    cleanup_root: Path,
+    opts: PipelineOptions,
+    language: str | None,
+    prompt: str,
+    words: list[transcription_service.WordTiming] | None,
+    first_index: int,
+    bus: AsyncEventBus,
+    state: dict[str, Any],
+) -> tuple[list[dict[str, Any]] | None, list[transcription_service.WordTiming] | None]:
     """Chapters for the moments of the source that match ``prompt`` (spec 014).
 
     Indexes the source into ``<job_folder>/scenes/`` (``_index_scenes``,
@@ -917,8 +953,7 @@ async def _scene_chapters(
 
     Returns ``(chapters, words)``: ``chapters`` is None when scene search
     could not run (the caller falls back; ``words`` spares it a second
-    transcription) and ``[]`` when no moment survived the judge. Never
-    raises, except cancellation.
+    transcription) and ``[]`` when no moment survived the judge.
     """
     min_secs, max_secs = segment_discovery.clip_length_range(opts)
     index_dir = scene_search.scenes_dir(job_folder)
@@ -939,6 +974,7 @@ async def _scene_chapters(
         )
         words_task = group.create_task(_words())
     index, words = index_task.result(), words_task.result()
+    state["words"] = words
     if index is None:
         return None, words
     try:
@@ -951,9 +987,10 @@ async def _scene_chapters(
             stage_id="scene_search", reason=f"prompt embedding failed: {e}",
         )  # fmt: skip
         return None, words
-    candidates = scene_search.search(
-        index, prompt_vec, sentences=sentences, sentence_vecs=sentence_vecs,
-        min_s=min_secs, max_s=max_secs, duration=safe_end,
+    # numpy over every chunk and sentence: off the event loop for long sources.
+    candidates = await _job_thread(
+        job_id, scene_search.search, index, prompt_vec, sentences=sentences,
+        sentence_vecs=sentence_vecs, min_s=min_secs, max_s=max_secs, duration=safe_end,
     )  # fmt: skip
     judge_t0 = time.perf_counter()
     ranked = await segment_rerank.judge_scenes(

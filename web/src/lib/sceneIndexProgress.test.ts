@@ -49,6 +49,13 @@ describe('scene indexing progress (spec 014)', () => {
     expect(sceneIndexProgress([progress(0, 47), progress(12, 47)])).toEqual({ done: 12, total: 47 })
     expect(sceneIndexProgress([progress(12, 47), { type: 'ScenesIndexed', payload: { chunks: 47 } }])).toBeNull()
     expect(sceneIndexProgress([progress(3, 0), { type: 'SceneIndexProgress', payload: {} }])).toBeNull()
+    // A failed index falls back without ScenesIndexed: the line must not stay.
+    expect(
+      sceneIndexProgress([progress(3, 47), { type: 'StageSkipped', payload: { stage_id: 'scene_search' } }]),
+    ).toBeNull()
+    expect(
+      sceneIndexProgress([progress(3, 47), { type: 'StageSkipped', payload: { stage_id: 'thumbnail' } }]),
+    ).toEqual({ done: 3, total: 47 })
     expect(sceneIndexLabel({ done: 12, total: 47 })).toBe('Indexing scenes 12/47')
   })
 

@@ -138,6 +138,17 @@ def test_a_long_moment_is_cut_to_the_maximum_around_its_peak():
     assert (s, e) == (50.0, 70.0)  # 20 s around the peak; no room left to pad
 
 
+def test_inward_snapping_never_cuts_the_peak_out():
+    """Review repro: speech ends before the best chunk; the peak must stay in the clip."""
+    sentences = [ss.Sentence(111.0, 119.0, "a"), ss.Sentence(120.0, 147.0, "b")]
+    s, e = ss.shape_window(88.0, 176.0, 158.0, sentences=sentences, min_s=20, max_s=60, duration=600)
+    assert s <= 158.0 <= e and 20 <= e - s <= 60
+
+
+def test_unrelated_chunks_are_never_fallback_candidates():
+    assert ss.search(_index([0.0, 0.0, 0.05]), E0, min_s=1, max_s=10, duration=24) == []
+
+
 def test_windows_stay_inside_the_source():
     assert ss.shape_window(0.0, 2.0, 1.0, sentences=[], min_s=10, max_s=30, duration=50) == (0.0, 12.0)
     assert ss.shape_window(46.0, 50.0, 48.0, sentences=[], min_s=10, max_s=30, duration=50) == (38.0, 50.0)

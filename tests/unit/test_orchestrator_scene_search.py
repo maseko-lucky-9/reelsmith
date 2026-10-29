@@ -136,6 +136,21 @@ async def test_a_failed_index_falls_back_to_the_chapters(harness, sidecar):
     assert EventType.SCENES_INDEXED not in recorder.types()
 
 
+async def test_an_unexpected_error_in_scene_search_never_fails_the_job(harness, sidecar):
+    """Review finding: only cancellation may leave the scene stage."""
+
+    def _boom(*args: Any, **kwargs: Any):
+        raise ValueError("unexpected")
+
+    harness.monkeypatch.setattr(orch.scene_search, "search", _boom)
+    store = discover.InMemoryJobStore()
+    recorder = await harness.run(store, prompt=PROMPT)
+
+    assert (await store.get(discover.JOB_ID)).status == "completed"
+    assert [c[0] for c in discover._chapters(recorder)] == ["Intro", "Main"]
+    assert "scene search failed: unexpected" in _skipped(recorder)
+
+
 async def test_no_matching_moment_falls_back_to_the_chapters(harness, sidecar):
     async def _reject_all(candidates, **_: Any):
         return []

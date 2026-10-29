@@ -185,9 +185,23 @@ async def test_the_time_budget_stops_judging():
 
 async def test_at_most_the_configured_number_of_candidates_is_judged(monkeypatch):
     monkeypatch.setattr(rr.settings, "scene_judge_max_candidates", 1)
-    ollama = _Ollama(_verdict(False))
+    ollama = _Ollama(_verdict(True, 1.0))
     got = await _judge(ollama, [_seg(0, 60), _seg(30, 55)])
-    assert [g.start for g in got] == [30] and len(ollama.bodies) == 1
+    assert [g.start for g in got] == [0] and len(ollama.bodies) == 1
+
+
+async def test_rejecting_the_judged_candidates_does_not_promote_the_ones_beyond_the_cap(monkeypatch):
+    """Review finding: the 9th must not win because the best 8 were rejected."""
+    monkeypatch.setattr(rr.settings, "scene_judge_max_candidates", 1)
+    ollama = _Ollama(_verdict(False))
+    assert await _judge(ollama, [_seg(0, 60), _seg(30, 55)]) == []
+
+
+async def test_beyond_the_cap_stays_when_nothing_could_be_judged(monkeypatch):
+    monkeypatch.setattr(rr.settings, "scene_judge_max_candidates", 1)
+    ollama = _Ollama(httpx.ConnectError("refused"))
+    got = await _judge(ollama, [_seg(0, 60), _seg(30, 55)])
+    assert [g.start for g in got] == [0, 30]
 
 
 async def test_with_ollama_off_nothing_is_asked(monkeypatch):

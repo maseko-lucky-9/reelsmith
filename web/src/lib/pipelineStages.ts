@@ -360,7 +360,9 @@ export interface SceneIndexProgress {
 export function sceneIndexProgress(events: PipelineEvent[] | undefined): SceneIndexProgress | null {
   let latest: SceneIndexProgress | null = null
   for (const e of events ?? []) {
-    if (e.type === 'ScenesIndexed') {
+    const sceneSkipped = e.type === 'StageSkipped' && e.payload?.stage_id === 'scene_search'
+    if (e.type === 'ScenesIndexed' || sceneSkipped || e.type === 'ChaptersDetected') {
+      // Ready, failed (the job falls back) or past it: no stale "Indexing scenes".
       latest = null
     } else if (e.type === 'SceneIndexProgress') {
       const done = e.payload?.done

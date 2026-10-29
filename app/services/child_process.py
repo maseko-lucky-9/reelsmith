@@ -7,7 +7,12 @@ first, so a child that cleans up on SIGTERM (``scripts/scene_index.py``
 removes its temp chunk directory and kills its ffmpeg) can do so, then
 SIGKILL to the child's whole process group after ``terminate_grace``
 seconds. The child runs in a new session, so a grandchild it started (an
-ffmpeg) is in that group and dies with it.
+ffmpeg) is in that group; the group is killed whenever the child is
+stopped, also when the child itself already exited.
+
+Output is read in chunks, not with ``StreamReader.readline``: a child that
+writes a long line with no newline (a ``\\r`` progress bar of a model
+download) must not raise ``LimitOverrunError`` in the parent.
 """
 
 from __future__ import annotations
@@ -17,10 +22,12 @@ import contextlib
 import inspect
 import logging
 import os
+import re
 import signal
+from asyncio import StreamReader
 from asyncio.subprocess import DEVNULL, PIPE, Process
 from collections import deque
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 
 log = logging.getLogger(__name__)
 
@@ -30,37 +37,40 @@ DEFAULT_TERMINATE_GRACE = 5.0
 STDERR_TAIL_LINES = 20
 """Last stderr lines kept for an error message."""
 
+READ_CHUNK_BYTES = 64 * 1024
+MAX_LINE_CHARS = 1024 * 1024
+"""A partial line longer than this is dropped (logged) instead of buffered."""
+
 LineHandler = Callable[[str], Awaitable[None] | None]
 
 
 async def stop(proc: Process, grace: float) -> None:
-    """Stop ``proc`` and reap it: SIGTERM, wait ``grace`` s, then SIGKILL.
+    """Stop ``proc`` (a process-group leader) and reap it.
 
-    With ``grace <= 0`` it is killed straight away. The SIGKILL goes to the
-    child's process group when it leads one (``start_new_session``), else to
-    the child alone. A child that already exited is only reaped.
+    SIGTERM, wait ``grace`` s (none when ``grace <= 0``), then SIGKILL to the
+    whole process group, so a grandchild that outlived its parent dies too.
+    A child that already exited only has its group killed.
     """
-    if proc.returncode is not None:
-        return
-    if grace > 0:
+    if proc.returncode is None and grace > 0:
         with contextlib.suppress(ProcessLookupError):
             proc.send_signal(signal.SIGTERM)
         try:
             await asyncio.wait_for(proc.wait(), grace)
-            return
         except TimeoutError:
             log.warning("child pid=%s ignored SIGTERM for %.1fs; killing it", proc.pid, grace)
     _kill_group(proc)
-    await proc.wait()
+    if proc.returncode is None:
+        await proc.wait()
 
 
 def _kill_group(proc: Process) -> None:
+    # The child leads its own session (start_new_session), so its pid is the
+    # group id; the group outlives the leader while a member is alive.
     with contextlib.suppress(ProcessLookupError, PermissionError):
-        if os.getpgid(proc.pid) == proc.pid:
-            os.killpg(proc.pid, signal.SIGKILL)
-            return
-    with contextlib.suppress(ProcessLookupError):
-        proc.kill()
+        os.killpg(proc.pid, signal.SIGKILL)
+    if proc.returncode is None:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
 
 
 async def stop_uninterrupted(proc: Process, grace: float) -> bool:
@@ -80,6 +90,21 @@ async def stop_uninterrupted(proc: Process, grace: float) -> bool:
     return cancelled
 
 
+async def _lines(stream: StreamReader, separators: str) -> AsyncIterator[str]:
+    """Lines of ``stream`` split on any of ``separators``, read in chunks."""
+    split = re.compile(f"[{re.escape(separators)}]")
+    pending = ""
+    while chunk := await stream.read(READ_CHUNK_BYTES):
+        *complete, pending = split.split(pending + chunk.decode("utf-8", errors="replace"))
+        for line in complete:
+            yield line
+        if len(pending) > MAX_LINE_CHARS:
+            log.warning("child output line over %d characters dropped", MAX_LINE_CHARS)
+            pending = ""
+    if pending:
+        yield pending
+
+
 async def run_streaming(
     argv: Sequence[str],
     *,
@@ -91,9 +116,10 @@ async def run_streaming(
     """Run ``argv``; call ``on_line`` with each non-empty stdout line.
 
     Returns ``(returncode, stderr_tail)``: the exit status and the last
-    ``STDERR_TAIL_LINES`` lines of stderr. Raises ``TimeoutError`` after
-    ``timeout`` seconds. On timeout, cancellation, or an error raised by
-    ``on_line``, the child is stopped (``stop``) and reaped before the error
+    ``STDERR_TAIL_LINES`` lines of stderr (``\\r`` also ends a line there).
+    Raises ``TimeoutError`` after ``timeout`` seconds. On timeout,
+    cancellation, or an error raised by ``on_line``, the child and its
+    process group are stopped (``stop``) and reaped before the error
     propagates.
     """
     proc = await asyncio.create_subprocess_exec(
@@ -108,8 +134,8 @@ async def run_streaming(
 
     async def _pump_stdout() -> None:
         assert proc.stdout is not None
-        async for raw in proc.stdout:
-            line = raw.decode("utf-8", errors="replace").strip()
+        async for raw in _lines(proc.stdout, "\n"):
+            line = raw.strip()
             if not line:
                 continue
             result = on_line(line)
@@ -118,8 +144,8 @@ async def run_streaming(
 
     async def _pump_stderr() -> None:
         assert proc.stderr is not None
-        async for raw in proc.stderr:
-            line = raw.decode("utf-8", errors="replace").rstrip()
+        async for raw in _lines(proc.stderr, "\r\n"):
+            line = raw.rstrip()
             if line:
                 tail.append(line)
 
@@ -132,7 +158,7 @@ async def run_streaming(
         # gather leaves the other pump running when one fails.
         for pump in pumps:
             pump.cancel()
-        if proc.returncode is None and await stop_uninterrupted(proc, terminate_grace):
+        if await stop_uninterrupted(proc, terminate_grace):
             raise asyncio.CancelledError from None
         raise
     return returncode, "\n".join(tail)

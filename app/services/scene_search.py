@@ -23,10 +23,11 @@ Scoring (``search``):
 2. Each side is calibrated on its own (``calibrate``): text-to-text cosines
    run higher than text-to-video ones, so a raw maximum would let speech win
    everywhere. ``(raw - floor) / (match - floor)``, clamped to 0..1, puts
-   "unrelated" at 0 and "a typical labelled match" at 1 on both sides.
+   "unrelated" at 0 and "a typical labelled match" at 0.5 on both sides.
 3. ``score[i] = max(visual_cal[i], speech_cal[i])``.
 4. Chunks scoring at least ``HIT_THRESHOLD`` are hits; adjacent hits merge
-   into one moment. Without any hit the ``FALLBACK_CHUNKS`` best chunks are
+   into one moment. Without any hit the ``FALLBACK_CHUNKS`` best chunks with
+   a score above 0 are
    the candidates, so the judge still has something to look at.
 5. Each moment becomes a window inside the clip length range: a long one is
    cut to ``max_s`` around its best chunk, a short one grows to ``min_s``
@@ -208,7 +209,7 @@ def load_index(index_dir: Path) -> SceneIndex:
     try:
         chunks = json.loads((index_dir / "chunks.json").read_text(encoding="utf-8"))
         rows = np.load(index_dir / "embeddings.npy")
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, EOFError) as exc:
         raise SceneSearchError(f"no complete scene index in {index_dir}: {exc}") from exc
     if not isinstance(chunks, list) or rows.ndim != 2 or rows.shape[1] != EMBED_DIMS:
         raise SceneSearchError(f"{index_dir}: embeddings have shape {rows.shape}")
@@ -244,7 +245,7 @@ def index_is_current(index_dir: Path, video_path: str | Path, model: str) -> boo
         if meta != _meta(video_path, model):
             return False
         load_index(index_dir)
-    except OSError, ValueError, SceneSearchError:
+    except OSError, ValueError, EOFError, SceneSearchError:
         return False
     return True
 
@@ -293,6 +294,8 @@ async def _run_sidecar(argv: list[str], *, timeout: float, on_progress: Progress
         raise SceneSearchError(f"cannot start the scene sidecar {argv[0]!r}: {exc}") from exc
     except TimeoutError as exc:
         raise SceneSearchError(f"the scene sidecar took longer than {timeout:g} s") from exc
+    except ValueError as exc:  # unreadable output; the child was stopped
+        raise SceneSearchError(f"the scene sidecar's output was unreadable: {exc}") from exc
     if returncode != 0:
         last = stderr.strip().splitlines()[-1:] or [""]
         raise SceneSearchError(f"scene_index.py {argv[2]} exited {returncode}: {last[0]}")
@@ -344,7 +347,7 @@ async def embed_texts(texts: Sequence[str], work_dir: Path, *, timeout: float = 
         texts_path.write_text(json.dumps(list(texts)), encoding="utf-8")
         await _run_sidecar(_sidecar_argv("embed-texts", str(texts_path), str(out)), timeout=timeout, on_progress=None)
         rows = np.load(out)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, EOFError) as exc:
         raise SceneSearchError(f"text embeddings unreadable: {exc}") from exc
     finally:
         texts_path.unlink(missing_ok=True)
@@ -360,7 +363,7 @@ def _cached_sentence_vectors(index_dir: Path, texts: list[str], model: str) -> n
         if meta != {"model": model, "texts": texts}:
             return None
         rows = np.load(index_dir / "sentence_embeddings.npy")
-    except OSError, ValueError:
+    except OSError, ValueError, EOFError:
         return None
     return rows if rows.shape == (len(texts), EMBED_DIMS) else None
 
@@ -475,7 +478,10 @@ def shape_window(
 
     spoken = [x for x in sentences if x.start < e and x.end > s]
     if spoken:
-        s, e = _snap(s, e, sentences, min_s, max_s)
+        snapped = _snap(s, e, sentences, min_s, max_s)
+        # Snapping inwards may leave the best point outside; never lose it.
+        if snapped[0] <= peak <= snapped[1]:
+            s, e = snapped
     else:
         room = max(0.0, max_s - (e - s))
         pad = min(PAD_SECONDS, room / 2)
@@ -553,16 +559,21 @@ def search(
     sent_cal = np.zeros(len(sentences), dtype=np.float32)
     if sentences and sentence_vecs is not None and len(sentence_vecs) == len(sentences):
         sent_cal = calibrate(np.asarray(sentence_vecs, dtype=np.float32) @ query, SPEECH_FLOOR, SPEECH_MATCH)
-        for i, (c0, c1) in enumerate(index.spans):
-            overlapping = [sent_cal[j] for j, x in enumerate(sentences) if x.start < c1 and x.end > c0]
-            if overlapping:
-                speech[i] = max(overlapping)
+        # Each sentence lifts the chunks it overlaps (spans are in time order).
+        chunk_starts = np.array([c0 for c0, _ in index.spans])
+        chunk_ends = np.array([c1 for _, c1 in index.spans])
+        for x, value in zip(sentences, sent_cal):
+            lo = int(np.searchsorted(chunk_ends, x.start, side="right"))
+            hi = int(np.searchsorted(chunk_starts, x.end, side="left"))
+            if lo < hi:
+                speech[lo:hi] = np.maximum(speech[lo:hi], value)
     scores = np.maximum(visual, speech)
 
     runs = _merge_hits(scores, threshold)
     if not runs:
         best = [int(i) for i in np.argsort(-scores, kind="stable")[:FALLBACK_CHUNKS]]
-        runs = [(i, i) for i in best]
+        # A chunk at 0 is unrelated: no candidate beats "nothing matched".
+        runs = [(i, i) for i in best if scores[i] > 0]
     moments = []
     for first, last in runs:
         peak = first + int(np.argmax(scores[first : last + 1]))

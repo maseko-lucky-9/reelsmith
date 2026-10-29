@@ -56,6 +56,14 @@ At 0.35 by category: visual 0.95 / 0.95 (n=20), speech 0.89 / 1.00 (n=9), emotio
 
 Two changes came out of this run. First version: 0 of 3 found, because the judge saw 4 frames spread over a 25-55 s clip window and missed the shot; it now looks at the matched span (`focus`). Second: the vision judge rejected the speech moment (confidence 0.18: frames of a talking head cannot show a phone call), so speech-led candidates are judged on their transcript.
 
+## Review round (code-reviewer on PR #92)
+
+- The scene stage is wrapped: any error but cancellation becomes `StageSkipped(scene_search)` and a fallback (`_scene_chapters` around `_scene_search_stage`); the sidecar's output is read in chunks (a `\r` progress bar longer than 64 KiB raised `LimitOverrunError`); `EOFError` from an empty `.npy` is a `SceneSearchError`.
+- `shape_window` never snaps the best point out of the window (2.7 % of 200,000 fuzzed cases did).
+- Candidates beyond the judge's cap are dropped once the judge has answered (rejecting the best 8 no longer promotes the 9th), and the no-hit fallback skips chunks scoring 0, so "nothing matched" falls back to the chapters.
+- `stop` kills the process group also when the child obeyed SIGTERM or had already exited.
+- The UI clears "Indexing scenes n/m" on `StageSkipped(scene_search)` and `ChaptersDetected`; `search` runs in a worker thread and maps sentences to chunks with `searchsorted`.
+
 ## Verification
 
-`pytest` (offline), `ruff check app tests scripts`, `pytest -m integration tests/integration/test_scene_search_real.py` (no database), `cd web && pnpm test && pnpm build`; every new test mutation-checked (38 mutations, all red: 30 backend, 8 frontend).
+`pytest` (offline), `ruff check app tests scripts`, `pytest -m integration tests/integration/test_scene_search_real.py` (no database), `cd web && pnpm test && pnpm build`; every new test mutation-checked (45 mutations, all red: 36 backend, 9 frontend, review-round tests included).
