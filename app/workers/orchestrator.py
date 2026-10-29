@@ -26,6 +26,7 @@ from app.services import (
     broll_service,
     caption_service,
     clip_service,
+    clip_words,
     export_service,
     ffmpeg_tools,
     filler_removal_service,
@@ -1771,6 +1772,12 @@ async def _process_chapter(
         )
         log.info("[%s] Chapter %d  render done (%.2fs)  output=%s",
                  job_id, index, time.perf_counter() - step_t0, output_path)
+        # Every render, re-renders included, so the editor's words are never
+        # stale: this render's words, or none when it made none.
+        await _write_clip_words(
+            job_id, index, output_path, words if opts.transcription else None,
+            chapter_duration,
+        )
         log.info("[%s] Chapter %d  finished in %.2fs", job_id, index, time.perf_counter() - chapter_t0)
 
         await store.upsert_chapter(
@@ -1921,6 +1928,35 @@ async def _process_chapter(
     )
 
     return output_path
+
+
+async def _write_clip_words(
+    job_id: str,
+    index: int,
+    output_path: str,
+    words: Sequence[Any] | None,
+    duration: float,
+) -> None:
+    """Cache the reel's words (clip clock, the words its captions show) for
+    the editor (``clip_words.clip_words_path``); ``words=None`` (no
+    transcription) removes a cached set instead. A failure is logged, not
+    raised: the editor transcribes the clip on its first open instead."""
+    try:
+        # Cancellable like the caption write: a cancel waits for this small
+        # write to finish, so the job's cleanup never races it.
+        if words is None:
+            await ffmpeg_tools.to_thread_cancellable(clip_words.clear_clip_words, output_path)
+            return
+        rebased = clip_words.clip_window_words(words, duration)
+        path = await ffmpeg_tools.to_thread_cancellable(
+            clip_words.write_clip_words, output_path, rebased
+        )
+    except OSError as exc:
+        log.warning("[%s] Chapter %d  clip words sidecar not written: %s", job_id, index, exc)
+        return
+    if path is not None:
+        log.info("[%s] Chapter %d  clip words sidecar written  words=%d  path=%s",
+                 job_id, index, len(rebased), path)
 
 
 async def _broll_step(
