@@ -472,6 +472,17 @@ def _reply_text(value: Any, limit: int) -> str:
     return _as_data(value, limit) if isinstance(value, str) else ""
 
 
+_FORMULA_START = "=+-@\t\r "
+
+
+def _clip_text(value: Any, limit: int) -> str:
+    """A title or reason from the judge: ``_reply_text`` without a leading
+    run of ``= + - @``, tab, CR or space. These become the clip's title and
+    summary, which the job's raw ``manifest.csv`` carries (the caption the
+    Social Publish workflow posts): model text never starts a formula there."""
+    return _reply_text(value, limit).lstrip(_FORMULA_START)
+
+
 def parse_verdict(raw: str) -> Verdict | None:
     """The judge's reply as a ``Verdict``, or None when it cannot be used.
 
@@ -495,8 +506,8 @@ def parse_verdict(raw: str) -> Verdict | None:
     return Verdict(
         match=match,
         confidence=min(1.0, max(0.0, float(confidence))),
-        title=_reply_text(data.get("title"), TITLE_BYTES),
-        reason=_reply_text(data.get("reason"), REASON_BYTES),
+        title=_clip_text(data.get("title"), TITLE_BYTES),
+        reason=_clip_text(data.get("reason"), REASON_BYTES),
         emotion=emotion if emotion in EMOTIONS and emotion not in _NO_EMOTION else "",
     )
 

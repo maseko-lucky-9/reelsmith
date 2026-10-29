@@ -417,6 +417,24 @@ async def test_each_call_waits_at_most_the_ollama_timeout_and_never_past_the_bud
     assert timeouts == [30, 10]
 
 
+@pytest.mark.parametrize(
+    ("text", "kept"),
+    [('=HYPERLINK("http://x","y")', 'HYPERLINK("http://x","y")'), ("@x", "x"), ("+1", "1"),
+     ("-2 degrees", "2 degrees"), (" \t=+-@ =cmd", "cmd"), ("A red car - at dusk", "A red car - at dusk")],
+)  # fmt: skip
+def test_a_judge_title_or_reason_never_starts_a_formula(text, kept):
+    """The title and reason land raw in manifest.csv (the posted caption):
+    cleaned at the source, the model output."""
+    verdict = rr.parse_verdict(json.dumps(_verdict(True, title=text, reason=text)))
+    assert verdict is not None
+    assert (verdict.title, verdict.reason) == (kept, kept)
+
+
+async def test_a_formula_title_from_the_judge_reaches_the_clip_cleaned():
+    got = await _judge(_Ollama(_verdict(True, title="@everyone free", reason="=1+1 is shown")), [_seg(0, 60)])
+    assert (got[0].title, got[0].summary, got[0].reason) == ("everyone free", "1+1 is shown", "1+1 is shown")
+
+
 def test_parse_verdict_cleans_the_text_fields():
     raw = json.dumps(
         {"match": True, "confidence": 3, "title": "  A\n<b>title</b> " + "x" * 200, "reason": 5, "emotion": "None"}
