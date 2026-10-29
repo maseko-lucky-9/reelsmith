@@ -59,6 +59,16 @@ describe('scene indexing progress (spec 014)', () => {
     expect(sceneIndexLabel({ done: 12, total: 47 })).toBe('Indexing scenes 12/47')
   })
 
+  it('is cleared when the reprompt fails or the job is cancelled mid-index', () => {
+    expect(sceneIndexProgress([progress(3, 47), { type: 'RepromptFailed', payload: { error: 'x' } }])).toBeNull()
+    expect(sceneIndexProgress([progress(3, 47), { type: 'JobCancelled' }])).toBeNull()
+    // A later reprompt indexes again: its progress shows.
+    expect(sceneIndexProgress([progress(3, 47), { type: 'JobCancelled' }, progress(1, 47)])).toEqual({
+      done: 1,
+      total: 47,
+    })
+  })
+
   it('drives the main progress bar while chapters are not known yet', () => {
     const p = deriveOverallProgress(job, [progress(12, 48)])
     expect(p.label).toBe('Indexing scenes 12/48')

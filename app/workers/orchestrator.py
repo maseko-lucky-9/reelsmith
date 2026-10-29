@@ -844,7 +844,7 @@ async def _index_scenes(
         log.warning("[%s] Scene indexing failed (%s); the prompt falls back to chapters/discovery", job_id, e)
         await _emit(
             bus, EventType.STAGE_SKIPPED, job_id,
-            stage_id="scene_search", reason=f"scene indexing failed: {e}",
+            stage_id="scene_search", reason="scene indexing failed",
         )  # fmt: skip
         return None
     seconds = round(time.perf_counter() - step_t0, 2)
@@ -916,10 +916,14 @@ async def _scene_chapters(
     except asyncio.CancelledError:
         raise
     except Exception as e:  # noqa: BLE001 — scene search must never fail the job
-        log.exception("[%s] Scene search failed; the prompt falls back to chapters/discovery", job_id)
+        log.warning(
+            "[%s] Scene search failed (%s); the prompt falls back to chapters/discovery",
+            job_id, e, exc_info=True,
+        )  # fmt: skip
+        # A fixed reason: the event goes to every SSE client; details stay in the log.
         await _emit(
             bus, EventType.STAGE_SKIPPED, job_id,
-            stage_id="scene_search", reason=f"scene search failed: {e}",
+            stage_id="scene_search", reason="scene search failed",
         )  # fmt: skip
         return None, state["words"]
 
@@ -984,7 +988,7 @@ async def _scene_search_stage(
         log.warning("[%s] Prompt embedding failed (%s); the prompt falls back to chapters/discovery", job_id, e)
         await _emit(
             bus, EventType.STAGE_SKIPPED, job_id,
-            stage_id="scene_search", reason=f"prompt embedding failed: {e}",
+            stage_id="scene_search", reason="prompt embedding failed",
         )  # fmt: skip
         return None, words
     # numpy over every chunk and sentence: off the event loop for long sources.

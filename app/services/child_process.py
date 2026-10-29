@@ -18,6 +18,7 @@ download) must not raise ``LimitOverrunError`` in the parent.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import contextlib
 import inspect
 import logging
@@ -66,6 +67,9 @@ async def stop(proc: Process, grace: float) -> None:
 def _kill_group(proc: Process) -> None:
     # The child leads its own session (start_new_session), so its pid is the
     # group id; the group outlives the leader while a member is alive.
+    # Accepted risk (spec 014): once the leader is reaped and the group is
+    # empty, the id could in theory be reused by a new session leader before
+    # this runs; run_streaming skips the kill when both pipes reached EOF.
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(proc.pid, signal.SIGKILL)
     if proc.returncode is None:
@@ -93,14 +97,17 @@ async def stop_uninterrupted(proc: Process, grace: float) -> bool:
 async def _lines(stream: StreamReader, separators: str) -> AsyncIterator[str]:
     """Lines of ``stream`` split on any of ``separators``, read in chunks."""
     split = re.compile(f"[{re.escape(separators)}]")
+    # Incremental: a multi-byte character split across two reads stays whole.
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     pending = ""
     while chunk := await stream.read(READ_CHUNK_BYTES):
-        *complete, pending = split.split(pending + chunk.decode("utf-8", errors="replace"))
+        *complete, pending = split.split(pending + decoder.decode(chunk))
         for line in complete:
             yield line
         if len(pending) > MAX_LINE_CHARS:
             log.warning("child output line over %d characters dropped", MAX_LINE_CHARS)
             pending = ""
+    pending += decoder.decode(b"", final=True)
     if pending:
         yield pending
 
@@ -155,10 +162,14 @@ async def run_streaming(
             await asyncio.gather(*pumps)
             returncode = await proc.wait()
     except BaseException:
+        # Both pipes at EOF and the child reaped: nothing of the group can
+        # still hold them, so no kill is sent (a killpg to a pid that may be
+        # reused). Otherwise a grandchild may live on: stop the group.
+        drained = all(p.done() and not p.cancelled() and p.exception() is None for p in pumps)
         # gather leaves the other pump running when one fails.
         for pump in pumps:
             pump.cancel()
-        if await stop_uninterrupted(proc, terminate_grace):
+        if not (drained and proc.returncode is not None) and await stop_uninterrupted(proc, terminate_grace):
             raise asyncio.CancelledError from None
         raise
     return returncode, "\n".join(tail)

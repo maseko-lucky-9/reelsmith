@@ -22,13 +22,13 @@ Scoring (``search``):
    is the best cosine of the prompt and a sentence that overlaps chunk ``i``.
 2. Each side is calibrated on its own (``calibrate``): text-to-text cosines
    run higher than text-to-video ones, so a raw maximum would let speech win
-   everywhere. ``(raw - floor) / (match - floor)``, clamped to 0..1, puts
+   everywhere. ``(raw - floor) / (2 * (match - floor))``, clamped to 0..1, puts
    "unrelated" at 0 and "a typical labelled match" at 0.5 on both sides.
 3. ``score[i] = max(visual_cal[i], speech_cal[i])``.
 4. Chunks scoring at least ``HIT_THRESHOLD`` are hits; adjacent hits merge
    into one moment. Without any hit the ``FALLBACK_CHUNKS`` best chunks with
-   a score above 0 are
-   the candidates, so the judge still has something to look at.
+   a score above 0 are ``tentative`` candidates: the judge may confirm one,
+   otherwise nothing matched and the job keeps its chapters.
 5. Each moment becomes a window inside the clip length range: a long one is
    cut to ``max_s`` around its best chunk, a short one grows to ``min_s``
    around its centre; then its ends snap out to sentence boundaries when it
@@ -48,7 +48,7 @@ import os
 import re
 import shutil
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -93,7 +93,8 @@ start value; on the labelled set the top-1 hit rate is flat from 0.3 to 0.5
 (0.88-0.91) and drops above it as moments vanish."""
 
 FALLBACK_CHUNKS = 3
-"""Without any hit, this many best chunks become single-chunk candidates."""
+"""Without any hit, this many best chunks become single-chunk ``tentative``
+candidates: something for the judge to look at, never clips on their own."""
 
 MAX_MOMENTS = 20
 """Most candidates ``search`` returns, best first."""
@@ -205,10 +206,12 @@ def scenes_dir(job_folder: str | Path) -> Path:
 
 
 def load_index(index_dir: Path) -> SceneIndex:
-    """The index in ``index_dir``; ``SceneSearchError`` if missing or torn."""
+    """The index in ``index_dir``; ``SceneSearchError`` if missing, torn or
+    not plain numbers (``allow_pickle=False``: a planted object array is an
+    error, never code run on load)."""
     try:
         chunks = json.loads((index_dir / "chunks.json").read_text(encoding="utf-8"))
-        rows = np.load(index_dir / "embeddings.npy")
+        rows = np.load(index_dir / "embeddings.npy", allow_pickle=False)
     except (OSError, ValueError, EOFError) as exc:
         raise SceneSearchError(f"no complete scene index in {index_dir}: {exc}") from exc
     if not isinstance(chunks, list) or rows.ndim != 2 or rows.shape[1] != EMBED_DIMS:
@@ -219,7 +222,19 @@ def load_index(index_dir: Path) -> SceneIndex:
         spans = [(float(c["start"]), float(c["end"])) for c in chunks]
     except (KeyError, TypeError, ValueError) as exc:
         raise SceneSearchError(f"{index_dir}/chunks.json is malformed: {exc}") from exc
-    return SceneIndex(rows.astype(np.float32, copy=False), spans)
+    return SceneIndex(_finite(rows, index_dir / "embeddings.npy"), spans)
+
+
+def _finite(rows: np.ndarray, source: Path | str) -> np.ndarray:
+    """``rows`` as float32 with NaN and infinities set to 0 (that row then
+    matches nothing), logged; the rest of the index stays usable."""
+    if not np.issubdtype(rows.dtype, np.number):
+        raise SceneSearchError(f"{source} does not hold numbers ({rows.dtype})")
+    rows = rows.astype(np.float32, copy=False)
+    if not np.isfinite(rows).all():
+        log.warning("%s has non-finite values; those entries are treated as 0", source)
+        rows = np.nan_to_num(rows, nan=0.0, posinf=0.0, neginf=0.0)
+    return rows
 
 
 def source_fingerprint(video_path: str | Path) -> dict[str, Any]:
@@ -273,6 +288,19 @@ def _sidecar_argv(command: str, *positionals: str) -> list[str]:
     ]
 
 
+_ENV_NAMES = frozenset({"PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "USER", "LOGNAME", "SHELL"})
+_ENV_PREFIXES = ("LC_", "HF_", "TRANSFORMERS_", "HUGGINGFACE_", "MLX", "YTVIDEO_SCENE_")
+
+
+def sidecar_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The sidecar's environment: what it needs to run and find the model
+    cache, never the app's secrets (no other ``YTVIDEO_*`` value, no tokens).
+    Read from the process environment because the child inherits from it;
+    configuration itself stays in ``settings`` (constitution I)."""
+    source = os.environ if environ is None else environ
+    return {k: v for k, v in source.items() if k in _ENV_NAMES or k.startswith(_ENV_PREFIXES)}
+
+
 Progress = Callable[[int, int], Awaitable[None]]
 
 
@@ -289,11 +317,13 @@ async def _run_sidecar(argv: list[str], *, timeout: float, on_progress: Progress
                 await on_progress(done, total)
 
     try:
-        returncode, stderr = await child_process.run_streaming(argv, timeout=timeout, on_line=_on_line)
+        returncode, stderr = await child_process.run_streaming(
+            argv, timeout=timeout, on_line=_on_line, env=sidecar_env()
+        )
+    except TimeoutError as exc:  # before OSError: TimeoutError is one
+        raise SceneSearchError(f"the scene sidecar took longer than {timeout:g} s") from exc
     except OSError as exc:
         raise SceneSearchError(f"cannot start the scene sidecar {argv[0]!r}: {exc}") from exc
-    except TimeoutError as exc:
-        raise SceneSearchError(f"the scene sidecar took longer than {timeout:g} s") from exc
     except ValueError as exc:  # unreadable output; the child was stopped
         raise SceneSearchError(f"the scene sidecar's output was unreadable: {exc}") from exc
     if returncode != 0:
@@ -315,7 +345,8 @@ async def ensure_index(
     index, or none, never a half-written one. Raises ``SceneSearchError``.
     """
     model = settings.scene_model
-    if index_is_current(index_dir, video_path, model):
+    video = Path(video_path).resolve()
+    if index_is_current(index_dir, video, model):
         return load_index(index_dir), True
     # A job indexes one source at a time (a reprompt never runs beside its
     # run), so a fresh directory still here was left by a crash.
@@ -324,12 +355,12 @@ async def ensure_index(
     fresh = index_dir.with_name(f".{index_dir.name}-{uuid.uuid4().hex[:8]}")
     try:
         await _run_sidecar(
-            _sidecar_argv("index", str(video_path), str(fresh)),
+            _sidecar_argv("index", str(video), str(fresh)),
             timeout=settings.scene_index_timeout_seconds,
             on_progress=on_progress,
         )
         index = load_index(fresh)
-        _write_json(fresh / "meta.json", _meta(video_path, model))
+        _write_json(fresh / "meta.json", _meta(video, model))
         shutil.rmtree(index_dir, ignore_errors=True)
         os.replace(fresh, index_dir)
     finally:
@@ -337,16 +368,37 @@ async def ensure_index(
     return index, False
 
 
-async def embed_texts(texts: Sequence[str], work_dir: Path, *, timeout: float = 600) -> np.ndarray:
-    """Vectors (n x 768) for ``texts`` from the sidecar's ``embed-texts``."""
+EMBED_SECONDS_PER_TEXT = 0.3
+"""Budget per text for ``embed-texts``: measured about 0.12 s a sentence on an
+idle M5 Pro and 2.4x that under load (spec 014 plan)."""
+
+EMBED_MIN_TIMEOUT = 120.0
+"""Floor of an ``embed-texts`` timeout: the model load alone takes 2-12 s."""
+
+SENTENCE_BATCH = 200
+"""Sentences per ``embed-texts`` call. Each finished batch is cached, so a
+retry after a timeout or a cancel resumes instead of starting over; each
+call reloads the model (2-5 s), so batches are not small."""
+
+
+def embed_timeout(count: int) -> float:
+    """Seconds allowed for embedding ``count`` texts in one call, at least
+    ``EMBED_MIN_TIMEOUT`` and at most ``scene_index_timeout_seconds``."""
+    return min(float(settings.scene_index_timeout_seconds), max(EMBED_MIN_TIMEOUT, EMBED_SECONDS_PER_TEXT * count))
+
+
+async def embed_texts(texts: Sequence[str], work_dir: Path, *, timeout: float | None = None) -> np.ndarray:
+    """Vectors (n x 768) for ``texts`` from the sidecar's ``embed-texts``;
+    the timeout defaults to ``embed_timeout(len(texts))``."""
     work_dir.mkdir(parents=True, exist_ok=True)
     tag = uuid.uuid4().hex[:8]
     texts_path = work_dir / f".texts-{tag}.json"
     out = work_dir / f".texts-{tag}.npy"
+    limit = embed_timeout(len(texts)) if timeout is None else timeout
     try:
         texts_path.write_text(json.dumps(list(texts)), encoding="utf-8")
-        await _run_sidecar(_sidecar_argv("embed-texts", str(texts_path), str(out)), timeout=timeout, on_progress=None)
-        rows = np.load(out)
+        await _run_sidecar(_sidecar_argv("embed-texts", str(texts_path), str(out)), timeout=limit, on_progress=None)
+        rows = np.load(out, allow_pickle=False)
     except (OSError, ValueError, EOFError) as exc:
         raise SceneSearchError(f"text embeddings unreadable: {exc}") from exc
     finally:
@@ -354,48 +406,75 @@ async def embed_texts(texts: Sequence[str], work_dir: Path, *, timeout: float = 
         out.unlink(missing_ok=True)
     if rows.shape != (len(texts), EMBED_DIMS):
         raise SceneSearchError(f"text embeddings have shape {rows.shape}, expected ({len(texts)}, {EMBED_DIMS})")
-    return rows.astype(np.float32, copy=False)
+    return _finite(rows, "embed-texts output")
 
 
-def _cached_sentence_vectors(index_dir: Path, texts: list[str], model: str) -> np.ndarray | None:
+def _load_sentence_cache(index_dir: Path, model: str) -> dict[str, np.ndarray]:
+    """Cached vectors by sentence text (``sentences.json`` lists the texts,
+    ``sentence_embeddings.npy`` holds at least as many rows, in order).
+
+    Keyed by text, so a re-transcribed sentence never reuses another's
+    vector. Anything unreadable, foreign or torn is an empty cache.
+    """
     try:
         meta = json.loads((index_dir / "sentences.json").read_text(encoding="utf-8"))
-        if meta != {"model": model, "texts": texts}:
-            return None
-        rows = np.load(index_dir / "sentence_embeddings.npy")
-    except OSError, ValueError, EOFError:
-        return None
-    return rows if rows.shape == (len(texts), EMBED_DIMS) else None
+        rows = np.load(index_dir / "sentence_embeddings.npy", allow_pickle=False)
+        if not isinstance(meta, dict) or meta.get("model") != model:
+            return {}
+        texts = meta.get("texts")
+        if not isinstance(texts, list) or rows.ndim != 2 or rows.shape[1] != EMBED_DIMS or rows.shape[0] < len(texts):
+            return {}
+        rows = _finite(rows, index_dir / "sentence_embeddings.npy")
+    except (OSError, ValueError, EOFError, SceneSearchError) as exc:
+        if not isinstance(exc, FileNotFoundError):
+            log.warning("Ignoring the sentence-vector cache in %s: %s", index_dir, exc)
+        return {}
+    return {str(t): rows[i] for i, t in enumerate(texts)}
+
+
+def _save_sentence_cache(index_dir: Path, model: str, cache: dict[str, np.ndarray]) -> None:
+    """Rows first, then the texts they belong to: a crash between the two
+    leaves extra rows, which the reader ignores."""
+    texts = list(cache)
+    npy_tmp = index_dir / f".sentence_embeddings-{uuid.uuid4().hex[:8]}.npy"
+    try:
+        rows = np.stack([cache[t] for t in texts]) if texts else np.zeros((0, EMBED_DIMS), np.float32)
+        np.save(npy_tmp, rows.astype(np.float32), allow_pickle=False)
+        os.replace(npy_tmp, index_dir / "sentence_embeddings.npy")
+        _write_json(index_dir / "sentences.json", {"model": model, "texts": texts})
+    except OSError as exc:
+        log.warning("Could not cache sentence vectors in %s: %s", index_dir, exc)
+    finally:
+        npy_tmp.unlink(missing_ok=True)
 
 
 async def prompt_and_sentence_vectors(
     index_dir: Path, prompt: str, sentences: Sequence[Sentence]
 ) -> tuple[np.ndarray, np.ndarray]:
-    """The prompt's vector and one per sentence, in one sidecar call.
+    """The prompt's vector and one per sentence.
 
-    Sentence vectors are cached in ``index_dir`` (``sentences.json`` holds
-    the texts they belong to), so a reprompt embeds only its prompt.
+    Sentences already in the cache (by text) are not embedded again; the
+    rest go in batches of ``SENTENCE_BATCH``, the prompt with the first, and
+    each finished batch is cached at once. A reprompt of an unchanged
+    transcript embeds only its prompt.
     """
     model = settings.scene_model
     texts = sentence_texts(sentences)
-    cached = _cached_sentence_vectors(index_dir, texts, model) if texts else np.zeros((0, EMBED_DIMS), np.float32)
-    if cached is not None:
-        return (await embed_texts([prompt], index_dir))[0], cached
-    rows = await embed_texts([prompt, *texts], index_dir)
-    sentence_rows = rows[1:]
-    if texts:
-        # Vectors first, then the texts they belong to: a crash between the
-        # two leaves a mismatch, which the next search recomputes.
-        npy_tmp = index_dir / f".sentence_embeddings-{uuid.uuid4().hex[:8]}.npy"
-        try:
-            np.save(npy_tmp, sentence_rows)
-            os.replace(npy_tmp, index_dir / "sentence_embeddings.npy")
-            _write_json(index_dir / "sentences.json", {"model": model, "texts": texts})
-        except OSError as exc:
-            log.warning("Could not cache sentence vectors in %s: %s", index_dir, exc)
-        finally:
-            npy_tmp.unlink(missing_ok=True)
-    return rows[0], sentence_rows
+    cache = _load_sentence_cache(index_dir, model)
+    missing = list(dict.fromkeys(t for t in texts if t not in cache))
+    batches = [missing[i : i + SENTENCE_BATCH] for i in range(0, len(missing), SENTENCE_BATCH)] or [[]]
+    prompt_vec: np.ndarray | None = None
+    for batch in batches:
+        head = [prompt] if prompt_vec is None else []
+        rows = await embed_texts([*head, *batch], index_dir)
+        if head:
+            prompt_vec, rows = rows[0], rows[1:]
+        if batch:
+            cache.update(zip(batch, rows))
+            _save_sentence_cache(index_dir, model, cache)
+    assert prompt_vec is not None
+    sentence_rows = np.stack([cache[t] for t in texts]) if texts else np.zeros((0, EMBED_DIMS), np.float32)
+    return prompt_vec, sentence_rows
 
 
 # ── search ───────────────────────────────────────────────────────────────────
@@ -570,9 +649,13 @@ def search(
     scores = np.maximum(visual, speech)
 
     runs = _merge_hits(scores, threshold)
-    if not runs:
+    tentative = not runs
+    if tentative:
+        # Nothing cleared the bar. The floors are medians of unrelated
+        # cosines, so about half of all chunks score above 0: these are only
+        # something for the judge to look at, never clips on their own
+        # (``tentative``; ``judge_scenes`` drops them unless it confirms).
         best = [int(i) for i in np.argsort(-scores, kind="stable")[:FALLBACK_CHUNKS]]
-        # A chunk at 0 is unrelated: no candidate beats "nothing matched".
         runs = [(i, i) for i in best if scores[i] > 0]
     moments = []
     for first, last in runs:
@@ -623,6 +706,7 @@ def search(
                 text=text,
                 focus=(round(f0, 3), round(f1, 3)),
                 focus_text=_text_between(sentences, f0, f1),
+                tentative=tentative,
             )
         )
     return out

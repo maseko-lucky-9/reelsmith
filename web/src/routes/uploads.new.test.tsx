@@ -49,6 +49,11 @@ describe('UploadNewPage — prompt (spec 014)', () => {
     expect(vi.mocked(api.uploadVideo).mock.calls[0][1]).toBeUndefined()
   })
 
+  it('caps the prompt at 2000 characters', () => {
+    renderPage()
+    expect((screen.getByLabelText('Find moments (optional)') as HTMLTextAreaElement).maxLength).toBe(2000)
+  })
+
   it('explains what the prompt does', () => {
     renderPage()
     expect(screen.getByText(/overrides the video’s chapters/)).toBeTruthy()

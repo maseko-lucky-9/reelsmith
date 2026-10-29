@@ -361,8 +361,9 @@ export function sceneIndexProgress(events: PipelineEvent[] | undefined): SceneIn
   let latest: SceneIndexProgress | null = null
   for (const e of events ?? []) {
     const sceneSkipped = e.type === 'StageSkipped' && e.payload?.stage_id === 'scene_search'
-    if (e.type === 'ScenesIndexed' || sceneSkipped || e.type === 'ChaptersDetected') {
-      // Ready, failed (the job falls back) or past it: no stale "Indexing scenes".
+    const ended = e.type === 'RepromptFailed' || e.type === 'JobCancelled'
+    if (e.type === 'ScenesIndexed' || sceneSkipped || e.type === 'ChaptersDetected' || ended) {
+      // Ready, failed (the job falls back), past it, or the run is over: no stale "Indexing scenes".
       latest = null
     } else if (e.type === 'SceneIndexProgress') {
       const done = e.payload?.done

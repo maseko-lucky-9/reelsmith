@@ -168,3 +168,58 @@ async def test_a_timeout_stops_the_child_and_raises(tmp_path):
     with pytest.raises(TimeoutError):
         await child_process.run_streaming(argv, timeout=3, on_line=lambda line: None, terminate_grace=0.2)
     assert not _alive(int((tmp_path / "pid").read_text()))
+
+
+async def test_a_multibyte_character_split_across_reads_stays_whole(tmp_path, monkeypatch):
+    monkeypatch.setattr(child_process, "READ_CHUNK_BYTES", 1)  # every byte its own read
+    argv = _script(tmp_path, """
+        import sys
+        sys.stdout.buffer.write("café ✓ naïve\\n".encode("utf-8"))
+        sys.stderr.buffer.write("erreur é".encode("utf-8"))
+        """)  # fmt: skip
+    lines: list[str] = []
+    code, err = await child_process.run_streaming(argv, timeout=30, on_line=lines.append)
+    assert (code, lines, err) == (0, ["café ✓ naïve"], "erreur é")
+
+
+_SLOW_CLEANUP = """
+    import os, signal, sys, time
+    from pathlib import Path
+    out = Path(sys.argv[1])
+    def term(signum, frame):
+        time.sleep(0.5)  # cleaning up takes a while
+        (out / "cleaned").write_text("yes")
+        sys.exit(143)
+    signal.signal(signal.SIGTERM, term)
+    (out / "pid").write_text(str(os.getpid()))
+    time.sleep(60)
+    """
+
+
+async def test_a_child_gets_its_grace_to_clean_up_before_sigkill(tmp_path):
+    argv = _script(tmp_path, _SLOW_CLEANUP)
+    task = asyncio.create_task(
+        child_process.run_streaming(argv, timeout=60, on_line=lambda line: None, terminate_grace=3.0)
+    )
+    await _wait_for(tmp_path / "pid")
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert (tmp_path / "cleaned").read_text() == "yes"  # not SIGKILLed during its 0.5 s cleanup
+    assert not _alive(int((tmp_path / "pid").read_text()))
+
+
+async def test_a_second_cancel_does_not_cut_the_stop_short(tmp_path):
+    argv = _script(tmp_path, _SLOW_CLEANUP)
+    task = asyncio.create_task(
+        child_process.run_streaming(argv, timeout=60, on_line=lambda line: None, terminate_grace=3.0)
+    )
+    await _wait_for(tmp_path / "pid")
+    task.cancel()
+    await asyncio.sleep(0.1)  # inside the grace: SIGTERM sent, the child is cleaning up
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # The stop ran to the end: the child finished its cleanup and was reaped.
+    assert (tmp_path / "cleaned").read_text() == "yes"
+    assert not _alive(int((tmp_path / "pid").read_text()))

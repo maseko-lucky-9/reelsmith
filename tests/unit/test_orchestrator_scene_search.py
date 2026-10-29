@@ -51,7 +51,7 @@ def sidecar(tmp_path, monkeypatch):
         return spec
 
     _write()
-    monkeypatch.setenv("FAKE_SCENE_SPEC", str(spec))
+    monkeypatch.setenv("YTVIDEO_SCENE_FAKE_SPEC", str(spec))
     monkeypatch.setattr(orch.settings, "scene_search_provider", "mlx")
     monkeypatch.setattr(orch.settings, "scene_python", sys.executable)
     monkeypatch.setattr(scene_search, "SCENE_SCRIPT", FAKE)
@@ -93,7 +93,8 @@ async def test_a_prompt_overrides_the_youtube_chapters(harness, sidecar, store):
     (indexed,) = recorder.of(EventType.SCENES_INDEXED)
     assert indexed.payload["chunks"] == 45 and indexed.payload["reused"] is False
     progress = [e.payload for e in recorder.of(EventType.SCENE_INDEX_PROGRESS)]
-    assert progress[0] == {"done": 0, "total": 45} and progress[-1] == {"done": 45, "total": 45}
+    # Throttled to one a SCENE_PROGRESS_INTERVAL: the fake reports 46 times in well under 1 s.
+    assert progress == [{"done": 0, "total": 45}, {"done": 45, "total": 45}]
     assert (harness.base / "scenes" / "embeddings.npy").is_file()
     # The whole source was transcribed once, beside the indexing, and the
     # clip reuses those words.
@@ -148,7 +149,9 @@ async def test_an_unexpected_error_in_scene_search_never_fails_the_job(harness, 
 
     assert (await store.get(discover.JOB_ID)).status == "completed"
     assert [c[0] for c in discover._chapters(recorder)] == ["Intro", "Main"]
-    assert "scene search failed: unexpected" in _skipped(recorder)
+    # A fixed reason: the exception text stays in the log, never on the SSE stream.
+    assert "scene search failed" in _skipped(recorder)
+    assert not any("unexpected" in r for r in _skipped(recorder))
 
 
 async def test_no_matching_moment_falls_back_to_the_chapters(harness, sidecar):
@@ -173,10 +176,7 @@ async def test_a_failed_index_hands_its_words_to_discovery(tmp_path, monkeypatch
     assert h.proposer.calls[0]["prompt"] == PROMPT
 
 
-async def test_cancel_during_indexing_stops_the_sidecar_and_ends_cancelled(harness, sidecar, tmp_path):
-    spec = sidecar(hang_after=1)
-    store = discover.InMemoryJobStore()
-    await store.create(JobState(job_id=discover.JOB_ID, url=discover.URL, download_path=str(tmp_path)))
+def _start_job(tmp_path: Path, store) -> tuple[asyncio.Task, discover._Recorder]:
     recorder = discover._Recorder(orch.AsyncEventBus())
     bus = orch.AsyncEventBus()
     bus.publish = recorder  # type: ignore[method-assign]
@@ -186,6 +186,27 @@ async def test_cancel_during_indexing_stops_the_sidecar_and_ends_cancelled(harne
         orch._run_job(Event(type=EventType.VIDEO_REQUESTED, job_id=discover.JOB_ID, payload=payload), bus, store)
     )
     orch._track_job_task(discover.JOB_ID, task)
+    return task, recorder
+
+
+async def _cancel_and_check(task: asyncio.Task, recorder, store, harness) -> None:
+    """Cancel the job: it must end cancelled at once, before any chapter, render or completion."""
+    assert orch.cancel_job(discover.JOB_ID) is True
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 10)
+    assert (await store.get(discover.JOB_ID)).status == "cancelled"
+    types = recorder.types()
+    assert types[-1] is EventType.JOB_CANCELLED
+    assert EventType.CHAPTERS_DETECTED not in types and EventType.JOB_COMPLETED not in types
+    assert _skipped(recorder) == []  # a cancel is not a scene-search failure
+    assert harness.renders == []
+
+
+async def test_cancel_during_indexing_stops_the_sidecar_and_ends_cancelled(harness, sidecar, tmp_path):
+    spec = sidecar(hang_after=1)
+    store = discover.InMemoryJobStore()
+    await store.create(JobState(job_id=discover.JOB_ID, url=discover.URL, download_path=str(tmp_path)))
+    task, recorder = _start_job(tmp_path, store)
     for _ in range(500):
         if recorder.of(EventType.SCENE_INDEX_PROGRESS) and Path(f"{spec}.pid").exists():
             break
@@ -193,18 +214,45 @@ async def test_cancel_during_indexing_stops_the_sidecar_and_ends_cancelled(harne
     else:
         pytest.fail("the sidecar never reported progress")
 
-    assert orch.cancel_job(discover.JOB_ID) is True
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    assert (await store.get(discover.JOB_ID)).status == "cancelled"
-    assert recorder.types()[-1] is EventType.JOB_CANCELLED
+    await _cancel_and_check(task, recorder, store, harness)
     assert Path(f"{spec}.sigterm").read_text() == "1"  # asked to clean up first
     pid = int(Path(f"{spec}.pid").read_text())
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
     assert not (harness.base / "scenes").exists()
     assert [p.name for p in harness.base.iterdir() if p.name.startswith(".scenes")] == []
+
+
+async def test_cancel_while_the_judge_is_asked_ends_cancelled(harness, sidecar, tmp_path, monkeypatch):
+    monkeypatch.setattr(orch.settings, "ollama_enabled", True)
+    monkeypatch.setattr(orch.segment_rerank, "grab_judge_frames", lambda path, start, end: ["frame"] * 4)
+    asked = asyncio.Event()
+
+    async def _never_answers(prompt_text, images, *, timeout, transport=None):
+        asked.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(orch.segment_rerank, "_ask_vision", _never_answers)
+    store = discover.InMemoryJobStore()
+    await store.create(JobState(job_id=discover.JOB_ID, url=discover.URL, download_path=str(tmp_path)))
+    task, recorder = _start_job(tmp_path, store)
+    await asyncio.wait_for(asked.wait(), 10)
+
+    await _cancel_and_check(task, recorder, store, harness)
+
+
+async def test_unrelated_footage_keeps_the_chapters_when_the_judge_is_unavailable(harness, sidecar, monkeypatch):
+    """Review HIGH: chunks drawn from the measured unrelated distribution
+    (median 0.126) with Ollama off must not become clips."""
+    from tests.unit.test_scene_search import outside_cosines
+
+    sims = outside_cosines(45)
+    sidecar(chunks=[[i * 8.0, (i + 1) * 8.0, a] for i, a in enumerate(sims)])
+    monkeypatch.setattr(orch.settings, "ollama_enabled", False)
+    recorder = await harness.run(discover.InMemoryJobStore(), prompt=PROMPT)
+
+    assert [c[0] for c in discover._chapters(recorder)] == ["Intro", "Main"]
+    assert "no moment matched the prompt" in _skipped(recorder)
 
 
 # ── reprompt ──────────────────────────────────────────────────────────────────

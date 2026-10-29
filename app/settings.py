@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _REPO_ANTON = Path(__file__).resolve().parent / "assets" / "fonts" / "Anton-Regular.ttf"
@@ -263,6 +264,14 @@ class Settings(BaseSettings):
     caption_words_per_segment: int = 3
     download_timeout_seconds: int = 600
     render_timeout_seconds: int = 3600
+
+    @field_validator("scene_python")
+    @classmethod
+    def _scene_python_absolute(cls, value: str) -> str:
+        """A relative ``YTVIDEO_SCENE_PYTHON`` is taken from the project root,
+        not the server's working directory."""
+        path = Path(value).expanduser()
+        return str(path if path.is_absolute() else _PROJECT_ROOT / path)
 
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

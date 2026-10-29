@@ -39,7 +39,10 @@ function NewJobPage() {
         ...(prompt.trim() ? { prompt: prompt.trim() } : {}),
       }),
     onSuccess: (data) => {
-      toast.success(`Job ${data.job_id} queued`)
+      // The API returns an existing job for a link it already has (same
+      // prompt, or none): say so instead of claiming a new job was queued.
+      if (data.status === 'accepted') toast.success(`Job ${data.job_id} queued`)
+      else toast.info(`This link already has job ${data.job_id} (${data.status}); opening it`)
       void navigate({ to: '/jobs/$jobId', params: { jobId: data.job_id } })
     },
     onError: (err: Error) => {

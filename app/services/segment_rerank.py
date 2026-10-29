@@ -398,6 +398,11 @@ TITLE_BYTES = 80
 REASON_BYTES = 300
 EMOTION_BYTES = 24
 
+EMOTIONS = ("happy", "sad", "angry", "fear", "surprise", "disgust", "excitement", "calm", "neutral", "other", "none")
+"""The only emotions the judge may answer (enforced by the JSON schema and
+again by ``parse_verdict``); ``neutral`` and ``none`` are stored as no emotion."""
+_NO_EMOTION = frozenset({"neutral", "none"})
+
 _JUDGE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -405,13 +410,16 @@ _JUDGE_SCHEMA: dict[str, Any] = {
         "confidence": {"type": "number"},
         "title": {"type": "string"},
         "reason": {"type": "string"},
-        "emotion": {"type": "string"},
+        "emotion": {"type": "string", "enum": list(EMOTIONS)},
     },
     "required": ["match", "confidence", "title", "reason", "emotion"],
 }
 
-# The instruction text is the one ADR-013 measured (precision 0.844 with
-# qwen2.5vl:7b); only the query moved into a delimited data block.
+# Based on the instruction text ADR-013 measured (precision 0.844 with
+# qwen2.5vl:7b), with two changes that are NOT re-measured (spec 014 T110):
+# the query moved into a delimited <query> block, and two sentences were
+# added saying the tags hold data that is never an instruction. The
+# text-only speech prompt below is new and unmeasured.
 _JUDGE_INSTRUCTIONS = (
     "These are 4 frames sampled in order from one short video clip. Decide whether the clip "
     "matches the search query in the <query> tags.\n"
@@ -469,7 +477,8 @@ def parse_verdict(raw: str) -> Verdict | None:
 
     ``match`` must be a boolean and ``confidence`` a finite number (clamped
     to 0..1). Text fields are flattened to one line and cut (``_as_data``);
-    an emotion of ``none`` becomes empty. Other keys are ignored.
+    an emotion outside ``EMOTIONS``, ``none`` or ``neutral`` becomes empty.
+    Other keys are ignored.
     """
     try:
         data = json.loads(raw)
@@ -488,7 +497,7 @@ def parse_verdict(raw: str) -> Verdict | None:
         confidence=min(1.0, max(0.0, float(confidence))),
         title=_reply_text(data.get("title"), TITLE_BYTES),
         reason=_reply_text(data.get("reason"), REASON_BYTES),
-        emotion="" if emotion in {"none", "n/a", "neutral"} else emotion,
+        emotion=emotion if emotion in EMOTIONS and emotion not in _NO_EMOTION else "",
     )
 
 
@@ -577,7 +586,7 @@ async def judge_scenes(
     video_path: str,
     job_id: str = "-",
     transport: httpx.AsyncBaseTransport | None = None,
-    frames: Callable[[str, float, float], list[str]] = grab_judge_frames,
+    frames: Callable[[str, float, float], list[str]] | None = None,
     clock: Callable[[], float] = time.monotonic,
 ) -> list[ProposedSegment]:
     """The candidates the judge did not reject, best first (ties: earliest start).
@@ -589,16 +598,19 @@ async def judge_scenes(
     keeps its score. Candidates beyond the cap rank below every judged one,
     so they are dropped once the judge has answered at all (rejecting the
     best 8 must not hand the clips to the 9th); they stay only when nothing
-    was judged. Never raises, except cancellation.
+    was judged. A ``tentative`` candidate (scene search's no-hit fallback)
+    is kept only when the judge confirms it. Never raises, except
+    cancellation.
     """
     pool = list(candidates)
     if not pool:
         return []
+    grab = frames or grab_judge_frames
     if not settings.ollama_enabled:
         log.warning(
             "[%s] Scene judge skipped (YTVIDEO_OLLAMA_ENABLED=false); moments keep their similarity order", job_id
         )
-        return pool
+        return [s for s in pool if not s.tentative]
     limit = max(0, settings.scene_judge_max_candidates)
     deadline = clock() + settings.scene_judge_budget_seconds
     kept: list[ProposedSegment] = []
@@ -624,7 +636,7 @@ async def judge_scenes(
             look_start, look_end = seg.focus or (seg.start, seg.end)
             speech_led = seg.score_breakdown.get("speech", 0) > seg.score_breakdown.get("visual", 0)
             transcript = (seg.focus_text or seg.text) if speech_led else None
-            images = [] if transcript else await asyncio.to_thread(frames, video_path, look_start, look_end)
+            images = [] if transcript else await asyncio.to_thread(grab, video_path, look_start, look_end)
             raw = await _ask_vision(
                 build_judge_prompt(prompt, transcript),
                 images,
@@ -660,4 +672,6 @@ async def judge_scenes(
     if judged == 0:
         # The judge never answered: everything keeps its similarity order.
         kept.extend(beyond_cap)
+    # Judged matches carry ``tentative`` too; only unconfirmed ones go.
+    kept = [s for s in kept if not s.tentative or "judge" in s.score_breakdown]
     return sorted(kept, key=lambda s: (-s.score, s.start, s.end))

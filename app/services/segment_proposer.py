@@ -110,6 +110,9 @@ class ProposedSegment:
     # The judge looks there, not at the whole clip window.
     focus: tuple[float, float] | None = None
     focus_text: str = ""
+    # A no-hit fallback of scene search: nothing cleared the bar, so it is a
+    # clip only if the judge looks at it and says it matches.
+    tentative: bool = False
 
     @property
     def virality_score(self) -> int:

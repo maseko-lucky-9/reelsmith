@@ -103,6 +103,47 @@ def test_failed_job_with_same_url_is_not_a_duplicate(client, monkeypatch):
     spies["list_jobs"].assert_not_called()
 
 
+def _add_prompted_job(client: TestClient, job_id: str, prompt: str | None) -> None:
+    client.portal.call(
+        _store(client).create,
+        JobState(job_id=job_id, url=URL, download_path="/tmp", prompt=prompt, status="completed"),
+    )
+
+
+def test_a_new_prompt_for_a_processed_url_gets_its_own_job(client):
+    """Spec 014 review: a prompt is never silently dropped onto an old job."""
+    _add_prompted_job(client, "no-prompt", None)
+
+    first = client.post("/jobs", json={"url": URL, "download_path": "/tmp/x", "prompt": "a red car"})
+    assert first.json()["status"] == "accepted" and first.json()["job_id"] != "no-prompt"
+    job = client.get(f"/jobs/{first.json()['job_id']}").json()
+    assert job["prompt"] == "a red car"
+
+    other = client.post("/jobs", json={"url": URL, "download_path": "/tmp/x", "prompt": "a blue boat"})
+    assert other.json()["status"] == "accepted"
+    assert other.json()["job_id"] not in {"no-prompt", first.json()["job_id"]}
+    assert client.app.state.job_queue.qsize() == 2
+
+
+def test_the_same_prompt_or_no_prompt_is_still_a_duplicate(client):
+    _add_prompted_job(client, "red-car", "a red car")
+
+    same = client.post("/jobs", json={"url": URL, "download_path": "/tmp/x", "prompt": " a red car "})
+    plain = client.post("/jobs", json={"url": URL, "download_path": "/tmp/x"})
+    blank = client.post("/jobs", json={"url": URL, "download_path": "/tmp/x", "prompt": "   "})
+
+    for response in (same, plain, blank):
+        assert response.json() == {"job_id": "red-car", "status": "completed"}
+    assert client.app.state.job_queue.qsize() == 0
+
+
+@pytest.mark.parametrize(("length", "status"), [(2000, 202), (2001, 422)])
+def test_a_prompt_is_at_most_2000_characters(client, length, status):
+    response = client.post("/jobs", json={"url": URL, "download_path": "/tmp/x", "prompt": "p" * length})
+    assert response.status_code == status
+    assert client.app.state.job_queue.qsize() == (1 if status == 202 else 0)
+
+
 def test_url_that_only_contains_an_existing_url_is_not_a_duplicate(client):
     _add_job(client, "longer", URL + "&t=42", "running")
 

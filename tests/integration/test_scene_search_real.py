@@ -75,10 +75,12 @@ async def test_a_visual_prompt_finds_its_chunk_and_the_index_is_reused(two_scene
     assert reused is True
 
 
-@pytest.mark.skipif(not _ollama_has("qwen2.5vl:7b"), reason="Ollama with qwen2.5vl:7b not available")
 async def test_the_vision_judge_confirms_the_fractal_and_rejects_the_test_card(
     two_scene_clip, real_sidecar, monkeypatch
 ):
+    # Probed here, not in a skipif: collecting the default run makes no network call.
+    if not _ollama_has("qwen2.5vl:7b"):
+        pytest.skip("Ollama with qwen2.5vl:7b not available")
     monkeypatch.setattr(segment_rerank.settings, "ollama_enabled", True)
     monkeypatch.setattr(segment_rerank.settings, "ollama_vision_model", "qwen2.5vl:7b")
     (fractal, *_) = await _search(two_scene_clip, "a colorful swirling fractal pattern")

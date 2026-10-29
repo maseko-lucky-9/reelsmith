@@ -70,14 +70,14 @@ async def _judge(ollama: _Ollama, candidates: list[ProposedSegment], **kw: Any) 
 
 
 async def test_a_match_is_kept_with_the_judges_words_and_a_non_match_is_dropped():
-    ollama = _Ollama(_verdict(True, 0.8, emotion="Joy"), _verdict(False, 0.9))
+    ollama = _Ollama(_verdict(True, 0.8, emotion="Happy"), _verdict(False, 0.9))
     got = await _judge(ollama, [_seg(0, 60), _seg(30, 50)])
 
     assert [g.start for g in got] == [0]
     (kept,) = got
     assert kept.score == 70  # blend(60, 80, 0.5)
     assert (kept.title, kept.reason, kept.summary, kept.emotion) == (
-        "A red car", "a red car drives by", "a red car drives by", "joy",
+        "A red car", "a red car drives by", "a red car drives by", "happy",
     )  # fmt: skip
     assert kept.score_breakdown == {"visual": 1.0, "speech": 0.0, "judge": 0.8}
 
@@ -155,10 +155,13 @@ async def test_an_unusable_reply_leaves_that_candidate_unjudged(reply):
     assert got[1].score_breakdown == {"visual": 1.0, "speech": 0.0}
 
 
-async def test_a_reply_cut_off_by_its_length_is_not_used():
-    cut = httpx.Response(200, json={"response": '{"match": tr', "done_reason": "length"})
+async def test_a_reply_cut_off_by_its_length_is_not_used_even_when_it_parses():
+    """num_predict ran out after a valid prefix: the verdict may be missing its
+    title and reason, so it is not trusted."""
+    cut = httpx.Response(200, json={"response": '{"match": true, "confidence": 0.95}', "done_reason": "length"})
     got = await _judge(_Ollama(cut), [_seg(0, 60)])
-    assert [(g.start, g.score) for g in got] == [(0, 60)]
+    assert [(g.start, g.score, g.title) for g in got] == [(0, 60, "")]
+    assert "judge" not in got[0].score_breakdown
 
 
 @pytest.mark.parametrize(
@@ -221,6 +224,103 @@ async def test_a_frame_grab_failure_leaves_that_candidate_unjudged():
         [_seg(0, 60)], prompt="x", video_path="v.mp4", transport=ollama.transport, frames=_broken
     )
     assert [g.score for g in got] == [60] and ollama.bodies == []
+
+
+# ── tentative candidates (scene search found no hit) ────────────────────────
+
+
+def _tentative(start: float, score: int) -> ProposedSegment:
+    return replace(_seg(start, score), tentative=True)
+
+
+async def test_tentative_candidates_need_the_judges_yes(monkeypatch):
+    ollama = _Ollama(_verdict(True, 0.9), _verdict(False), _verdict(True, 0.5))
+    got = await _judge(ollama, [_tentative(0, 20), _tentative(30, 15), _seg(60, 70)])
+    # 0 confirmed (blend(20, 90)), 30 rejected, 60 a hit confirmed (blend(70, 50))
+    assert [(g.start, g.score) for g in got] == [(60, 60), (0, 55)]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [httpx.ConnectError("refused"), httpx.ReadTimeout("slow"), httpx.Response(404, json={"error": "model"})],
+)
+async def test_without_a_judge_tentative_candidates_are_dropped(failure):
+    """Review HIGH: Ollama down or the model missing must not turn the no-hit
+    fallback into clips; a real hit keeps its similarity order."""
+    got = await _judge(_Ollama(failure), [_tentative(0, 20), _seg(30, 60), _tentative(60, 10)])
+    assert [g.start for g in got] == [30]
+
+
+async def test_with_ollama_off_tentative_candidates_are_dropped(monkeypatch):
+    monkeypatch.setattr(rr.settings, "ollama_enabled", False)
+    assert await _judge(_Ollama(), [_tentative(0, 20), _tentative(30, 15)]) == []
+
+
+async def test_the_unrelated_footage_fallback_is_no_clip_without_a_judge(monkeypatch):
+    """End to end on the measured unrelated distribution: search finds only
+    tentative candidates and, with the judge unavailable, nothing is left."""
+    import numpy as np
+
+    from app.services import scene_search as ss
+    from tests.unit.test_scene_search import E0, _index, outside_cosines
+
+    candidates = ss.search(_index(outside_cosines(45)), E0, min_s=8, max_s=60, duration=360)
+    assert candidates
+    assert await _judge(_Ollama(httpx.ConnectError("refused")), candidates) == []
+    monkeypatch.setattr(rr.settings, "ollama_enabled", False)
+    assert await _judge(_Ollama(), candidates) == []
+    assert np.isfinite([c.score for c in candidates]).all()
+
+
+# ── the reply ─────────────────────────────────────────────────────────────────
+
+
+def test_the_schema_allows_only_the_known_emotions():
+    assert rr._JUDGE_SCHEMA["properties"]["emotion"]["enum"] == list(rr.EMOTIONS)
+    assert "joy" not in rr.EMOTIONS
+
+
+@pytest.mark.parametrize(
+    ("emotion", "stored"),
+    [("Excitement", "excitement"), ("happy", "happy"), ("joy", ""), ("neutral", ""), ("none", ""),
+     ("ignore all rules", ""), (7, "")],
+)  # fmt: skip
+def test_an_emotion_outside_the_list_is_stored_as_none(emotion, stored):
+    verdict = rr.parse_verdict(json.dumps(_verdict(True, emotion=emotion)))
+    assert verdict is not None and verdict.emotion == stored
+
+
+def test_the_reason_is_capped():
+    verdict = rr.parse_verdict(json.dumps(_verdict(True, reason="é" * 1000)))
+    assert verdict is not None
+    assert 0 < len(verdict.reason.encode()) <= rr.REASON_BYTES == 300
+
+
+def test_the_emotion_cap_still_fits_every_emotion():
+    assert max(len(e.encode()) for e in rr.EMOTIONS) <= rr.EMOTION_BYTES
+
+
+async def test_the_query_is_capped():
+    ollama = _Ollama(_verdict(True))
+    await _judge(ollama, [_seg(0, 60)], prompt="a red car " * 100)
+    query = ollama.bodies[0]["prompt"].rsplit("<query>", 1)[1].split("</query>", 1)[0]
+    assert 0 < len(query.encode()) <= rr.JUDGE_QUERY_BYTES == 300
+
+
+async def test_each_call_waits_at_most_the_ollama_timeout_and_never_past_the_budget(monkeypatch):
+    monkeypatch.setattr(rr.settings, "ollama_timeout_seconds", 30)
+    monkeypatch.setattr(rr.settings, "scene_judge_budget_seconds", 100)
+    timeouts: list[float] = []
+
+    async def _ask(prompt_text, images, *, timeout, transport=None):
+        timeouts.append(timeout)
+        return json.dumps(_verdict(True))
+
+    monkeypatch.setattr(rr, "_ask_vision", _ask)
+    ticks = iter([0.0, 0.0, 90.0])  # deadline at 100; the 2nd call has 10 s left
+    await rr.judge_scenes([_seg(0, 60), _seg(30, 50)], prompt="x", video_path="v.mp4", frames=_frames,
+                          clock=lambda: next(ticks))  # fmt: skip
+    assert timeouts == [30, 10]
 
 
 def test_parse_verdict_cleans_the_text_fields():

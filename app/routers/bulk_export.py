@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ClipRecord
 from app.db.session import get_session
-from app.services.manifest_service import broll_credits
+from app.services.manifest_service import broll_credits, csv_safe
 from app.settings import settings
 
 router = APIRouter(prefix="/clips", tags=["bulk-export"])
@@ -52,11 +52,14 @@ def _build_manifest(clips: list[ClipRecord]) -> bytes:
     ])
     for c in clips:
         w.writerow([
-            c.id, c.title or "", c.summary or "", c.start, c.end,
-            c.output_path or "", c.thumbnail_path or "",
-            c.virality_score or 0,
-            ",".join(c.hashtags or []),
-            json.dumps(broll_credits(c.broll_assets)),
+            csv_safe(cell)
+            for cell in (
+                c.id, c.title or "", c.summary or "", c.start, c.end,
+                c.output_path or "", c.thumbnail_path or "",
+                c.virality_score or 0,
+                ",".join(c.hashtags or []),
+                json.dumps(broll_credits(c.broll_assets)),
+            )
         ])
     return buf.getvalue().encode("utf-8")
 
