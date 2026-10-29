@@ -128,12 +128,25 @@ def test_a_new_prompt_for_a_processed_url_gets_its_own_job(client):
 def test_the_same_prompt_or_no_prompt_is_still_a_duplicate(client):
     _add_prompted_job(client, "red-car", "a red car")
 
-    same = client.post("/jobs", json={"url": URL, "download_path": "/tmp/x", "prompt": " a red car "})
+    same = client.post("/jobs", json={"url": URL, "download_path": "/tmp/x", "prompt": " A  red\tCAR "})
     plain = client.post("/jobs", json={"url": URL, "download_path": "/tmp/x"})
     blank = client.post("/jobs", json={"url": URL, "download_path": "/tmp/x", "prompt": "   "})
 
     for response in (same, plain, blank):
         assert response.json() == {"job_id": "red-car", "status": "completed"}
+    assert client.app.state.job_queue.qsize() == 0
+
+
+def test_a_prompt_matches_any_earlier_job_of_the_url_not_only_the_newest(client):
+    _add_prompted_job(client, "red-car", "a red car")
+    _add_prompted_job(client, "blue-boat", "a blue boat")  # newer
+    _add_prompted_job(client, "plain", None)  # newest
+
+    again = client.post("/jobs", json={"url": URL, "download_path": "/tmp/x", "prompt": "A red car"})
+    plain = client.post("/jobs", json={"url": URL, "download_path": "/tmp/x"})
+
+    assert again.json() == {"job_id": "red-car", "status": "completed"}
+    assert plain.json() == {"job_id": "plain", "status": "completed"}  # no prompt: the newest, as before
     assert client.app.state.job_queue.qsize() == 0
 
 

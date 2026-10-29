@@ -455,7 +455,7 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
         scene_chapters: list[dict[str, Any]] | None = None
         if opts.segment_proposer and scene_search.enabled(prompt):
             assert prompt is not None
-            scene_chapters, source_words = await _scene_chapters(
+            scene_chapters, source_words, why = await _scene_chapters(
                 job_id=job_id,
                 video_path=video_path,
                 job_folder=destination,
@@ -472,7 +472,7 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
                 log.info("[%s] No moment matched the prompt; using the source's chapters or discovery", job_id)
                 await _emit(
                     bus, EventType.STAGE_SKIPPED, job_id,
-                    stage_id="scene_search", reason="no moment matched the prompt",
+                    stage_id="scene_search", reason=f"no moment matched the prompt{why}",
                 )
 
         if scene_chapters:
@@ -902,17 +902,22 @@ async def _scene_chapters(
     words: list[transcription_service.WordTiming] | None,
     first_index: int,
     bus: AsyncEventBus,
-) -> tuple[list[dict[str, Any]] | None, list[transcription_service.WordTiming] | None]:
+) -> tuple[list[dict[str, Any]] | None, list[transcription_service.WordTiming] | None, str]:
     """``_scene_search_stage``, guarded: any error but cancellation is logged,
     reported as ``StageSkipped`` (``scene_search``) and returns ``(None,
-    words)``, so scene search never fails a job (spec 014 FR-009)."""
-    state: dict[str, Any] = {"words": words}
+    words, "")``, so scene search never fails a job (spec 014 FR-009).
+
+    The third item is why nothing matched when the chapters are ``[]``: ""
+    or ``JUDGE_UNAVAILABLE`` (candidates there were, but the judge never
+    answered and none was strong enough to stand without it)."""
+    state: dict[str, Any] = {"words": words, "why": ""}
     try:
-        return await _scene_search_stage(
+        chapters, words = await _scene_search_stage(
             job_id=job_id, video_path=video_path, job_folder=job_folder, safe_end=safe_end,
             cleanup_root=cleanup_root, opts=opts, language=language, prompt=prompt,
             words=words, first_index=first_index, bus=bus, state=state,
         )  # fmt: skip
+        return chapters, words, state["why"]
     except asyncio.CancelledError:
         raise
     except Exception as e:  # noqa: BLE001 — scene search must never fail the job
@@ -925,7 +930,11 @@ async def _scene_chapters(
             bus, EventType.STAGE_SKIPPED, job_id,
             stage_id="scene_search", reason="scene search failed",
         )  # fmt: skip
-        return None, state["words"]
+        return None, state["words"], ""
+
+
+# Appended to the no-match reason when the judge never answered.
+JUDGE_UNAVAILABLE = " (the judge was unavailable)"
 
 
 async def _scene_search_stage(
@@ -997,9 +1006,12 @@ async def _scene_search_stage(
         sentence_vecs=sentence_vecs, min_s=min_secs, max_s=max_secs, duration=safe_end,
     )  # fmt: skip
     judge_t0 = time.perf_counter()
+    judge_stats: dict[str, int] = {}
     ranked = await segment_rerank.judge_scenes(
-        candidates, prompt=prompt, video_path=video_path, job_id=job_id
+        candidates, prompt=prompt, video_path=video_path, job_id=job_id, stats=judge_stats
     )
+    if candidates and not ranked and judge_stats.get("judged") == 0:
+        state["why"] = JUDGE_UNAVAILABLE
     kept = segment_discovery.select_discovered(ranked, safe_end)
     chapters = [
         {**c, "index": first_index + c["index"]}
@@ -1476,7 +1488,7 @@ async def _reprompt_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> 
                 # Reuses <job folder>/scenes/ when the source is unchanged,
                 # so only the prompt is embedded: seconds, not minutes.
                 assert prompt is not None
-                scene_chapters, words = await _scene_chapters(
+                scene_chapters, words, why = await _scene_chapters(
                     job_id=job_id,
                     video_path=video_path,
                     job_folder=job.destination_folder or str(Path(clips_folder).parent),
@@ -1490,7 +1502,7 @@ async def _reprompt_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> 
                     bus=bus,
                 )
                 if scene_chapters == []:
-                    raise RuntimeError("no moment of the source matched the prompt")
+                    raise RuntimeError(f"no moment of the source matched the prompt{why}")
             if scene_chapters:
                 chapters = scene_chapters
             else:

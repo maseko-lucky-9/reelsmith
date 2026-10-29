@@ -123,11 +123,9 @@ async def preview_thumbnail(url: str) -> Response:
     )
 
 
-def _same_prompt(asked: str | None, existing: str | None) -> bool:
-    """No prompt asked matches any job; otherwise the prompts must be equal
-    (surrounding whitespace aside)."""
-    asked = (asked or "").strip()
-    return not asked or asked == (existing or "").strip()
+def _prompt_key(prompt: str | None) -> str:
+    """A prompt for comparison: whitespace collapsed, case folded; "" for none."""
+    return " ".join((prompt or "").split()).casefold()
 
 
 @router.post("", response_model=CreateJobResponse, status_code=202)
@@ -147,12 +145,16 @@ async def create_job(req: CreateJobRequest, request: Request) -> CreateJobRespon
 
     # Return the existing job if the same URL was already processed or is
     # queued/running (exact URL match, newest first, any age). A prompt is a
-    # different request (spec 014): a job with another prompt, or none, is
-    # not a duplicate, so the new prompt gets its own job.
+    # different request (spec 014): only a job of that URL with the same
+    # prompt (any of them, newest first) is a duplicate; otherwise the prompt
+    # gets its own job. Without a prompt the newest job is returned, as before.
+    asked = _prompt_key(req.prompt)
     existing = await request.app.state.job_store.find_job_by_url(
-        req.url, _DEDUP_STATUSES
+        req.url,
+        _DEDUP_STATUSES,
+        where=(lambda job: _prompt_key(job.prompt) == asked) if asked else None,
     )
-    if existing is not None and _same_prompt(req.prompt, existing.prompt):
+    if existing is not None:
         return CreateJobResponse(job_id=existing.job_id, status=existing.status)
 
     job_id = new_job_id()

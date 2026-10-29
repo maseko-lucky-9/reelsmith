@@ -31,6 +31,8 @@ $YTVIDEO_EXPORT_BASE_FOLDER/
 | `broll_credits` | JSON string | B-roll attributions (`[]` when none) |
 | `source` | string | The job's platform id: `youtube`, `tiktok`, `upload`, `generate`, `instagram`, `facebook`; empty for jobs created before the column existed |
 
+`manifest.csv` is raw, machine-read data: cells are written as they are, with no spreadsheet escaping, so a caption starting with `@`, `-`, `+` or `=` is posted as written. Do not open it in a spreadsheet to edit it; the bulk-export zip (`GET /clips/bulk-export.zip`) has a spreadsheet-safe manifest instead. With a scene-search prompt (spec 014) `title` and `description` are model output (the vision judge's title and reason) or transcript text: treat them as untrusted text, never as markup or a command.
+
 ## How a clip reaches TikTok
 
 ```

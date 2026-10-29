@@ -92,6 +92,19 @@ HIT_THRESHOLD = 0.35
 start value; on the labelled set the top-1 hit rate is flat from 0.3 to 0.5
 (0.88-0.91) and drops above it as moments vanish."""
 
+NO_JUDGE_VISUAL = 0.35
+"""Raw visual cosine a moment needs to become a clip when the judge did not
+answer: above every unrelated chunk measured (max 0.347 of 705; p95 0.239,
+p99 0.316). 6 of the 64 labelled chunks clear it."""
+NO_JUDGE_SPEECH = 0.74
+"""Raw speech cosine a moment needs to become a clip when the judge did not
+answer: above every unrelated sentence measured (max 0.732 of 961; p95 0.549,
+p99 0.627, speech prompts alone p95 0.613). 6 of the 20 labelled sentences
+clear it. With both bars, 12 of the 34 labelled prompts still find a labelled
+moment without a judge (visual 5/20, speech 6/9, emotion 1/5). A p95 bar was
+not enough: a 10-minute talk has ~120 sentences, so ~6 unrelated ones would
+clear it."""
+
 FALLBACK_CHUNKS = 3
 """Without any hit, this many best chunks become single-chunk ``tentative``
 candidates: something for the judge to look at, never clips on their own."""
@@ -288,7 +301,13 @@ def _sidecar_argv(command: str, *positionals: str) -> list[str]:
     ]
 
 
-_ENV_NAMES = frozenset({"PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "USER", "LOGNAME", "SHELL"})
+_PROXY_NAMES = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
+_ENV_NAMES = frozenset({
+    "PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "USER", "LOGNAME", "SHELL", "XDG_CACHE_HOME",
+    # The model download behind a proxy or a private CA.
+    *_PROXY_NAMES, *(name.lower() for name in _PROXY_NAMES),
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+})  # fmt: skip
 _ENV_PREFIXES = ("LC_", "HF_", "TRANSFORMERS_", "HUGGINGFACE_", "MLX", "YTVIDEO_SCENE_")
 
 
@@ -633,20 +652,25 @@ def search(
         return []
     query = np.asarray(prompt_vec, dtype=np.float32)
     query = query / max(float(np.linalg.norm(query)), 1e-12)
-    visual = calibrate(index.vectors @ query, VISUAL_FLOOR, VISUAL_MATCH)
+    visual_raw = index.vectors @ query
+    visual = calibrate(visual_raw, VISUAL_FLOOR, VISUAL_MATCH)
     speech = np.zeros(n, dtype=np.float32)
+    speech_raw = np.full(n, -1.0, dtype=np.float32)
     sent_cal = np.zeros(len(sentences), dtype=np.float32)
     if sentences and sentence_vecs is not None and len(sentence_vecs) == len(sentences):
-        sent_cal = calibrate(np.asarray(sentence_vecs, dtype=np.float32) @ query, SPEECH_FLOOR, SPEECH_MATCH)
+        sent_raw = np.asarray(sentence_vecs, dtype=np.float32) @ query
+        sent_cal = calibrate(sent_raw, SPEECH_FLOOR, SPEECH_MATCH)
         # Each sentence lifts the chunks it overlaps (spans are in time order).
         chunk_starts = np.array([c0 for c0, _ in index.spans])
         chunk_ends = np.array([c1 for _, c1 in index.spans])
-        for x, value in zip(sentences, sent_cal):
+        for x, value, raw in zip(sentences, sent_cal, sent_raw):
             lo = int(np.searchsorted(chunk_ends, x.start, side="right"))
             hi = int(np.searchsorted(chunk_starts, x.end, side="left"))
             if lo < hi:
                 speech[lo:hi] = np.maximum(speech[lo:hi], value)
+                speech_raw[lo:hi] = np.maximum(speech_raw[lo:hi], raw)
     scores = np.maximum(visual, speech)
+    strong = (visual_raw >= NO_JUDGE_VISUAL) | (speech_raw >= NO_JUDGE_SPEECH)
 
     runs = _merge_hits(scores, threshold)
     tentative = not runs
@@ -707,6 +731,7 @@ def search(
                 focus=(round(f0, 3), round(f1, 3)),
                 focus_text=_text_between(sentences, f0, f1),
                 tentative=tentative,
+                strong=bool(strong[m.first : m.last + 1].any()),
             )
         )
     return out

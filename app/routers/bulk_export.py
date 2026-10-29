@@ -31,12 +31,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ClipRecord
 from app.db.session import get_session
-from app.services.manifest_service import broll_credits, csv_safe
+from app.services.manifest_service import broll_credits
 from app.settings import settings
 
 router = APIRouter(prefix="/clips", tags=["bulk-export"])
 
 _STREAM_CHUNK_BYTES = 1024 * 1024
+
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def csv_safe(value: object) -> object:
+    """A text cell a spreadsheet cannot run: one starting with ``= + - @``,
+    a tab or a carriage return gets a leading ``'`` (CSV formula injection;
+    titles and summaries come from model output and transcripts). Other
+    values are returned unchanged.
+
+    Only for this zip's manifest, which people open in a spreadsheet. The
+    job's ``manifest.csv`` (``manifest_service``) stays raw: it is machine
+    read, and its description is posted as the caption."""
+    if isinstance(value, str) and value.startswith(_FORMULA_PREFIXES):
+        return "'" + value
+    return value
 
 
 def _build_manifest(clips: list[ClipRecord]) -> bytes:

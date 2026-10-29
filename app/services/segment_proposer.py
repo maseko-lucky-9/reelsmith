@@ -113,6 +113,10 @@ class ProposedSegment:
     # A no-hit fallback of scene search: nothing cleared the bar, so it is a
     # clip only if the judge looks at it and says it matches.
     tentative: bool = False
+    # Scene search: the moment is closer to the prompt than any unrelated
+    # chunk or sentence measured, so it may be a clip when the judge cannot
+    # answer (``scene_search.NO_JUDGE_*``); every other one needs its yes.
+    strong: bool = False
 
     @property
     def virality_score(self) -> int:

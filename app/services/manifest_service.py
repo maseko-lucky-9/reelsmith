@@ -15,19 +15,6 @@ COLUMNS = [
 ]
 
 
-_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
-
-
-def csv_safe(value: object) -> object:
-    """A text cell a spreadsheet cannot run: one starting with ``= + - @``,
-    a tab or a carriage return gets a leading ``'`` (CSV formula injection;
-    titles and summaries come from model output and transcripts). Other
-    values are returned unchanged."""
-    if isinstance(value, str) and value.startswith(_FORMULA_PREFIXES):
-        return "'" + value
-    return value
-
-
 def broll_credits(assets: list[dict] | None) -> list[dict[str, str]]:
     """One ``{provider, author, source_url}`` credit per distinct B-roll asset
     of a clip (``clips.broll_assets``), in insert order. Pexels asks API users
@@ -82,7 +69,7 @@ def write_manifest(
                 "broll_credits": json.dumps(broll_credits(clip.get("broll_assets"))),
                 "source": source or "",
             }
-            writer.writerow({key: csv_safe(value) for key, value in row.items()})
+            writer.writerow(row)
     os.replace(tmp_path, out_path)
     log.info("Manifest written to %s (%d rows)", out_path, len(clips))
     return out_path

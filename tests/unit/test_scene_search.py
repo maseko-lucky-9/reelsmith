@@ -395,12 +395,20 @@ async def test_the_sidecar_gets_no_app_secrets(sidecar, tmp_path, monkeypatch):
     monkeypatch.setenv("GITHUB_TOKEN", "<PLACEHOLDER>")
     monkeypatch.setenv("HF_HOME", "/models/hf")
     monkeypatch.setenv("YTVIDEO_SCENE_EXTRA", "kept")
+    passed = {
+        "XDG_CACHE_HOME": "/cache", "HTTP_PROXY": "http://proxy:3128", "https_proxy": "http://proxy:3128",
+        "ALL_PROXY": "socks5://proxy:1080", "no_proxy": "localhost", "SSL_CERT_FILE": "/ca/cert.pem",
+        "SSL_CERT_DIR": "/ca", "REQUESTS_CA_BUNDLE": "/ca/bundle.pem", "CURL_CA_BUNDLE": "/ca/curl.pem",
+    }  # fmt: skip
+    for name, value in passed.items():
+        monkeypatch.setenv(name, value)
     await ss.embed_texts(["p"], tmp_path)
     env = json.loads(Path(f"{spec}.env").read_text())
     assert "YTVIDEO_PEXELS_API_KEY" not in env and "YTVIDEO_DATABASE_URL" not in env
     assert "GITHUB_TOKEN" not in env
     assert env["HF_HOME"] == "/models/hf" and env["YTVIDEO_SCENE_EXTRA"] == "kept"
     assert env["PATH"] == os.environ["PATH"]
+    assert {name: env.get(name) for name in passed} == passed
 
 
 @pytest.mark.parametrize(

@@ -110,7 +110,7 @@ async def test_without_scene_search_the_youtube_chapters_stay(harness, sidecar, 
 
 
 async def test_the_judges_title_reason_and_emotion_reach_the_clip(harness, sidecar, store):
-    async def _judge(candidates, *, prompt, video_path, job_id="-"):
+    async def _judge(candidates, *, prompt, video_path, job_id="-", stats=None):
         assert prompt == PROMPT and video_path == str(harness.source)
         return [replace(candidates[0], title="Red car at dusk", reason="a red car passes the camera",
                         emotion="joy", summary="a red car passes the camera", score=88)]  # fmt: skip
@@ -252,7 +252,7 @@ async def test_unrelated_footage_keeps_the_chapters_when_the_judge_is_unavailabl
     recorder = await harness.run(discover.InMemoryJobStore(), prompt=PROMPT)
 
     assert [c[0] for c in discover._chapters(recorder)] == ["Intro", "Main"]
-    assert "no moment matched the prompt" in _skipped(recorder)
+    assert "no moment matched the prompt (the judge was unavailable)" in _skipped(recorder)
 
 
 # ── reprompt ──────────────────────────────────────────────────────────────────

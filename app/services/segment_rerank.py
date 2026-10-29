@@ -588,6 +588,7 @@ async def judge_scenes(
     transport: httpx.AsyncBaseTransport | None = None,
     frames: Callable[[str, float, float], list[str]] | None = None,
     clock: Callable[[], float] = time.monotonic,
+    stats: dict[str, int] | None = None,
 ) -> list[ProposedSegment]:
     """The candidates the judge did not reject, best first (ties: earliest start).
 
@@ -597,20 +598,26 @@ async def judge_scenes(
     dropped; a candidate not judged (budget, Ollama down, unusable reply)
     keeps its score. Candidates beyond the cap rank below every judged one,
     so they are dropped once the judge has answered at all (rejecting the
-    best 8 must not hand the clips to the 9th); they stay only when nothing
-    was judged. A ``tentative`` candidate (scene search's no-hit fallback)
-    is kept only when the judge confirms it. Never raises, except
-    cancellation.
+    best 8 must not hand the clips to the 9th). A ``tentative`` candidate
+    (scene search's no-hit fallback) is kept only when the judge confirms it.
+
+    When the judge answered nothing at all (Ollama off, down, the model
+    missing, every reply unusable), only ``strong`` candidates are kept: the
+    similarity alone cannot tell an unrelated talk from a match below that
+    bar. ``stats["judged"]`` (when given) is set to the number of answers.
+    Never raises, except cancellation.
     """
     pool = list(candidates)
+    if stats is not None:
+        stats["judged"] = 0
     if not pool:
         return []
     grab = frames or grab_judge_frames
     if not settings.ollama_enabled:
         log.warning(
-            "[%s] Scene judge skipped (YTVIDEO_OLLAMA_ENABLED=false); moments keep their similarity order", job_id
+            "[%s] Scene judge skipped (YTVIDEO_OLLAMA_ENABLED=false); only strong moments are kept", job_id
         )
-        return [s for s in pool if not s.tentative]
+        return [s for s in pool if s.strong]
     limit = max(0, settings.scene_judge_max_candidates)
     deadline = clock() + settings.scene_judge_budget_seconds
     kept: list[ProposedSegment] = []
@@ -666,12 +673,17 @@ async def judge_scenes(
             kept.append(_judged(seg, verdict))
     if stopped:
         log.warning(
-            "[%s] Scene judge stopped after %d of %d candidate(s) (%s; model %s); the rest keep their similarity order",
+            "[%s] Scene judge stopped after %d of %d candidate(s) (%s; model %s); unjudged moments keep their "
+            "similarity order (only strong ones when it answered none)",
             job_id, judged, min(limit, len(pool)), stopped, settings.ollama_vision_model,
         )  # fmt: skip
+    if stats is not None:
+        stats["judged"] = judged
     if judged == 0:
-        # The judge never answered: everything keeps its similarity order.
-        kept.extend(beyond_cap)
-    # Judged matches carry ``tentative`` too; only unconfirmed ones go.
-    kept = [s for s in kept if not s.tentative or "judge" in s.score_breakdown]
+        # The judge never answered: only what is closer to the prompt than
+        # anything unrelated, in similarity order.
+        kept = [s for s in [*kept, *beyond_cap] if s.strong]
+    else:
+        # Judged matches carry ``tentative`` too; only unconfirmed ones go.
+        kept = [s for s in kept if not s.tentative or "judge" in s.score_breakdown]
     return sorted(kept, key=lambda s: (-s.score, s.start, s.end))
