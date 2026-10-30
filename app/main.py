@@ -36,6 +36,7 @@ from app.routers import (
     subtitle_images,
     transcriptions,
     uploads,
+    voiceover,
     xml_export,
 )
 from app.services import transcription_service
@@ -229,6 +230,7 @@ def create_app() -> FastAPI:
     app.include_router(social_publish.router)
     app.include_router(xml_export.router)
     app.include_router(ai_hook.router)
+    app.include_router(voiceover.router)
     app.include_router(enhance_speech.router)
     app.include_router(reprompt.router)
     app.include_router(bulk_export.router)
