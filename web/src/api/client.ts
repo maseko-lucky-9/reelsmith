@@ -68,6 +68,8 @@ export interface ClipRecord {
   disliked: boolean
   /** B-roll inserted into the rendered reel (`clips.broll_assets`); null or absent without B-roll. */
   broll_assets?: BrollAsset[] | null
+  /** The clip's generated AI hook line; the editor's default voice-over script. */
+  ai_hook_text?: string | null
 }
 
 /**
@@ -285,6 +287,17 @@ export const api = {
   getClipRenderPlan: (clipId: string) =>
     apiFetch<RenderPlan>(`/api/clips/${clipId}/edit/plan`),
 
+  /**
+   * POST /clips/{id}/voiceover (spec 016): synthesises the script and appends an
+   * `audio` item to the clip's saved edit (schema v2). 409 export copy, busy job
+   * or a saved v1 edit; 503 voice-over off; 502 the engine failed.
+   */
+  createVoiceover: (clipId: string, body: VoiceoverRequest) =>
+    apiFetch<VoiceoverResponse>(`/api/clips/${clipId}/voiceover`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
   // ── Wave 1 — AI hook ─────────────────────────────────────────────────────
   generateAiHook: (clipId: string) =>
     apiFetch<{ clip_id: string; hook: string }>(
@@ -381,21 +394,61 @@ export interface TimelineItem {
   [key: string]: unknown
 }
 
+export type TimelineTrackKind = 'video' | 'caption' | 'text-overlay' | 'audio'
+
 export interface TimelineTrack {
-  kind: 'video' | 'caption' | 'text-overlay'
+  /** `audio` (voice-over) is schema v2 only. */
+  kind: TimelineTrackKind
   items: TimelineItem[]
 }
 
+/** One word of a clip's transcript, seconds on the clip's clock. */
+export interface EditWord {
+  word: string
+  start: number
+  end: number
+}
+
+/**
+ * Editor timeline (app/services/timeline_render_service.py). Without
+ * `schema_version` it is v1: video items on the reel's clock. v2: video items
+ * are source segments in source seconds; captions, overlays and audio are on
+ * the edited reel's clock (the segments back to back).
+ */
 export interface TimelinePayload {
   tracks: TimelineTrack[]
+  schema_version?: 1 | 2
+  /** Caption preset key (CaptionTemplatePicker names); null = the default style. */
+  caption_style?: string | null
+  mute_source?: boolean
 }
 
 export interface ClipEditState {
   clip_id: string
   timeline: TimelinePayload
+  /** 0 for the server-built default timeline (no saved edit). */
   version: number
-  created_at: string
-  updated_at: string
+  created_at: string | null
+  updated_at: string | null
+  /** True when no edit is saved and `timeline` is built from the clip's words. */
+  is_default?: boolean
+  /** The clip's word timings (GET only). */
+  words?: EditWord[]
+}
+
+/** Body of POST /clips/{id}/voiceover (app/routers/voiceover.py VoiceoverRequest). */
+export interface VoiceoverRequest {
+  /** Omitted: the server speaks the clip's AI hook. */
+  text?: string
+  voice?: string
+  /** Seconds on the edited reel where the voice-over starts (default 0). */
+  start?: number
+}
+
+export interface VoiceoverResponse {
+  edit: ClipEditState
+  item: { start: number; end: number; src: string; gain: number }
+  provider: string
 }
 
 export interface ClipEditUpsert {

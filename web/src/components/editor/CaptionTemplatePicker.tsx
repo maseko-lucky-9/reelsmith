@@ -2,7 +2,9 @@
  * Caption template gallery (W2.11).
  *
  * Five animated presets + a static fallback. Picker is presentational —
- * the parent owns selection state.
+ * the parent owns selection state. The clip editor's Captions panel drives
+ * the timeline's `caption_style` with it (spec 016), which the render applies;
+ * the names match app/services/animated_caption_service.PRESETS.
  */
 export type CaptionStyleName =
   | 'static'
@@ -64,7 +66,8 @@ export const CAPTION_TEMPLATES: CaptionTemplate[] = [
 ]
 
 interface Props {
-  value: CaptionStyleName
+  /** null: no preset picked (the render's default style). */
+  value: CaptionStyleName | null
   onChange: (name: CaptionStyleName) => void
 }
 
