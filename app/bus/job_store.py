@@ -95,6 +95,7 @@ class JobStoreProtocol(Protocol):
         include_retired: bool = False,
     ) -> list[dict[str, Any]]: ...
     async def retire_clips(self, job_id: str, clip_ids: Sequence[str]) -> int: ...
+    async def get_clip_edit(self, clip_id: str) -> dict[str, Any] | None: ...
     async def delete(self, job_id: str) -> bool: ...
     async def path_references(self, exclude_job_id: str) -> PathReferences: ...
 
@@ -105,6 +106,7 @@ class InMemoryJobStore:
     def __init__(self) -> None:
         self._jobs: dict[str, JobState] = {}
         self._clips: dict[str, dict[str, Any]] = {}  # clip_id → clip dict
+        self._clip_edits: dict[str, dict[str, Any]] = {}  # clip_id → timeline
         self._lock = asyncio.Lock()
 
     async def create(self, state: JobState) -> JobState:
@@ -178,6 +180,17 @@ class InMemoryJobStore:
             if clip is None or (clip.get("retired") and not include_retired):
                 return None
             return clip
+
+    async def get_clip_edit(self, clip_id: str) -> dict[str, Any] | None:
+        """The clip's saved editor timeline (``ClipEdit.timeline``), or None."""
+        async with self._lock:
+            return self._clip_edits.get(clip_id)
+
+    async def put_clip_edit(self, clip_id: str, timeline: dict[str, Any]) -> None:
+        """Save the clip's editor timeline (memory mode and tests; the SQL
+        store's timelines are written by ``PUT /clips/{id}/edit``)."""
+        async with self._lock:
+            self._clip_edits[clip_id] = timeline
 
     async def retire_clips(self, job_id: str, clip_ids: Sequence[str]) -> int:
         """Flag the live clips of ``job_id`` among ``clip_ids`` retired.
@@ -266,6 +279,7 @@ class InMemoryJobStore:
             existed = self._jobs.pop(job_id, None) is not None
             for clip_id in [i for i, c in self._clips.items() if c.get("job_id") == job_id]:
                 del self._clips[clip_id]
+                self._clip_edits.pop(clip_id, None)
             return existed
 
     async def path_references(self, exclude_job_id: str) -> PathReferences:
@@ -517,6 +531,18 @@ class SqlJobStore:
             result = await session.execute(q)
             record = result.scalar_one_or_none()
             return _clip_record_to_dict(record) if record else None
+
+    async def get_clip_edit(self, clip_id: str) -> dict[str, Any] | None:
+        """The clip's saved editor timeline (``ClipEdit.timeline``), or None."""
+        from sqlalchemy import select
+
+        from app.db.models import ClipEdit
+
+        async with self._factory() as session:
+            result = await session.execute(
+                select(ClipEdit.timeline).where(ClipEdit.clip_id == clip_id)
+            )
+            return result.scalar_one_or_none()
 
     async def retire_clips(self, job_id: str, clip_ids: Sequence[str]) -> int:
         """Flag the live clips of ``job_id`` among ``clip_ids`` retired (one

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextlib
+import dataclasses
 import logging
 import re
 import shutil
@@ -26,6 +27,7 @@ from app.services import (
     broll_service,
     caption_service,
     clip_service,
+    clip_words,
     export_service,
     ffmpeg_tools,
     filler_removal_service,
@@ -38,6 +40,7 @@ from app.services import (
     segment_proposer,
     segment_rerank,
     thumbnail_service,
+    timeline_render_service,
     transcription_service,
 )
 from app.services.platforms import resolve as resolve_adapter
@@ -804,8 +807,95 @@ def _chapter_for_clip(clip: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+@dataclasses.dataclass(frozen=True)
+class _EditRender:
+    """A clip's saved editor timeline, planned for a re-render (spec 016).
+
+    ``plan`` is rendered over the source window ``[start, end)``, the span
+    of its segments; the reel it makes is ``reel_seconds`` long and shows
+    ``words`` (the plan's caption words, on the reel's clock).
+    """
+
+    plan: timeline_render_service.RenderPlan
+    start: float
+    end: float
+    reel_seconds: float
+    words: list[transcription_service.WordTiming]
+
+
+def _plan_saved_edit(
+    timeline: dict[str, Any],
+    *,
+    video_path: str,
+    clip_path: str,
+    clip_start: float,
+    source_range: tuple[float, float] | None,
+) -> _EditRender:
+    """Validate and plan a saved edit against the job's source video.
+
+    Raises ``ValueError`` (``TimelineError`` included) when it cannot be
+    rendered. v2 segments are source seconds and read ``video_path``. A v1
+    ``src: main`` is the reel itself and its ``trim_start`` is on the reel's
+    clock (the default timeline is ``trim_start: 0`` over the whole reel),
+    so it is planned against ``clip_path`` and then moved onto the source:
+    ``src`` = ``video_path``, ``trim_start`` + the clip's start. Reading the
+    source at a reel offset instead would render the video's opening. Any
+    other v1 ``src`` stays as given, and ``plan_segments`` refuses it unless
+    it is the job's own source.
+    """
+    plan = timeline_render_service.build_render_plan(
+        timeline,
+        clip_path,
+        source_path=video_path,
+        source_range=source_range,
+        clip_folder=str(Path(clip_path).parent),
+    )
+    if plan.schema_version < 2:
+        plan = dataclasses.replace(
+            plan,
+            video=[
+                dataclasses.replace(v, src=video_path, trim_start=v.trim_start + clip_start)
+                if v.src == clip_path
+                else v
+                for v in plan.video
+            ],
+        )
+    windows = render_service.plan_segments(plan, video_path)
+    words = [
+        transcription_service.WordTiming(w.word, w.start, w.end)
+        for caption in plan.captions
+        for w in caption.words
+    ]
+    return _EditRender(
+        plan=plan,
+        start=windows[0].start,
+        end=windows[-1].end,
+        reel_seconds=sum(w.length for w in windows),
+        words=words,
+    )
+
+
+async def _source_range(job_id: str, job: JobState) -> tuple[float, float] | None:
+    """``[0, duration]`` of the job's source, as ``PUT /clips/{id}/edit``
+    checks a v2 edit: probed, else the job's recorded duration, else None."""
+    try:
+        duration = await _job_thread(job_id, ffmpeg_tools.duration, job.video_path)
+    except Exception as exc:  # noqa: BLE001 - fall back to the recorded duration
+        log.info("[%s] Source duration probe failed (%s)", job_id, exc)
+        duration = None
+    if not duration or duration <= 0:
+        duration = job.duration
+    return (0.0, float(duration)) if duration and duration > 0 else None
+
+
 async def _rerender_clip(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
     """Re-render one clip of a completed job in place, from its saved source.
+
+    A clip with a saved editor timeline (``ClipEdit``) is rendered as that
+    edit (``_plan_saved_edit``): its segments, captions in its caption
+    style, text overlays, voice-overs and ``mute_source``. An edit that
+    cannot be planned is refused before anything is touched (logged at
+    WARNING, the clip and its file unchanged).
 
     The job's status, step, error and outputs are left alone and neither
     JobCompleted nor JobFailed is emitted. A failure is logged and swallowed:
@@ -842,13 +932,42 @@ async def _rerender_clip(trigger: Event, bus: AsyncEventBus, store: JobStore) ->
         prior_chapter = job.chapters.get(chapter["index"])
         if prior_chapter is not None:
             prior_chapter_status = prior_chapter.status
+        edit: _EditRender | None = None
+        timeline = await store.get_clip_edit(clip_id)
+        if timeline is not None:
+            try:
+                edit = await _job_thread(
+                    job_id,
+                    _plan_saved_edit,
+                    timeline,
+                    video_path=job.video_path,
+                    clip_path=output_path,
+                    clip_start=float(chapter["start"]),
+                    source_range=await _source_range(job_id, job),
+                )
+            except ValueError as exc:
+                # Nothing has been touched yet: the clip, its file and the
+                # chapter status stay as they are.
+                log.warning(
+                    "[%s] Re-render of clip %s refused: its saved edit cannot be "
+                    "rendered; clip left unchanged (%s)",
+                    job_id, clip_id, exc,
+                )
+                return
+            log.info(
+                "[%s] Re-render of clip %s renders its saved edit  v%d  segments=%d  "
+                "window=%.3f-%.3fs  style=%s",
+                job_id, clip_id, edit.plan.schema_version, len(edit.plan.video),
+                edit.start, edit.end, edit.plan.caption_style,
+            )
         clips_folder = str(Path(output_path).parent)
         cleanup_root = Path(clips_folder) / "_tmp" / f"{job_id}-rerender-{clip_id[:8]}"
         cleanup_root.mkdir(parents=True, exist_ok=True)
         # A re-render always renders, whatever the job's options said.
         raw_opts = payload.get("pipeline_options") or job.pipeline_options.model_dump()
-        # Words saved by clip discovery: reused instead of re-transcribing.
-        source_words = await _job_thread(
+        # Words saved by clip discovery: reused instead of re-transcribing
+        # (an edit brings its own words, its captions).
+        source_words = None if edit is not None else await _job_thread(
             job_id,
             segment_discovery.read_words_sidecar, job.video_path
         )
@@ -875,6 +994,7 @@ async def _rerender_clip(trigger: Event, bus: AsyncEventBus, store: JobStore) ->
             regenerate_copy=bool(payload.get("regenerate_copy", True)),
             source_words=source_words,
             render_to=output_path,
+            edit=edit,
         )
         log.info(
             "[%s] Re-render of clip %s done in %.2fs",
@@ -1484,6 +1604,7 @@ async def _process_chapter(
     regenerate_copy: bool = True,
     source_words: Sequence[Any] | None = None,
     render_to: str | None = None,
+    edit: _EditRender | None = None,
 ) -> str | None:
     """Process one chapter into a clip; ``clip_id`` updates an existing clip
     in place (re-render) instead of creating a new one.
@@ -1496,6 +1617,13 @@ async def _process_chapter(
     these rebased onto its window instead of a fresh transcription of it.
     ``render_to`` is the reel's path (re-render: the clip's existing file);
     by default ``{index:02d}_{title}.mp4`` in ``clips_folder``.
+
+    ``edit`` (re-render of an edited clip) renders that plan over its source
+    window instead: no audio extraction, transcription, filler removal,
+    captions or B-roll (the plan's captions are the reel's words, and
+    render_clip refuses B-roll with a plan). The clip keeps its start/end:
+    they anchor a v1 edit's reel clock, so moving them would shift that
+    edit on the next re-render.
     """
     index = int(chapter["index"])
     title = chapter["title"]
@@ -1527,6 +1655,11 @@ async def _process_chapter(
     #   * active_speaker_service        — informs reframe; would slot in just
     #                                     before render when reframe=True.
     opts = pipeline_options or PipelineOptions()
+    if edit is not None:
+        opts = opts.model_copy(update={
+            "transcription": False, "captions": False, "audio_enhance": False,
+            "filler_removal": False, "broll": False,
+        })
     tmp_dir = cleanup_root
 
     def _set_status(state: ChapterArtifacts, status: str) -> None:
@@ -1739,6 +1872,16 @@ async def _process_chapter(
         opts=opts, bus=bus,
     )
 
+    # An edit's captions are what the reel shows and says.
+    render_start, render_end = start, end
+    plan_kwargs: dict[str, Any] = {}
+    if edit is not None:
+        words = list(edit.words)
+        text = " ".join(w.word for w in words)
+        render_start, render_end = edit.start, edit.end
+        plan_kwargs["plan"] = edit.plan
+        await store.upsert_chapter(job_id, lambda c: setattr(c, "transcript", text), index)
+
     # ── Render final clip (gated on render) ──────────────────────────────────
     output_path: str | None = None
     safe_title = _sanitize(title)
@@ -1747,8 +1890,11 @@ async def _process_chapter(
         step_t0 = time.perf_counter()
         await store.upsert_chapter(job_id, lambda c: _set_status(c, "rendering"), index)
         output_path = render_to or str(Path(clips_folder) / f"{index:02d}_{safe_title}.mp4")
+        # Over the render window; an edit's crop track counts from its
+        # window's start, as render_clip's plan render expects.
         crop_track = await _reframe_step(
-            job_id=job_id, index=index, video_path=video_path, start=start, end=end,
+            job_id=job_id, index=index, video_path=video_path,
+            start=render_start, end=render_end,
             target_aspect_ratio=target_aspect_ratio, opts=opts, bus=bus,
         )
         # Reads the SOURCE and trims [start, end) itself — one ffmpeg pass.
@@ -1758,19 +1904,32 @@ async def _process_chapter(
                 render_service.render_clip,
                 video_path,
                 output_path,
-                start,
-                end,
+                render_start,
+                render_end,
                 captions_path,
                 target_aspect_ratio,
                 word_timings=words,
                 broll=broll_inserts,
                 caption_words_per_segment=settings.caption_words_per_segment,
                 crop_track=crop_track,
+                **plan_kwargs,
             ),
             timeout=settings.render_timeout_seconds,
         )
         log.info("[%s] Chapter %d  render done (%.2fs)  output=%s",
                  job_id, index, time.perf_counter() - step_t0, output_path)
+        # Every render, re-renders included, so the editor's words are never
+        # stale: this render's words, or none when it made none. An edited
+        # reel's words are its plan's caption words on the reel's clock: the
+        # file now says them, so the editor (and a default timeline, should
+        # the edit be discarded) stays in step with what was rendered.
+        if edit is not None:
+            await _write_clip_words(job_id, index, output_path, words, edit.reel_seconds)
+        else:
+            await _write_clip_words(
+                job_id, index, output_path, words if opts.transcription else None,
+                chapter_duration,
+            )
         log.info("[%s] Chapter %d  finished in %.2fs", job_id, index, time.perf_counter() - chapter_t0)
 
         await store.upsert_chapter(
@@ -1921,6 +2080,35 @@ async def _process_chapter(
     )
 
     return output_path
+
+
+async def _write_clip_words(
+    job_id: str,
+    index: int,
+    output_path: str,
+    words: Sequence[Any] | None,
+    duration: float,
+) -> None:
+    """Cache the reel's words (clip clock, the words its captions show) for
+    the editor (``clip_words.clip_words_path``); ``words=None`` (no
+    transcription) removes a cached set instead. A failure is logged, not
+    raised: the editor transcribes the clip on its first open instead."""
+    try:
+        # Cancellable like the caption write: a cancel waits for this small
+        # write to finish, so the job's cleanup never races it.
+        if words is None:
+            await ffmpeg_tools.to_thread_cancellable(clip_words.clear_clip_words, output_path)
+            return
+        rebased = clip_words.clip_window_words(words, duration)
+        path = await ffmpeg_tools.to_thread_cancellable(
+            clip_words.write_clip_words, output_path, rebased
+        )
+    except OSError as exc:
+        log.warning("[%s] Chapter %d  clip words sidecar not written: %s", job_id, index, exc)
+        return
+    if path is not None:
+        log.info("[%s] Chapter %d  clip words sidecar written  words=%d  path=%s",
+                 job_id, index, len(rebased), path)
 
 
 async def _broll_step(

@@ -33,7 +33,7 @@ from PIL import Image
 
 from app.services import ffmpeg_tools
 from app.services.clip_service import CaptionEntry, ReelGeometry
-from app.services.subtitle_image_service import create_subtitle_image
+from app.services.subtitle_image_service import CaptionStyle, create_subtitle_image
 
 log = logging.getLogger(__name__)
 
@@ -188,6 +188,7 @@ def _draw_own_crop(
     geometry: ReelGeometry,
     path: Path,
     cancel: threading.Event | None,
+    style: CaptionStyle | None = None,
 ) -> tuple[int, int, int, int] | None:
     """Pass 1: draw one caption, write the crop of its own alpha bbox to
     ``path`` and return that bbox (``None`` and no file if fully transparent).
@@ -197,11 +198,22 @@ def _draw_own_crop(
     """
     _check(cancel)
     text, highlight = key
+    styled = (
+        {}
+        if style is None
+        else {
+            "font_size": style.font_size,
+            "fill": style.fill,
+            "highlight_fill": style.highlight_fill,
+            "stroke_fill": style.stroke_fill,
+        }
+    )
     full = create_subtitle_image(
         text,
         geometry.canvas_size,
         highlight_word_index=highlight,
         text_anchor_y=geometry.band_anchor_y,
+        **styled,
     )
     alpha = full[..., 3]
     rows = np.flatnonzero(alpha.any(axis=1))
@@ -222,6 +234,7 @@ def build_caption_track(
     out_dir: str | Path,
     *,
     cancel: threading.Event | None = None,
+    style: CaptionStyle | None = None,
 ) -> CaptionTrack | None:
     """Render the unique captions, crop them to the shared rect and write the list.
 
@@ -230,7 +243,8 @@ def build_caption_track(
     disk (only the bbox is kept); pass 2 re-opens each crop, pads it into the
     shared even rectangle and writes the final PNG. ``cancel`` (default: the
     event installed by ``ffmpeg_tools.to_thread_cancellable``) is checked
-    between captions.
+    between captions. ``style`` (default: the pipeline's own look) sets the
+    PNGs' font size and colours.
 
     Returns ``None`` (writing nothing) when no caption is visible in
     ``[0, total_duration)``.
@@ -249,7 +263,7 @@ def build_caption_track(
         try:
             bboxes = list(
                 pool.map(
-                    lambda job: _draw_own_crop(job[0], geometry, job[1], cancel),
+                    lambda job: _draw_own_crop(job[0], geometry, job[1], cancel, style),
                     zip(keys, raws),
                 )
             )

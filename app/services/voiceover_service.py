@@ -15,12 +15,33 @@ The Piper path requires:
     - ``piper`` binary on PATH (YTVIDEO_PIPER_MODEL must be set)
     - ``YTVIDEO_PIPER_MODEL`` env var pointing to the .onnx model file
     - Text is fed on stdin; argv is ``["piper", "--model", <path>, "--output_file", <out>]``
+
+Clip voice-over (spec 016, ``POST /clips/{id}/voiceover``):
+``synthesize_voiceover(text, voice, out_path, provider=...)`` is the hardened
+entry point. The text is untrusted: control characters are removed, its
+length is bounded (``MAX_TEXT_CHARS``) and it reaches Piper through a text
+file passed as ``--input-file`` (never a shell, never argv). The voice name is
+checked against ``VOICE_NAME_RE`` and resolves to ``<voice>.onnx`` directly
+inside ``YTVIDEO_VOICEOVER_MODEL_DIR``. Piper runs through
+``ffmpeg_tools.run`` (killed on timeout or cancel); the wav it writes is
+capped in size and must parse as a wav with a positive duration.
+``resolve_provider`` turns ``YTVIDEO_VOICEOVER_PROVIDER`` into an engine:
+``auto`` is Piper when the ``piper`` command and the voice files exist, else
+the stub (logged). Voices are fetched by ``scripts/fetch_piper_voice.py``,
+never here.
 """
 from __future__ import annotations
 
+import importlib.util
 import logging
+import os
+import re
 import shutil
 import struct
+import sys
+import tempfile
+import unicodedata
+import wave
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Sequence
 
@@ -163,3 +184,206 @@ def _invoke(argv: Sequence[str], stdin_text: str = "") -> None:
             f"voiceover failed (rc={proc.returncode}): "
             f"{proc.stderr.decode('utf-8', errors='replace')[-500:]}"
         )
+
+
+# ── Clip voice-over (spec 016) ────────────────────────────────────────────────
+
+MAX_TEXT_CHARS = 1000
+"""Most characters a voice-over script may hold (after cleaning)."""
+
+VOICE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+"""A voice name: a plain file stem, no separator."""
+
+MAX_WAV_BYTES = 50 * 1024 * 1024
+"""Largest wav a synthesis may leave (about 9 minutes of 22 kHz mono)."""
+
+SYNTH_TIMEOUT_SECONDS = 120.0
+"""Piper is killed after this long."""
+
+PROVIDERS = ("auto", "piper", "stub", "off")
+
+MAX_OUTPUT_INDEX = 999
+
+Runner = Callable[[Sequence[str], float], None]
+"""Runs an argv to completion within a timeout (seconds); raises on failure."""
+
+
+class VoiceoverInputError(VoiceoverError):
+    """The request's text or voice name is not acceptable."""
+
+
+class VoiceoverDisabled(VoiceoverError):
+    """``YTVIDEO_VOICEOVER_PROVIDER=off``."""
+
+
+def clean_text(text: object) -> str:
+    """The script with control and format characters replaced by spaces and
+    whitespace collapsed; ``VoiceoverInputError`` when empty or too long."""
+    if not isinstance(text, str):
+        raise VoiceoverInputError("text must be a string")
+    if len(text) > 4 * MAX_TEXT_CHARS:
+        raise VoiceoverInputError(f"text is longer than {MAX_TEXT_CHARS} characters")
+    kept = "".join(" " if unicodedata.category(ch).startswith("C") else ch for ch in text)
+    cleaned = " ".join(kept.split())
+    if not cleaned:
+        raise VoiceoverInputError("text is empty")
+    if len(cleaned) > MAX_TEXT_CHARS:
+        raise VoiceoverInputError(f"text is longer than {MAX_TEXT_CHARS} characters")
+    return cleaned
+
+
+def voice_model_path(voice: object, model_dir: str | Path | None = None) -> Path:
+    """``<model dir>/<voice>.onnx`` (it may not exist); ``VoiceoverInputError``
+    for a bad name or one that resolves anywhere but directly inside the
+    model folder (a symlinked file included)."""
+    if not isinstance(voice, str) or not VOICE_NAME_RE.fullmatch(voice) or voice.strip(".") == "":
+        raise VoiceoverInputError(f"invalid voice name {str(voice)!r:.80}")
+    folder = Path(model_dir if model_dir is not None else settings.voiceover_model_dir).resolve()
+    candidate = folder / f"{voice}.onnx"
+    if candidate.resolve().parent != folder:
+        raise VoiceoverInputError(f"voice {voice!r} resolves outside the voice folder")
+    return candidate
+
+
+def _config_path(model: Path) -> Path:
+    return model.with_name(model.name + ".json")
+
+
+def piper_command() -> list[str] | None:
+    """How to run Piper: the ``piper`` command on PATH, else this Python with
+    ``-m piper`` when the ``piper-tts`` package is installed, else None."""
+    found = shutil.which("piper")
+    if found:
+        return [found]
+    if importlib.util.find_spec("piper") is not None:
+        return [sys.executable, "-m", "piper"]
+    return None
+
+
+def resolve_provider(
+    requested: str | None = None,
+    voice: str | None = None,
+    *,
+    model_dir: str | Path | None = None,
+) -> str:
+    """The engine to use: "piper" or "stub".
+
+    ``requested`` defaults to ``YTVIDEO_VOICEOVER_PROVIDER``; "off" raises
+    ``VoiceoverDisabled``, an unknown value ``VoiceoverError``. "auto" is
+    Piper when ``piper_command()`` finds Piper and the voice's ``.onnx`` and
+    ``.onnx.json`` exist, else the stub.
+    """
+    name = (requested if requested is not None else settings.voiceover_provider).strip().lower()
+    if name not in PROVIDERS:
+        raise VoiceoverError(f"unknown voiceover provider: {name!r}; expected one of {PROVIDERS}")
+    if name == "off":
+        raise VoiceoverDisabled("voice-over is off (YTVIDEO_VOICEOVER_PROVIDER=off)")
+    if name != "auto":
+        return name
+    model = voice_model_path(voice or settings.voiceover_voice, model_dir)
+    if piper_command() is None:
+        log.info("voiceover: auto -> stub (piper is not installed)")
+        return "stub"
+    if not (model.is_file() and _config_path(model).is_file()):
+        log.info(
+            "voiceover: auto -> stub (voice %s not in %s; run python -m scripts.fetch_piper_voice)",
+            model.stem, model.parent,
+        )
+        return "stub"
+    return "piper"
+
+
+def reserve_output_path(folder: str | Path) -> Path:
+    """Create and return a new empty ``voiceover_<n>.wav`` in ``folder`` (the
+    first free ``n``); the name is chosen here, never by a client."""
+    base = Path(folder)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    for n in range(1, MAX_OUTPUT_INDEX + 1):
+        path = base / f"voiceover_{n}.wav"
+        try:
+            fd = os.open(path, flags, 0o644)
+        except FileExistsError:
+            continue
+        os.close(fd)
+        return path
+    raise VoiceoverError(f"too many voice-over files in {base}")
+
+
+def wav_duration(path: str | Path) -> float:
+    """Seconds of audio in the wav at ``path``; ``VoiceoverError`` when it is
+    missing, empty, over ``MAX_WAV_BYTES``, not a wav or holds no audio."""
+    target = Path(path)
+    try:
+        size = target.stat().st_size
+    except OSError as exc:
+        raise VoiceoverError("voice-over produced no file") from exc
+    if size == 0:
+        raise VoiceoverError("voice-over produced an empty file")
+    if size > MAX_WAV_BYTES:
+        raise VoiceoverError(f"voice-over file is larger than {MAX_WAV_BYTES} bytes")
+    try:
+        with wave.open(str(target), "rb") as wav:
+            frames, rate = wav.getnframes(), wav.getframerate()
+    except (wave.Error, EOFError, OSError) as exc:
+        raise VoiceoverError(f"voice-over file is not a valid wav: {exc}") from exc
+    if rate <= 0 or frames <= 0:
+        raise VoiceoverError("voice-over file holds no audio")
+    return frames / rate
+
+
+def _run_killable(argv: Sequence[str], timeout: float) -> None:
+    from app.services import ffmpeg_tools
+
+    try:
+        ffmpeg_tools.run(argv, timeout=timeout)
+    except ffmpeg_tools.FfmpegCancelled:
+        raise
+    except ffmpeg_tools.FfmpegError as exc:
+        raise VoiceoverError(f"piper failed: {exc}") from exc
+
+
+def synthesize_voiceover(
+    text: str,
+    voice: str | None,
+    out_path: str | Path,
+    *,
+    provider: str,
+    model_dir: str | Path | None = None,
+    runner: Runner | None = None,
+    timeout: float = SYNTH_TIMEOUT_SECONDS,
+) -> float:
+    """Speak ``text`` with ``voice`` into the wav at ``out_path``; its duration
+    in seconds. ``provider`` is "piper" or "stub" (``resolve_provider``).
+
+    ``out_path`` must come from the server (``reserve_output_path``). The
+    text and voice are validated here whatever the provider.
+    """
+    script = clean_text(text)
+    model = voice_model_path(voice or settings.voiceover_voice, model_dir)
+    out = Path(out_path)
+    if provider == "stub":
+        _stub_synth(script, str(out))
+    elif provider == "piper":
+        command = piper_command()
+        if command is None:
+            raise VoiceoverError("piper is not installed (pip install piper-tts)")
+        config = _config_path(model)
+        if not (model.is_file() and config.is_file()):
+            raise VoiceoverError(
+                f"voice {model.stem!r} is not in {model.parent}; run python -m scripts.fetch_piper_voice"
+            )
+        with tempfile.TemporaryDirectory(prefix="reelsmith-vo-") as tmp:
+            text_file = Path(tmp) / "script.txt"
+            text_file.write_text(script + "\n", encoding="utf-8")
+            argv = [
+                *command,
+                "--model", str(model),
+                "--config", str(config),
+                "--input-file", str(text_file),
+                "--output-file", str(out),
+            ]
+            log.info("voiceover: piper voice=%s chars=%d -> %s", model.stem, len(script), out.name)
+            (runner or _run_killable)(argv, timeout)
+    else:
+        raise VoiceoverError(f"unknown voiceover provider: {provider!r}")
+    return wav_duration(out)

@@ -1,9 +1,10 @@
 import logging
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont
 
 import app.logging_config  # noqa: F401
 from app.settings import settings
@@ -17,6 +18,58 @@ _SHADOW_FILL = (0, 0, 0, 200)
 _SHADOW_OFFSET = (4, 6)
 _SHADOW_BLUR = 4
 _STROKE_WIDTH = 4
+DEFAULT_FONT_SIZE = 96
+
+RGBA = tuple[int, int, int, int]
+
+
+@dataclass(frozen=True)
+class CaptionStyle:
+    """Look of a caption PNG. The defaults are the pipeline's own captions
+    (white words, the active word green, black stroke, 96 px)."""
+
+    font_size: int = DEFAULT_FONT_SIZE
+    fill: RGBA = _WHITE
+    highlight_fill: RGBA = _GREEN
+    stroke_fill: RGBA = _BLACK
+    highlights: bool = True
+    """False: the caption is drawn whole, no word is ever highlighted."""
+
+
+# The presets' font sizes are ASS sizes on a 1080x1920 script; the PNG
+# captions draw "hormozi" (56) at the pipeline's own 96 px and scale the
+# others by the same factor.
+_PRESET_FONT_SCALE = DEFAULT_FONT_SIZE / 56
+
+
+def _rgba(color: str | None, default: RGBA) -> RGBA:
+    """``color`` (any PIL colour string, e.g. ``#ffcc00``) as opaque RGBA;
+    ``default`` when it is missing or not a colour."""
+    if not color:
+        return default
+    try:
+        rgb = ImageColor.getrgb(color)
+    except (ValueError, TypeError):
+        return default
+    return (*rgb[:3], 255)
+
+
+def caption_style_for_preset(name: str | None) -> CaptionStyle:
+    """The ``animated_caption_service.PRESETS`` colour/size set ``name`` as a
+    PNG caption style; ``None`` is the default look. Presets without a
+    highlight colour (``static``, ``subtle``) never highlight a word."""
+    if name is None:
+        return CaptionStyle()
+    from app.services.animated_caption_service import get_preset
+
+    preset = get_preset(name)
+    return CaptionStyle(
+        font_size=max(1, round(preset.font_size * _PRESET_FONT_SCALE)),
+        fill=_rgba(preset.primary_color, _WHITE),
+        highlight_fill=_rgba(preset.highlight_color, _GREEN),
+        stroke_fill=_rgba(preset.stroke_color, _BLACK),
+        highlights=preset.highlight_color is not None,
+    )
 
 
 # Per-thread (path, size) -> FreeTypeFont cache. Fonts are not shared across
@@ -50,6 +103,10 @@ def create_subtitle_image(
     font_size: int = 96,
     highlight_word_index: int | None = None,
     text_anchor_y: int | None = None,
+    *,
+    fill: RGBA = _WHITE,
+    highlight_fill: RGBA = _GREEN,
+    stroke_fill: RGBA = _BLACK,
 ) -> np.ndarray:
     log.info(
         "Create Subtitle Image (%dx%d, font_size=%d, highlight=%s, anchor_y=%s)",
@@ -62,7 +119,7 @@ def create_subtitle_image(
     font = _load_font(font_size)
     is_freetype = isinstance(font, ImageFont.FreeTypeFont)
     stroke_width = _STROKE_WIDTH if is_freetype else 0
-    stroke_fill = _BLACK if is_freetype else None
+    stroke_fill = stroke_fill if is_freetype else None
 
     # Measure full text for vertical positioning.
     _l, top, _r, bottom = draw.textbbox((0, 0), text, font=font)
@@ -98,15 +155,15 @@ def create_subtitle_image(
     img.alpha_composite(shadow_layer)
     draw = ImageDraw.Draw(img)
 
-    # Pass 2: foreground words; active word renders in green, others white.
+    # Pass 2: foreground words; the active word in the highlight colour.
     x = x_start
     for i, (word, w) in enumerate(zip(words, word_widths)):
-        fill = _GREEN if i == highlight_word_index else _WHITE
+        word_fill = highlight_fill if i == highlight_word_index else fill
         draw.text(
             (x, text_y),
             word,
             font=font,
-            fill=fill,
+            fill=word_fill,
             stroke_width=stroke_width,
             stroke_fill=stroke_fill,
         )
@@ -133,3 +190,30 @@ def render_to_path(
     )
     Image.fromarray(arr, mode="RGBA").save(path)
     return path
+
+
+def create_text_overlay_image(text: str, font_size: int, color: str | None) -> Image.Image | None:
+    """A tight RGBA image of ``text`` (a timeline text overlay): ``color``
+    (white when missing or not a colour) with a black stroke. ``None`` when
+    the text draws nothing. The text is drawn by PIL, never by ffmpeg, so it
+    reaches no filtergraph."""
+    if not text.strip():
+        return None
+    font = _load_font(font_size)
+    stroke = max(1, font_size // 24) if isinstance(font, ImageFont.FreeTypeFont) else 0
+    probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    left, top, right, bottom = probe.textbbox((0, 0), text, font=font, stroke_width=stroke)
+    if right <= left or bottom <= top:
+        return None
+    img = Image.new("RGBA", (right - left, bottom - top), (0, 0, 0, 0))
+    ImageDraw.Draw(img).text(
+        (-left, -top),
+        text,
+        font=font,
+        fill=_rgba(color, _WHITE),
+        stroke_width=stroke,
+        stroke_fill=_BLACK if stroke else None,
+    )
+    if img.getbbox() is None:
+        return None
+    return img

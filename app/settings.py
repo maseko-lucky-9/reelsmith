@@ -212,6 +212,15 @@ class Settings(BaseSettings):
     # ── Voice-over (W2.3) ─────────────────────────────────────────────────
     # Path to the .onnx model for the ``piper`` voice-over provider.
     piper_model: str = ""
+    # Engine of ``POST /clips/{id}/voiceover`` (spec 016): "auto" (default:
+    # Piper when the ``piper`` command and the voice's model files exist,
+    # else the stub) | "piper" | "stub" (one second of silence) | "off".
+    voiceover_provider: str = "auto"
+    # Where Piper voices live (``<voice>.onnx`` + ``<voice>.onnx.json``);
+    # fetched by ``python -m scripts.fetch_piper_voice``, never at import.
+    voiceover_model_dir: str = str(_PROJECT_ROOT / "data" / "models")
+    # Voice used when a request names none.
+    voiceover_voice: str = "en_US-lessac-medium"
 
     # ── Bulk export (W3.7) ────────────────────────────────────────────────
     bulk_export_max_clips: int = 200
