@@ -437,7 +437,14 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
         await store.update(job_id, lambda s: setattr(s, "current_step", "chapters"))
         raw_chapters = adapter.extract_chapters(info)
         chapters = [
-            {"index": c.index, "title": c.title, "start": c.start, "end": c.end}
+            {
+                "index": c.index,
+                "title": c.title,
+                "start": c.start,
+                "end": c.end,
+                # The source's own chapter list: the only branch that is.
+                "segment_origin": manifest_service.ORIGIN_CHAPTERS,
+            }
             for c in raw_chapters
         ]
         safe_end = await _job_thread(job_id, clip_service.probe_safe_end, video_path)
@@ -576,7 +583,11 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
         job = await store.get(job_id)
         manifest_path = await _job_thread(
             job_id,
-            manifest_service.write_manifest, clips_data, export_dir, source=job.source
+            manifest_service.write_manifest,
+            clips_data,
+            export_dir,
+            source=job.source,
+            source_url=job.url,
         )
         await _emit(bus, EventType.MANIFEST_CREATED, job_id, manifest_path=manifest_path)
 
@@ -645,7 +656,20 @@ def _download_in_thread(
 
 
 def _full_video_chapter(safe_end: float) -> dict[str, Any]:
-    return {"index": 0, "title": "Full Video", "start": 0.0, "end": safe_end}
+    return {
+        "index": 0,
+        "title": "Full Video",
+        "start": 0.0,
+        "end": safe_end,
+        "segment_origin": manifest_service.ORIGIN_FULL_VIDEO,
+    }
+
+
+def _mark_discovered(chapters: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Tag chapters the proposer picked: Reelsmith found them, not the source."""
+    return [
+        {**c, "segment_origin": manifest_service.ORIGIN_DISCOVERED} for c in chapters
+    ]
 
 
 def _discovery_enabled(opts: PipelineOptions, segment_mode: str) -> bool:
@@ -735,7 +759,9 @@ async def _discover_segments(
         )
         ranked = await segment_rerank.rerank(candidates, prompt=prompt, duration=safe_end, job_id=job_id)
         kept = segment_discovery.select_discovered(ranked, safe_end)
-        chapters = segment_discovery.segments_to_chapters(kept, safe_end)
+        chapters = _mark_discovered(
+            segment_discovery.segments_to_chapters(kept, safe_end)
+        )
     except asyncio.CancelledError:
         raise
     except Exception as e:  # noqa: BLE001 — discovery must never fail the job
@@ -1069,7 +1095,7 @@ async def _propose_reprompt_chapters(
     kept = segment_discovery.select_discovered(candidates, safe_end)
     chapters = [
         {**c, "index": first_index + c["index"]}
-        for c in segment_discovery.segments_to_chapters(kept, safe_end)
+        for c in _mark_discovered(segment_discovery.segments_to_chapters(kept, safe_end))
     ]
     log.info(
         "[%s] Reprompt proposal  words=%d  candidates=%d  kept=%s",
@@ -1289,6 +1315,7 @@ async def _reprompt_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> 
             manifest_clips,
             export_dir,
             source=job.source,
+            source_url=job.url,
         )
         await _emit(bus, EventType.MANIFEST_CREATED, job_id, manifest_path=manifest_path)
 
@@ -1839,6 +1866,10 @@ async def _process_chapter(
         for key in ("virality_score", "score_breakdown", "summary"):
             if key in chapter:
                 c[key] = chapter[key]
+        # How the segment was produced; a chapter without it (a re-render's
+        # rebuilt chapter, a reprompt range) leaves the clip's value alone.
+        if chapter.get("segment_origin"):
+            c["segment_origin"] = chapter["segment_origin"]
 
     await store.upsert_clip(job_id, clip_id, _init_clip)
 

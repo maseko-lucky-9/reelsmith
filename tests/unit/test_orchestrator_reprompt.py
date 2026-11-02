@@ -651,3 +651,33 @@ async def test_sse_stream_ends_on_reprompt_failed(harness, memory_store):
 
 async def _collect(iterator: Any) -> list[dict[str, Any]]:
     return [item async for item in iterator]
+
+
+async def test_reprompted_clips_are_discovered_whatever_the_original_was(
+    harness, memory_store
+):
+    await harness.complete_job(memory_store)
+    # The original run stored these via the proposer too; force a different
+    # origin on them to prove the reprompt does not inherit it.
+    for clip in await _live(memory_store):
+        await memory_store.upsert_clip(
+            JOB_ID, clip["clip_id"], lambda c: c.update(segment_origin="chapters")
+        )
+
+    await harness.reprompt(memory_store)
+
+    rows = _manifest_rows(harness)
+    assert sorted(r["filename"] for r in rows) == ["02_Alpha.mp4", "03_Gamma.mp4"]
+    assert [r["segment_origin"] for r in rows] == ["discovered", "discovered"]
+    assert {r["source_url"] for r in rows} == {URL}
+
+
+async def test_a_reprompt_range_clip_has_no_known_origin(harness, store):
+    await harness.complete_job(store)
+
+    await harness.reprompt(store, start_seconds=100.0, end_seconds=130.5)
+
+    (clip,) = await _live(store)
+    assert clip.get("segment_origin") is None
+    (row,) = _manifest_rows(harness)
+    assert row["segment_origin"] == ""

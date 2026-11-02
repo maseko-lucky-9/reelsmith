@@ -493,6 +493,7 @@ class SqlJobStore:
                 r.broll_assets = c.get("broll_assets")
                 r.caption_style = c.get("caption_style") or "static"
                 r.captions_burnt_path = c.get("captions_burnt_path")
+                r.segment_origin = c.get("segment_origin")
 
             if record is None:
                 record = ClipRecord(id=clip_id, job_id=job_id)
@@ -795,4 +796,5 @@ def _clip_record_to_dict(record: Any) -> dict[str, Any]:
         "broll_assets": record.broll_assets,
         "caption_style": record.caption_style,
         "captions_burnt_path": record.captions_burnt_path,
+        "segment_origin": record.segment_origin,
     }

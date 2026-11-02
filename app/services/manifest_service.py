@@ -11,8 +11,20 @@ log = logging.getLogger(__name__)
 COLUMNS = [
     "filename", "title", "duration_seconds", "file_size_mb",
     "description", "hashtags", "export_path", "thumbnail_path", "job_id",
-    "broll_credits", "source",
+    "broll_credits", "source", "segment_origin", "source_url",
 ]
+
+# How a clip's segment was produced (``clips.segment_origin``). Only these are
+# written; anything else (None, a stale value) is an empty cell: unknown.
+ORIGIN_CHAPTERS = "chapters"  # cut from the source's own chapter list
+ORIGIN_DISCOVERED = "discovered"  # found by Reelsmith's segment proposer
+ORIGIN_FULL_VIDEO = "full_video"  # the single "Full Video" pseudo-chapter
+SEGMENT_ORIGINS = frozenset({ORIGIN_CHAPTERS, ORIGIN_DISCOVERED, ORIGIN_FULL_VIDEO})
+
+
+def clean_segment_origin(value: object) -> str:
+    """``value`` if it is a known segment origin, else ``""`` (unknown)."""
+    return value if isinstance(value, str) and value in SEGMENT_ORIGINS else ""
 
 
 def broll_credits(assets: list[dict] | None) -> list[dict[str, str]]:
@@ -37,7 +49,10 @@ def broll_credits(assets: list[dict] | None) -> list[dict[str, str]]:
 
 
 def write_manifest(
-    clips: list[dict], export_dir: str, source: str | None = None
+    clips: list[dict],
+    export_dir: str,
+    source: str | None = None,
+    source_url: str | None = None,
 ) -> str:
     """Write ``manifest.csv`` into ``export_dir`` and return its path.
 
@@ -45,6 +60,12 @@ def write_manifest(
     upload, generate...), written on every row; ``None`` (a legacy job) is
     written as an empty cell. Consumers read columns by header name, so new
     columns are only ever appended.
+
+    ``source_url`` is the job's original URL (``jobs.url``; ``upload://...``
+    for an upload), written as is on every row. Each row's
+    ``segment_origin`` is its clip's ``segment_origin``: ``chapters``,
+    ``discovered`` or ``full_video``; empty when unknown (a clip stored before
+    the column existed, an upload, a generated clip, a reprompt range).
     """
     out_path = str(Path(export_dir) / "manifest.csv")
     tmp_path = out_path + ".tmp"
@@ -68,6 +89,8 @@ def write_manifest(
                 "job_id": clip.get("job_id", ""),
                 "broll_credits": json.dumps(broll_credits(clip.get("broll_assets"))),
                 "source": source or "",
+                "segment_origin": clean_segment_origin(clip.get("segment_origin")),
+                "source_url": source_url or "",
             }
             writer.writerow(row)
     os.replace(tmp_path, out_path)

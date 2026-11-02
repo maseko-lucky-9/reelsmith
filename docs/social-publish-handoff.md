@@ -30,6 +30,10 @@ $YTVIDEO_EXPORT_BASE_FOLDER/
 | `job_id` | string | Matches the parent folder name |
 | `broll_credits` | JSON string | B-roll attributions (`[]` when none) |
 | `source` | string | The job's platform id: `youtube`, `tiktok`, `upload`, `generate`, `instagram`, `facebook`; empty for jobs created before the column existed |
+| `segment_origin` | string | How the clip's segment was produced: `chapters` (cut from the source's own chapter list), `discovered` (found by Reelsmith's segment proposer, including after a reprompt), `full_video` (the whole source as one "Full Video" clip, either because segment discovery is off or as the fallback when it finds nothing), or empty when unknown (clips and jobs created before the column existed, uploads and generated clips that never ran the chapter step, a reprompt over an explicit time range). Decided per clip from the code path that produced it, never guessed. It is independent of `source`: a TikTok job with chapters is `chapters` with `source=tiktok`. |
+| `source_url` | string | The job's original URL (`jobs.url`); `upload://<name>` for an upload. CSV-quoted when it holds commas or quotes. |
+
+Columns are only ever appended and consumers read them by header name. The bulk-export zip's `manifest.csv` (`/api/clips/bulk-export.zip`) ends with the same `source`, `segment_origin` and `source_url` columns.
 
 ## How a clip reaches TikTok
 
@@ -47,7 +51,7 @@ Reelsmith job done
 Rules enforced:
 
 - **Slots:** at most one clip per run, on or after 12:00, 15:00 or 18:00 SAST, at least 170 minutes after the previous slot was taken, never after 21:00. A slot missed while the host was off posts late, the same day.
-- **Which clips:** manifests dated 2026-10-11 or later, rotating across source videos (never the same video twice in a row; least recently used first), then row order within a video. A video's `00_*` intro (or a clip titled "Intro") is never posted. Only `source = youtube` (a manifest without the column only if its job id is on the workflow's legacy list). A missing file waits; a file of 1 KB or less, an empty name or a non-`.mp4` name is junk and is skipped. A manifest is archived into `processed/` only when every row is posted, posted elsewhere or junk.
+- **Which clips:** manifests dated 2026-10-11 or later, rotating across source videos (never the same video twice in a row; least recently used first), then row order within a video. A video's `00_*` intro (or a clip titled "Intro") is never posted. Only clips with `source = youtube` **and** `segment_origin = chapters`, i.e. cut from a YouTube video's own chapters; a YouTube video without chapters (Reelsmith splits it itself, `discovered`, or exports it whole, `full_video`) is not posted. A manifest without these columns (exported before they existed) is posted only if its job id is on the workflow's legacy list; Reelsmith never retags an already-exported manifest. To keep a job off TikTok, nothing needs to be set: a job that does not match (another source, or no real chapters) is simply not picked. A missing file waits; a file of 1 KB or less, an empty name or a non-`.mp4` name is junk and is skipped. A manifest is archived into `processed/` only when every row is posted, posted elsewhere or junk.
 - **Never twice:** the sidecar refuses a clip already posted (by name or by content hash) with 409, and blocks a clip whose last upload has no recorded outcome (`ambiguous`) until a person resolves it.
 - **Caps:** three posts per SAST day; a pause after two failed attempts in a row.
 - **Markers** live on the cluster volume, outside the Syncthing folder (`.slots/`, `.state/`) or beside the job (`.claims/`, `results.log.csv`). The share on the Mac is never edited.
