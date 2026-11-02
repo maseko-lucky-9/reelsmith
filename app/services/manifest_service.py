@@ -61,11 +61,12 @@ def write_manifest(
     written as an empty cell. Consumers read columns by header name, so new
     columns are only ever appended.
 
-    ``source_url`` is the job's original URL (``jobs.url``; ``upload://...``
-    for an upload), written as is on every row. Each row's
+    ``source_url`` is the job's original URL (``jobs.youtube_url``, i.e.
+    ``JobState.url``; ``upload://<absolute path>/uploads/<uuid>.mp4`` for an
+    upload), written as is on every row. Each row's
     ``segment_origin`` is its clip's ``segment_origin``: ``chapters``,
     ``discovered`` or ``full_video``; empty when unknown (a clip stored before
-    the column existed, an upload, a generated clip, a reprompt range).
+    the column existed, a reprompt over an explicit time range).
     """
     out_path = str(Path(export_dir) / "manifest.csv")
     tmp_path = out_path + ".tmp"

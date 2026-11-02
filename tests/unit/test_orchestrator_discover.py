@@ -1046,3 +1046,23 @@ async def test_a_clip_stored_without_an_origin_stays_unknown(harness, store):
     await _rerender(store)
 
     assert (await store.get_clip(CLIP_ID)).get("segment_origin") is None
+
+
+async def test_an_upload_runs_the_pipeline_and_is_discovered(harness, store):
+    harness.adapter.platform_id = "upload"
+
+    await harness.run(store, job_source="upload")
+
+    rows = _manifest(harness)
+    assert {r["segment_origin"] for r in rows} == {"discovered"}
+    assert {r["source"] for r in rows} == {"upload"}
+
+
+async def test_a_short_upload_is_full_video(harness, store):
+    harness.adapter.platform_id = "upload"
+    harness.safe_end = 12.0
+
+    await harness.run(store, job_source="upload")
+
+    (row,) = _manifest(harness)
+    assert (row["source"], row["segment_origin"]) == ("upload", "full_video")
