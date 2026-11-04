@@ -6,6 +6,7 @@ import contextlib
 import dataclasses
 import logging
 import math
+import os
 import re
 import shutil
 import threading
@@ -1318,7 +1319,7 @@ async def _rerender_clip(trigger: Event, bus: AsyncEventBus, store: JobStore) ->
                 edit.plan.caption_style,
             )
         clips_folder = str(Path(output_path).parent)
-        cleanup_root = Path(clips_folder) / "_tmp" / f"{job_id}-rerender-{clip_id[:8]}"
+        cleanup_root = Path(clips_folder) / "_tmp" / f"{job_id}-rerender-{clip_id[:8]}-{uuid.uuid4().hex[:8]}"
         cleanup_root.mkdir(parents=True, exist_ok=True)
         # A re-render always renders, whatever the job's options said.
         raw_opts = payload.get("pipeline_options") or job.pipeline_options.model_dump()
@@ -1409,6 +1410,15 @@ async def _rerender_clip(trigger: Event, bus: AsyncEventBus, store: JobStore) ->
 
 
 _NO_CUT: Any = object()
+
+
+def _file_identity(path: str) -> tuple[int, int, int] | None:
+    """(inode, mtime_ns, size) of ``path``; None when it does not exist."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_ino, st.st_mtime_ns, st.st_size)
 
 
 async def _set_rendered_segments(
@@ -2381,6 +2391,7 @@ async def _process_chapter(
     )
 
     # ── Render final clip (gated on render) ──────────────────────────────────
+    cut_recorded = False
     output_path: str | None = None
     safe_title = _sanitize(title)
     if opts.render:
@@ -2404,13 +2415,18 @@ async def _process_chapter(
         # recorded below, which cut the file holds is unknown (``[]``, which the
         # editor never matches), so a cancel or crash in between cannot leave
         # the old cut recorded against the new file.
-        prior_clip = await store.get_clip(clip_id, include_retired=True) if clip_id else None
-        if prior_clip is not None:
-            prior_cut = prior_clip.get("rendered_segments", _NO_CUT)
-            await _set_rendered_segments(store, job_id, clip_id, [])
+        # Only a re-render of a clip that already has a rendered file does this
+        # (``render_to`` is its path); a reprompt's placeholder clip has none.
+        prior_clip = await store.get_clip(clip_id, include_retired=True) if clip_id and render_to else None
+        replaces_file = prior_clip is not None and bool(prior_clip.get("output_path"))
+        prior_cut = prior_clip.get("rendered_segments", _NO_CUT) if replaces_file and prior_clip else _NO_CUT
+        file_before = _file_identity(output_path) if replaces_file else None
+        cut_recorded = replaces_file
         # Reads the SOURCE and trims [start, end) itself — one ffmpeg pass.
         # Cancellation (e.g. this wait_for timing out) kills that ffmpeg.
         try:
+            if replaces_file:
+                await _set_rendered_segments(store, job_id, clip_id, [])
             await asyncio.wait_for(
                 ffmpeg_tools.to_thread_cancellable(
                     render_service.render_clip,
@@ -2429,11 +2445,19 @@ async def _process_chapter(
                 timeout=settings.render_timeout_seconds,
             )
         except BaseException:
-            # render_clip replaces the file atomically: a failed render left the old one.
-            if prior_clip is not None:
-                await _finish_then_honour_cancel(_set_rendered_segments(store, job_id, clip_id, prior_cut))
+            if replaces_file:
+                # render_clip replaces the file atomically. A cancel or timeout
+                # can still land just after it did (the poll is 100 ms): if the
+                # file changed it holds THIS render, so record this render's cut;
+                # only an untouched file gets the previous cut back.
+                if _file_identity(output_path) == file_before:
+                    await _finish_then_honour_cancel(_set_rendered_segments(store, job_id, clip_id, prior_cut))
+                else:
+                    await _finish_then_honour_cancel(
+                        _set_rendered_segments(store, job_id, clip_id, rendered_segments)
+                    )
             raise
-        if prior_clip is not None:
+        if replaces_file:
             # The file is the new cut from here on; record it before anything else can fail.
             await _finish_then_honour_cancel(_set_rendered_segments(store, job_id, clip_id, rendered_segments))
         log.info(
@@ -2526,7 +2550,9 @@ async def _process_chapter(
                 "thumbnail_path": thumbnail_path,
                 "transcript": text,
                 "broll_assets": broll_assets,
-                **({"rendered_segments": rendered_segments} if opts.render else {}),
+                # A re-render of an existing file recorded its cut right after the
+                # render; writing it again here could clobber a newer re-render's.
+                **({"rendered_segments": rendered_segments} if opts.render and not cut_recorded else {}),
             }
         )
         if regenerate_copy:

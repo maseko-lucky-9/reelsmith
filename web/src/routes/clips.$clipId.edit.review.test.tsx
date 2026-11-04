@@ -366,8 +366,8 @@ describe('playhead while the segments are not rendered', () => {
       expect(button('Split at playhead').disabled).toBe(false)
     })
 
-    it('does not match boundaries more than 1 ms apart', async () => {
-      await reopen([[101.0075, 110]], 101.0045)
+    it('does not match boundaries 1.1 ms apart', async () => {
+      await reopen([[101.0056, 110]], 101.0045)
       expect(button('Split at playhead').disabled).toBe(true)
     })
 

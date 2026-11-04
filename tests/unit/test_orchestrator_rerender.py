@@ -188,7 +188,7 @@ async def test_rerender_updates_same_clip_in_place(store, layout, render_calls):
     # The editor matches the event to its clip by this id.
     assert rendered[0].payload["clip_id"] == CLIP_ID
     assert EventType.THUMBNAIL_GENERATED in types
-    assert not (layout["clips"] / "_tmp" / f"{JOB_ID}-rerender-{CLIP_ID[:8]}").exists()
+    assert not list((layout["clips"] / "_tmp").glob(f"{JOB_ID}-rerender-*"))
 
 
 async def test_failed_rerender_leaves_job_and_clip_untouched(
@@ -215,7 +215,7 @@ async def test_failed_rerender_leaves_job_and_clip_untouched(
     assert layout["output"].read_bytes() == b"old"
     assert EventType.JOB_FAILED not in recorder.types()
     assert EventType.JOB_COMPLETED not in recorder.types()
-    assert not (layout["clips"] / "_tmp" / f"{JOB_ID}-rerender-{CLIP_ID[:8]}").exists()
+    assert not list((layout["clips"] / "_tmp").glob(f"{JOB_ID}-rerender-*"))
 
 
 async def test_old_empty_url_rerender_payload_no_longer_fails_the_job(
@@ -287,7 +287,7 @@ async def test_rerender_cancellation_propagates(
         await task
 
     assert (await store.get(JOB_ID)).status == "completed"
-    assert not (layout["clips"] / "_tmp" / f"{JOB_ID}-rerender-{CLIP_ID[:8]}").exists()
+    assert not list((layout["clips"] / "_tmp").glob(f"{JOB_ID}-rerender-*"))
 
 
 @pytest.mark.parametrize(
@@ -566,7 +566,7 @@ async def test_an_unrenderable_edit_fails_the_rerender_cleanly(
     assert [r.levelname for r in refused] == ["WARNING"]
     assert EventType.JOB_FAILED not in recorder.types()
     assert EventType.CLIP_RENDERED not in recorder.types()
-    assert not (layout["clips"] / "_tmp" / f"{JOB_ID}-rerender-{CLIP_ID[:8]}").exists()
+    assert not list((layout["clips"] / "_tmp").glob(f"{JOB_ID}-rerender-*"))
 
 
 async def test_a_user_cancel_of_an_edited_rerender_keeps_the_old_clip(layout, plan_renders, monkeypatch):
@@ -617,7 +617,7 @@ async def test_a_user_cancel_of_an_edited_rerender_keeps_the_old_clip(layout, pl
     job = await store.get(JOB_ID)
     assert job.status == "completed"
     assert job.chapters[1].status == "completed"
-    assert not (layout["clips"] / "_tmp" / f"{JOB_ID}-rerender-{CLIP_ID[:8]}").exists()
+    assert not list((layout["clips"] / "_tmp").glob(f"{JOB_ID}-rerender-*"))
 
 
 async def test_a_cancel_before_the_rerender_starts_reports_it_for_the_clip(layout):
@@ -852,14 +852,30 @@ async def test_the_rerender_claim_is_free_after_clip_rendered_and_not_released_t
         seen["claimable_in_copy_step"] = asyncio.run_coroutine_threadsafe(_claim(), loop).result(5)
         return out
 
+    real_render = orch.render_service.render_clip
+
+    def _render(*args, **kwargs):
+        # Still held while the file is being replaced.
+        seen["held_during_render"] = not asyncio.run_coroutine_threadsafe(_claim_probe(), loop).result(5)
+        return real_render(*args, **kwargs)
+
+    async def _claim_probe() -> bool:
+        free = orch.claim_rerender(CLIP_ID)
+        if free:
+            orch.release_rerender(CLIP_ID)
+            orch.claim_rerender(CLIP_ID)
+        return free
+
     async def _claim() -> bool:
         return orch.claim_rerender(CLIP_ID)
 
     loop = asyncio.get_running_loop()
     monkeypatch.setattr(orch.thumbnail_service, "generate_thumbnail", _thumb)
+    monkeypatch.setattr(orch.render_service, "render_clip", _render)
 
     await orch._run_job(_trigger(), AsyncEventBus(), store)
 
+    assert seen["held_during_render"] is True
     assert seen["claimable_in_copy_step"] is True
     assert orch.claim_rerender(CLIP_ID) is False  # the next request's claim survived the task's end
     orch.release_rerender(CLIP_ID)
@@ -875,3 +891,124 @@ async def test_the_recorded_cut_is_not_rounded(store, layout, plan_renders):
     await orch._run_job(_trigger(), AsyncEventBus(), store)
 
     assert (await store.get_clip(CLIP_ID))["rendered_segments"] == [[7.0005, 11.0045]]
+
+
+async def test_a_late_init_clip_does_not_clobber_a_newer_rerenders_cut(layout, plan_renders, monkeypatch):
+    """The re-render recorded its cut right after the render; the clip upsert at
+    the end of the task must not write it again over a newer re-render's."""
+    store = InMemoryJobStore()
+    await _seed(store, layout)
+    (layout["clips"] / "vo.wav").write_bytes(b"RIFF")
+    await _save_edit(store, _v2_edit())
+    loop = asyncio.get_running_loop()
+
+    def _thumb(clip_path, out):
+        # Another re-render of the clip finished meanwhile.
+        asyncio.run_coroutine_threadsafe(
+            store.upsert_clip(JOB_ID, CLIP_ID, lambda c: c.update({"rendered_segments": [[1.0, 2.0]]})), loop
+        ).result(5)
+        return out
+
+    monkeypatch.setattr(orch.thumbnail_service, "generate_thumbnail", _thumb)
+
+    await orch._run_job(_trigger(), AsyncEventBus(), store)
+
+    assert (await store.get_clip(CLIP_ID))["rendered_segments"] == [[1.0, 2.0]]
+
+
+async def test_each_rerender_task_has_its_own_temp_folder(store, layout, render_calls, monkeypatch):
+    await _seed(store, layout)
+    removed: list[str] = []
+    real_rmtree = orch.shutil.rmtree
+    monkeypatch.setattr(orch.shutil, "rmtree", lambda path, *a, **k: (removed.append(str(path)), real_rmtree(path, *a, **k)))
+
+    await orch._run_job(_trigger(), AsyncEventBus(), store)
+    await orch._run_job(_trigger(), AsyncEventBus(), store)
+
+    tmp = [p for p in removed if "-rerender-" in p]
+    assert len(tmp) == 2 and tmp[0] != tmp[1]
+
+
+async def test_a_cancel_while_the_unknown_marker_is_written_restores_the_recorded_cut(layout, render_calls, monkeypatch):
+    store = InMemoryJobStore()
+    await _seed(store, layout)
+    await store.upsert_clip(JOB_ID, CLIP_ID, lambda c: c.update({"rendered_segments": [[6.0, 12.0]]}))
+    real_set = orch._set_rendered_segments
+    in_marker = asyncio.Event()
+
+    async def _slow_marker(st, job_id, clip_id, segments):
+        await real_set(st, job_id, clip_id, segments)
+        if segments == []:
+            in_marker.set()
+            await asyncio.sleep(0.5)
+
+    monkeypatch.setattr(orch, "_set_rendered_segments", _slow_marker)
+    orch.claim_work(JOB_ID)
+    task = asyncio.create_task(orch._run_job(_trigger(), AsyncEventBus(), store))
+    orch._job_tasks.setdefault(JOB_ID, set()).add(task)
+    try:
+        await asyncio.wait_for(in_marker.wait(), 5)
+        assert orch.cancel_job(JOB_ID)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        orch._job_tasks.pop(JOB_ID, None)
+        orch._user_cancelled.discard(JOB_ID)
+        orch._user_cancelled_tasks.discard(task)
+
+    assert (await store.get_clip(CLIP_ID))["rendered_segments"] == [[6.0, 12.0]]
+
+
+async def _run_and_cancel_at(store, layout, monkeypatch, prior, cancel_after):
+    """The real atomic replace and cancel poll (0.1 s) around a stand-in for
+    ffmpeg that runs 0.35 s, then writes the file."""
+    from app.services import render_service as rs
+
+    await _seed(store, layout)
+    (layout["clips"] / "vo.wav").write_bytes(b"RIFF")
+    await _save_edit(store, _v2_edit())
+    await store.upsert_clip(JOB_ID, CLIP_ID, lambda c: c.update({"rendered_segments": prior}))
+    loop = asyncio.get_running_loop()
+    started = asyncio.Event()
+
+    def _atomic_render(video_path, output_path, start, end, *a, **k):
+        loop.call_soon_threadsafe(started.set)
+        rs._run_atomically(["sh", "-c", 'sleep 0.35; printf edited > "$0"', output_path], output_path)
+        return output_path
+
+    monkeypatch.setattr(orch.render_service, "render_clip", _atomic_render)
+    orch.claim_work(JOB_ID)
+    task = asyncio.create_task(orch._run_job(_trigger(), AsyncEventBus(), store))
+    orch._job_tasks.setdefault(JOB_ID, set()).add(task)
+    try:
+        await asyncio.wait_for(started.wait(), 5)
+        await asyncio.sleep(cancel_after)
+        assert orch.cancel_job(JOB_ID)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        orch._job_tasks.pop(JOB_ID, None)
+        orch._user_cancelled.discard(JOB_ID)
+        orch._user_cancelled_tasks.discard(task)
+    return layout["output"].read_bytes(), (await store.get_clip(CLIP_ID))["rendered_segments"]
+
+
+@pytest.mark.parametrize("cancel_after", [0.31, 0.33, 0.345])
+@pytest.mark.parametrize("prior", [[[6.0, 12.0]], None])
+async def test_a_cancel_just_after_the_file_was_replaced_records_the_new_cut(
+    layout, plan_renders, monkeypatch, prior, cancel_after
+):
+    """The cancel poll is 100 ms: one landing as ffmpeg exits can still raise
+    after the atomic replace. The file then holds this render; the record must
+    be its cut (or unknown), never the previous one."""
+    data, recorded = await _run_and_cancel_at(InMemoryJobStore(), layout, monkeypatch, prior, cancel_after)
+    if data == b"edited":
+        assert recorded in ([[7.0, 9.0], [10.0, 13.0]], [])
+    else:
+        assert recorded == prior
+
+
+async def test_a_cancel_mid_ffmpeg_restores_the_previous_cut(layout, plan_renders, monkeypatch):
+    data, recorded = await _run_and_cancel_at(InMemoryJobStore(), layout, monkeypatch, [[6.0, 12.0]], 0.05)
+    assert data == b"old"
+    assert recorded == [[6.0, 12.0]]
