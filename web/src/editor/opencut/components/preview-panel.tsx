@@ -152,10 +152,12 @@ export function PreviewPanel({
     () => JSON.parse(segmentsKey),
     [segmentsKey],
   );
-  const reelLength = segments.reduce(
-    (sum, s) => sum + Math.max(0, s.end - s.start),
-    0,
-  );
+  // To the millisecond, the edit's precision: the elements' duration - trimEnd arithmetic is not
+  // exact (a 30 s cut sums to 29.999999999999993, which the floored time code reads as 29:29).
+  const reelLength =
+    Math.round(
+      segments.reduce((sum, s) => sum + Math.max(0, s.end - s.start), 0) * 1000,
+    ) / 1000;
 
   const geometry = reelGeometry(...sourceSize);
   const [canvasW, canvasH] = geometry.canvasSize;
@@ -350,6 +352,11 @@ function TextLayers({
 
   const captionStyle: CSSProperties = {
     top: pct(geometry.bandAnchorY / geometry.canvasSize[1]),
+    // One unwrapped line centred on the frame (the render's x_start = (W - w) / 2): a line wider
+    // than the frame is cut evenly on both sides, not only on the right.
+    left: "50%",
+    width: "max-content",
+    transform: "translate(-50%, -50%)",
     fontFamily: CAPTION_FONT,
     fontSize: px(look.font_size * scale),
     WebkitTextStroke: `${px(2 * CAPTION_STROKE * scale)} ${rgba(look.stroke_fill)}`,
@@ -399,7 +406,7 @@ function TextLayers({
           <div
             key={el.id}
             data-testid="preview-caption"
-            className="absolute inset-x-0 -translate-y-1/2 whitespace-nowrap text-center uppercase leading-none"
+            className="absolute whitespace-nowrap text-center uppercase leading-none"
             style={captionStyle}
           >
             {words.map((word, i) => (

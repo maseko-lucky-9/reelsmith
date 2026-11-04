@@ -329,6 +329,19 @@ describe("caption layer", () => {
     expect(screen.getByTestId("preview-caption").style.top).toBe("85%"); // 1632 / 1920
   });
 
+  it("centres the line on the frame even when it is wider than the frame, as the render does", () => {
+    // subtitle_image_service: x_start = (W - total_w) / 2, one unwrapped line,
+    // so an over-wide caption is cut evenly on both sides. A full-width box
+    // with text-align: center lets the line run off the right edge only (T157).
+    mount();
+    act(() => playback().seek(1.6));
+    const caption = screen.getByTestId("preview-caption");
+    expect(caption.style.left).toBe("50%");
+    expect(caption.style.width).toBe("max-content");
+    expect(caption.style.transform).toBe("translate(-50%, -50%)");
+    expect(caption).not.toHaveClass("inset-x-0");
+  });
+
   it("scales the look's font size by preview width / canvas width", () => {
     vi.stubGlobal(
       "ResizeObserver",
@@ -432,6 +445,31 @@ describe("result view", () => {
 });
 
 describe("toolbar", () => {
+  it("reads the reel's length on the frame grid: no frame lost to floating error", () => {
+    // T157: in a 220.746 s source, a 0-12 s + 39.933-57.933 s cut is a 30 s
+    // reel, but the elements' duration - trimEnd sum is 29.999999999999993,
+    // which formatTimeCode (it floors) read as 00:00:29:29.
+    expect(
+      timeline().load(
+        edit({
+          tracks: [
+            {
+              kind: "video",
+              items: [
+                { start: 0, end: 12 },
+                { start: 39.933, end: 57.933 },
+              ],
+            },
+          ],
+        }),
+        { sourceWindow: null, sourceDuration: 220.746 },
+      ).ok,
+    ).toBe(true);
+    const { container } = mount();
+    const bar = container.querySelector("[data-toolbar]");
+    expect(bar).toHaveTextContent("00:00:00:00/00:00:30:00");
+  });
+
   it("toggles playback", () => {
     mount();
     fireEvent.click(screen.getByRole("button", { name: "Play" }));
