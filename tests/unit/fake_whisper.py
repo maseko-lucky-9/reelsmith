@@ -49,9 +49,18 @@ class FakeWhisperModel:
 
     supported_languages = list(SUPPORTED_LANGUAGES)
 
-    def __init__(self, *, segments: int = 2, delay: float = 0.0) -> None:
+    def __init__(
+        self,
+        *,
+        segments: int = 2,
+        delay: float = 0.0,
+        fail_with: Exception | None = None,
+    ) -> None:
         self.segments = segments
         self.delay = delay
+        # Raised on the first iteration, like a CUDA library that only fails to
+        # load once decoding starts (the model itself loads fine).
+        self.fail_with = fail_with
         self.outputs: list[list[str]] | None = None
         self.transcribe_calls: list[dict[str, Any]] = []
         self.consumed = 0
@@ -72,6 +81,8 @@ class FakeWhisperModel:
 
     def _generate(self, words: list[str]) -> Iterator[FakeSegment]:
         try:
+            if self.fail_with is not None:
+                raise self.fail_with
             for i, word in enumerate(words):
                 time.sleep(self.delay)
                 self.consumed += 1
@@ -101,7 +112,9 @@ def install(monkeypatch: pytest.MonkeyPatch) -> FakeModelFactory:
     factory = FakeModelFactory()
     monkeypatch.setattr(faster_whisper, "WhisperModel", factory)
     monkeypatch.setattr(transcription_service, "_model", None)
+    monkeypatch.setattr(transcription_service, "_cpu_fallback", False)
     settings = transcription_service.settings
+    monkeypatch.setattr(settings, "whisper_device", "auto")
     monkeypatch.setattr(settings, "transcription_provider", "whisper")
     monkeypatch.setattr(settings, "default_transcription_language", "en-US")
     return factory
