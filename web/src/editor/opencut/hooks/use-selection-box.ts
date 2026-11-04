@@ -1,7 +1,11 @@
 // Copied from OpenCut (MIT) apps/web/src/hooks/use-selection-box.ts @ 3037a7e
 // Local changes: upstream's debug console.log calls and its unused container-relative
-// rectangle in selectElementsInBox removed (noUnusedLocals). Licence: ../../LICENSE-OpenCut.
+// rectangle in selectElementsInBox removed (noUnusedLocals); the click that follows an active
+// box's release is swallowed (suppressClick) instead of upstream's justFinishedSelecting state and
+// its 50 ms timeout, which only the content's click read (a row's click still cleared a same-row
+// box's selection) and which outlived an unmount. Licence: ../../LICENSE-OpenCut.
 import { useState, useEffect, useCallback } from "react";
+import { suppressNextClick } from "@/editor/suppressClick";
 
 interface UseSelectionBoxProps {
   containerRef: React.RefObject<HTMLElement>;
@@ -27,7 +31,6 @@ export function useSelectionBox({
   const [selectionBox, setSelectionBox] = useState<SelectionBoxState | null>(
     null,
   );
-  const [justFinishedSelecting, setJustFinishedSelecting] = useState(false);
 
   // Mouse down handler to start selection
   const handleMouseDown = useCallback(
@@ -147,14 +150,8 @@ export function useSelectionBox({
     };
 
     const handleMouseUp = () => {
-      // If we had an active selection, mark that we just finished selecting
-      if (selectionBox?.isActive) {
-        setJustFinishedSelecting(true);
-        // Clear the flag after a short delay to allow click events to check it
-        setTimeout(() => {
-          setJustFinishedSelecting(false);
-        }, 50);
-      }
+      // An active selection ends here: the click this release makes is not a click on the timeline.
+      if (selectionBox?.isActive) suppressNextClick();
 
       // Don't call selectElementsInBox again - real-time selection already handled it
       // Just clean up the selection box visual
@@ -174,6 +171,5 @@ export function useSelectionBox({
     selectionBox,
     handleMouseDown,
     isSelecting: selectionBox?.isActive || false,
-    justFinishedSelecting,
   };
 }

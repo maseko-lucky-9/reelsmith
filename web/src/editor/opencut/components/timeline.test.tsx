@@ -124,7 +124,10 @@ function Tracks({ splitGate }: { splitGate?: SplitGate }) {
   );
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+  // A drag's mouseup swallows the click of its own task (suppressClick): let a
+  // previous test's flag lapse, as the next task does in a browser.
+  await new Promise((r) => setTimeout(r, 0));
   load(EDIT);
   usePlaybackStore.setState({
     currentTime: 0,
@@ -501,6 +504,56 @@ describe("Timeline", () => {
         elementId: el.id,
       })),
     );
+  });
+
+  it("keeps the selection and the playhead when an edge resize is released over the row (the click that follows is swallowed)", async () => {
+    stubLayout();
+    const { container } = render(<Timeline />);
+    fireEvent.click(element("Text: hook"));
+    const handle = container.querySelector(
+      '[data-resize-handle="right"]',
+    ) as HTMLElement;
+    const row = container.querySelector(
+      '[data-track-role="overlays"]',
+    ) as HTMLElement;
+    const selected = store().selectedElements;
+    expect(selected).toHaveLength(1);
+
+    // hook is 2-4 s (100-200 px): its right edge dragged +100 px, released over the empty row.
+    fireEvent.mouseDown(handle, { button: 0, clientX: 200, clientY: ROW + 10 });
+    fireEvent.mouseMove(document, { clientX: 300, clientY: ROW + 10 });
+    fireEvent.mouseUp(document, { clientX: 300, clientY: ROW + 10 });
+    fireEvent.click(row, { clientX: 300, clientY: ROW + 10 });
+
+    expect(trackOf("overlays").elements[0].duration).toBe(4);
+    expect(store().selectedElements).toEqual(selected);
+    expect(usePlaybackStore.getState().currentTime).toBe(0);
+
+    // Only that click: the next one, a moment later, clears and seeks as usual.
+    await act(() => new Promise((r) => setTimeout(r, 0)));
+    fireEvent.click(row, { clientX: 300, clientY: ROW + 10 });
+    expect(store().selectedElements).toEqual([]);
+    expect(usePlaybackStore.getState().currentTime).toBe(6);
+  });
+
+  it("keeps what a selection box inside one row selected after the release's click", () => {
+    stubLayout();
+    const { container } = render(<Timeline />);
+    const area = container.querySelector("[data-tracks-area]") as HTMLElement;
+    const row = container.querySelector(
+      '[data-track-role="overlays"]',
+    ) as HTMLElement;
+    // Inside the overlays row (50-100 px) from 50 to 650 px: both overlays.
+    fireEvent.mouseDown(row, { button: 0, clientX: 50, clientY: ROW + 5 });
+    fireEvent.mouseMove(window, { clientX: 650, clientY: ROW + 40 });
+    fireEvent.mouseUp(window, { clientX: 650, clientY: ROW + 40 });
+    fireEvent.click(row, { clientX: 650, clientY: ROW + 40 });
+
+    expect(area.contains(row)).toBe(true);
+    expect(store().selectedElements.map((s) => s.elementId)).toEqual(
+      trackOf("overlays").elements.map((el) => el.id),
+    );
+    expect(usePlaybackStore.getState().currentTime).toBe(0);
   });
 
   it("disables Split, keep left and keep right with the gate's reason", () => {

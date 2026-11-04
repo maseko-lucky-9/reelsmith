@@ -4,7 +4,8 @@
 // seconds: they stop at the source's bounds and the neighbours' source windows, keep 51 ms
 // (MIN_EDIT_SEGMENT_SECONDS: never under the server's 0.05 s on raw floats), and commit through
 // trimSegment (016 setSegments: reel items follow). A text overlay's left edge moves its start
-// and keeps its end, its right edge its end, inside the reel; both in one undo step.
+// and keeps its end, its right edge its end, inside the reel; both in one undo step. The click the
+// release makes on the row is swallowed (suppressClick), so it neither deselects nor seeks.
 // Captions (their timing is the speech) and voice-overs (their length is the audio) get no
 // handles. Licence: ../../LICENSE-OpenCut.
 import { useEffect, useState } from "react";
@@ -15,6 +16,7 @@ import {
 import type { EditorElement, EditorTrack } from "@/editor/types";
 import { TIMELINE_CONSTANTS } from "@/editor/opencut/constants/timeline-constants";
 import { useTimelineStore } from "@/editor/opencut/stores/timeline-store";
+import { suppressNextClick } from "@/editor/suppressClick";
 import {
   asOneUndoStep,
   toastRefusal,
@@ -174,6 +176,8 @@ export function useTimelineElementResize({
         edges: edgesAt(resizing, e.clientX, zoomLevel),
       });
       setResizing(null);
+      // The click this release makes on the row is the drag's end, not a click on the timeline.
+      suppressNextClick();
     };
 
     // Add document-level listeners for proper drag behavior

@@ -12,7 +12,8 @@
 // playhead; track labels name the track (Video / Captions / Text / Voice-over) and the Video track
 // has the mute-source toggle (upstream's track context menu, whose only applicable item it was);
 // Base UI scroll viewports; the playhead is drawn at the tracks' scroll offset (upstream ignored it);
-// a read-only edit shows why. Licence: ../../LICENSE-OpenCut.
+// the click that ends an edge resize or a selection box is swallowed (suppressClick); a read-only
+// edit shows why. Licence: ../../LICENSE-OpenCut.
 import type React from "react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
@@ -67,6 +68,7 @@ import {
   snapTimeToFrame,
   TIMELINE_CONSTANTS,
 } from "@/editor/opencut/constants/timeline-constants";
+import { takeSuppressedClick } from "@/editor/suppressClick";
 import { SelectionBox } from "./selection-box";
 import { TimelinePlayhead } from "./timeline-playhead";
 import { TimelineTrackContent } from "./timeline-track";
@@ -238,7 +240,6 @@ export function Timeline({
     selectionBox,
     handleMouseDown: handleSelectionMouseDown,
     isSelecting,
-    justFinishedSelecting,
   } = useSelectionBox({
     // The copied hook keeps React 18's RefObject<HTMLElement> types.
     containerRef: tracksContainerRef as React.RefObject<HTMLElement>,
@@ -249,8 +250,8 @@ export function Timeline({
   // Timeline content click to seek handler
   const handleTimelineContentClick = useCallback(
     (e: React.MouseEvent) => {
-      // Don't seek if this was a selection box operation
-      if (isSelecting || justFinishedSelecting) {
+      // Don't seek if this was a selection box operation (its release's click is swallowed below)
+      if (isSelecting) {
         return;
       }
 
@@ -283,14 +284,7 @@ export function Timeline({
       // Use frame snapping for timeline clicking
       seek(snapTimeToFrame(rawTime, TIMELINE_FPS));
     },
-    [
-      duration,
-      zoomLevel,
-      seek,
-      clearSelectedElements,
-      isSelecting,
-      justFinishedSelecting,
-    ],
+    [duration, zoomLevel, seek, clearSelectedElements, isSelecting],
   );
 
   // The playhead runs on the edited reel (its duration is the reel's length),
@@ -406,6 +400,10 @@ export function Timeline({
       )}
       onMouseEnter={() => setIsInTimeline(true)}
       onMouseLeave={() => setIsInTimeline(false)}
+      // The click that ends an edge resize or a selection box neither deselects nor seeks.
+      onClickCapture={(e) => {
+        if (takeSuppressedClick()) e.stopPropagation();
+      }}
     >
       {/* Toolbar */}
       <div
