@@ -179,6 +179,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.mocked(toast.success).mockClear();
   vi.mocked(toast.warning).mockClear();
+  vi.mocked(toast.error).mockClear();
 });
 
 describe("an answer for clip A arriving after clip B's editor opened", () => {
@@ -243,12 +244,126 @@ describe("an answer for clip A arriving after clip B's editor opened", () => {
     expect(saveButton()).toHaveTextContent("Saved");
     expect(cut()).toEqual([{ start: 300, end: 320 }]);
     expect(qc.getQueryData<ClipEditState>(["clip-edit", "A"])?.version).toBe(8);
+    // A's "Saved" is not news on B's page.
+    expect(toast.success).not.toHaveBeenCalled();
     editCaption("b edited");
     fireEvent.click(saveButton());
     await waitFor(() => expect(api.upsertClipEdit).toHaveBeenCalledTimes(2));
     const [id, body] = vi.mocked(api.upsertClipEdit).mock.calls[1];
     expect(id).toBe("B");
     expect(body.version).toBe(3);
+  });
+});
+
+describe("toasts after the page moved to another clip", () => {
+  it("A's re-render queued is not toasted on B's page", async () => {
+    const queued = controlled<{ status: string; clip_id: string }>();
+    vi.mocked(api.rerenderClip).mockReturnValue(queued.promise as never);
+    const a = await open("A");
+    fireEvent.click(screen.getByRole("button", { name: /^Re-render$/ }));
+    await waitFor(() => expect(api.rerenderClip).toHaveBeenCalled());
+
+    a.unmount();
+    await open("B");
+    await act(async () => {
+      queued.resolve({ status: "queued", clip_id: "A" });
+    });
+
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it("A's failed voice-over is toasted naming A, tagged with its id", async () => {
+    let fail!: (e: Error) => void;
+    vi.mocked(api.createVoiceover).mockReturnValue(
+      new Promise<VoiceoverResponse>((_resolve, reject) => {
+        fail = reject;
+      }),
+    );
+    const a = await open("A");
+    fireEvent.click(screen.getByRole("button", { name: "Voice-over" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Generate voice-over" }),
+    );
+    await waitFor(() => expect(api.createVoiceover).toHaveBeenCalled());
+
+    a.unmount();
+    await open("B");
+    await act(async () => {
+      fail(new Error('502 {"detail":"piper crashed"}'));
+    });
+
+    expect(toast.error).toHaveBeenCalledWith(
+      'Voice-over for "A" failed: The voice engine failed (502): piper crashed',
+      { id: "voiceover:A" },
+    );
+  });
+
+  it("A's failed save is toasted on B's page naming A, tagged with its id", async () => {
+    let fail!: (e: Error) => void;
+    vi.mocked(api.upsertClipEdit).mockReturnValueOnce(
+      new Promise<ClipEditState>((_resolve, reject) => {
+        fail = reject;
+      }),
+    );
+    const a = await open("A");
+    editCaption("a edited");
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(api.upsertClipEdit).toHaveBeenCalledTimes(1));
+
+    a.unmount();
+    await open("B");
+    await act(async () => {
+      fail(new Error("boom"));
+    });
+    expect(toast.error).toHaveBeenCalledWith('"A": Save failed: Error: boom', {
+      id: "save:A",
+    });
+  });
+
+  it("a failed voice-over on the open clip is shown in its panel, not toasted", async () => {
+    vi.mocked(api.createVoiceover).mockRejectedValue(
+      new Error('502 {"detail":"piper crashed"}'),
+    );
+    await open("A");
+    fireEvent.click(screen.getByRole("button", { name: "Voice-over" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Generate voice-over" }),
+    );
+    expect(
+      await screen.findByText(/The voice engine failed \(502\): piper crashed/),
+    ).toBeInTheDocument();
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+});
+
+describe("the same clip opened again while its old editor's save was in flight (A, B, A)", () => {
+  it("the old editor's answer does not decide for the reopened one: it stays Saved on the version it loaded", async () => {
+    const save = controlled<ClipEditState>();
+    vi.mocked(api.upsertClipEdit).mockReturnValueOnce(save.promise);
+    const first = await open("A");
+    editCaption("a edited");
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(api.upsertClipEdit).toHaveBeenCalledTimes(1));
+
+    first.unmount();
+    const b = await open("B");
+    b.unmount();
+    await open("A");
+    await act(async () => {
+      save.resolve(edit("A", tl(100, 110, "a edited"), 8));
+    });
+
+    // The reopened editor shows what it loaded and reads as saved on it.
+    expect(screen.getByRole("textbox", { name: "Caption 1" })).toHaveValue(
+      "clip a caption",
+    );
+    expect(saveButton()).toHaveTextContent("Saved");
+    expect(qc.getQueryData<ClipEditState>(["clip-edit", "A"])?.version).toBe(8);
+    editCaption("reopened edit");
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(api.upsertClipEdit).toHaveBeenCalledTimes(2));
+    // Its own base version (the server answers 409 if A moved on: no lost update).
+    expect(vi.mocked(api.upsertClipEdit).mock.calls[1][1].version).toBe(7);
   });
 });
 

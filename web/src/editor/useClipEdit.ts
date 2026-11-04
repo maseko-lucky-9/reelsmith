@@ -11,7 +11,7 @@
  * compared after conversion (opening it is not a change), and undoing back
  * to the saved copy reads as saved.
  */
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { create } from "zustand";
 import { api } from "@/api/client";
@@ -52,6 +52,8 @@ export function canonicalJson(value: unknown): string {
 interface SavedEdit {
   /** The clip the edit was loaded for; null until loaded (and after the editor closes). */
   clipId: string | null;
+  /** The editor (hook instance) that loaded it: a closed editor's answers are not this one's. */
+  owner: symbol | null;
   /** The saved edit's version; 0 for the server's default timeline. */
   version: number;
   /** canonicalJson of the saved edit in its schema v2 form. */
@@ -64,6 +66,7 @@ interface SavedEdit {
 
 const NOT_LOADED: SavedEdit = {
   clipId: null,
+  owner: null,
   version: 0,
   snapshot: "",
   isV1: false,
@@ -110,6 +113,12 @@ export interface UseClipEdit {
   savedIsV1: boolean;
   /** Why the edit is read-only (a v1 edit that cannot be converted), else null. */
   readOnly: string | null;
+  /**
+   * Whether the editor still shows this clip (the singleton stores hold it):
+   * false once the page moved to another clip or closed. Read it when an
+   * answer arrives, to tell whether news about this clip belongs on screen.
+   */
+  isShowing: () => boolean;
 }
 
 function savedFields(
@@ -130,6 +139,9 @@ export function useClipEdit(
   options: UseClipEditOptions = {},
 ): UseClipEdit {
   const queryClient = useQueryClient();
+  // This editor: a save answering after it closed (even when the same clip
+  // was opened again meanwhile) is not the reopened editor's to adopt.
+  const [instance] = useState(() => Symbol("clip-edit"));
   const editQuery = useQuery({
     queryKey: ["clip-edit", clipId],
     // 404 is "no edit yet": the editor opens the clip's window.
@@ -170,6 +182,7 @@ export function useClipEdit(
       .load(timeline, { sourceWindow, sourceDuration });
     useSavedEdit.setState({
       clipId,
+      owner: instance,
       ...savedFields({ timeline, version: server?.version ?? 0 }, sourceWindow),
       loadedTimeline: timeline,
     });
@@ -177,7 +190,7 @@ export function useClipEdit(
       !result.ok && sourceWindow === null && !isV2(timeline);
     // sourceDuration is read at load only; later values go through setSourceDuration below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clipId, editData, editLoaded, sourceWindow]);
+  }, [clipId, editData, editLoaded, sourceWindow, instance]);
 
   useEffect(
     () => () => {
@@ -239,22 +252,23 @@ export function useClipEdit(
    * the edit is still what was sent, the server's copy replaces it (no
    * history step), so it reads as saved; edits made while the save was in
    * flight are kept and stay dirty. The mutation's callbacks outlive the
-   * editor: an answer arriving once the singleton stores hold another clip
-   * (or none) only updates this clip's cache.
+   * editor: an answer arriving once the singleton stores hold another
+   * editor (another clip, none, or this clip opened again: its sent copy is
+   * not that editor's) only updates this clip's cache.
    */
   const adopt = useCallback(
     (state: ClipEditState) => {
       const sent = sentRef.current;
       sentRef.current = null;
       cacheAnswer(state);
-      if (useSavedEdit.getState().clipId !== clipId) return;
+      if (useSavedEdit.getState().owner !== instance) return;
       const store = useTimelineStore.getState();
       const unchanged =
         sent === null || canonicalJson(store.toTimeline()) === sent;
       useSavedEdit.setState(savedFields(state, windowRef.current));
       if (unchanged) store.adoptTimeline(state.timeline);
     },
-    [clipId, cacheAnswer],
+    [instance, cacheAnswer],
   );
 
   const saveMutation = useMutation({
@@ -296,6 +310,10 @@ export function useClipEdit(
       useTimelineStore.getState().replaceFromTimeline(next),
     [],
   );
+  const isShowing = useCallback(
+    () => useSavedEdit.getState().clipId === clipId,
+    [clipId],
+  );
   const undo = useCallback(() => useTimelineStore.getState().undo(), []);
   const redo = useCallback(() => useTimelineStore.getState().redo(), []);
 
@@ -318,5 +336,6 @@ export function useClipEdit(
     loadedTimeline,
     savedIsV1,
     readOnly,
+    isShowing,
   };
 }

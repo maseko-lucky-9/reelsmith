@@ -35,6 +35,7 @@ vi.mock('@/editor/useClipEdit', () => ({
     loadedTimeline: null,
     savedIsV1: false,
     readOnly: null,
+    isShowing: () => true,
   }),
 }))
 

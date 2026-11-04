@@ -87,7 +87,7 @@ VoiceoverElement = MediaElement & { origin: v2 audio item }      # role 'voiceov
 | `isSaving`, `saveError` | `useMutation` state |
 | `save()` | `PUT /clips/{id}/edit {timeline: prepareForSave(sent, window), version: version \|\| undefined}`; on success adopt: version and snapshot always move on; the store adopts the server's copy only if it still equals what was sent (edits made in flight are kept, still dirty) |
 | `applyServerState(state)` | a voice-over's returned edit: one undoable step, saved |
-| answers after the editor moved on | a save or voice-over answering once the singleton stores hold another clip (or none) only updates its own clip's cached edit: no store change, no toast; the route remounts per clip (`remountDeps`), so no route state carries over |
+| answers after the editor moved on | a save's answer is adopted only by the editor (hook instance) that sent it: once another editor holds the singleton stores (another clip, none, or the same clip opened again, which keeps the version it loaded, so its next save meets a 409 if the old one landed) it only updates that clip's cached edit. A voice-over's answer is applied by an editor of that clip, else only cached. A success toast is shown only while that clip is shown (`isShowing()`); a failure after the page moved on is toasted naming the clip, tagged with its id. The route remounts per clip (`remountDeps`), so no route state carries over |
 | `words`, `loadedTimeline` | as in 016 |
 
 ### Rendered cut (`web/src/editor/renderedCut.ts`, moved verbatim from the route)

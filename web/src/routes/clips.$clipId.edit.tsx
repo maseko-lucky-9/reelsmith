@@ -360,6 +360,20 @@ export function ClipEditorPage() {
     return resetPlayback;
   }, [clipId]);
 
+  // News about this clip belongs on its page: an answer can come after the
+  // page moved to another clip (a save, a re-render request, Piper's up to
+  // 120 s). A success is shown only while this clip's editor is open; a
+  // failure after that names the clip, tagged with its id (nothing else on
+  // screen says it).
+  const clipName = clip?.title ? `"${clip.title}"` : `clip ${clipId}`;
+  const notifySuccess = (message: string) => {
+    if (editor.isShowing()) toast.success(message);
+  };
+  const notifyError = (message: string, kind: string) => {
+    if (editor.isShowing()) toast.error(message);
+    else toast.error(`${clipName}: ${message}`, { id: `${kind}:${clipId}` });
+  };
+
   // The cut the clip's file was rendered from: the server's
   // (`clip.rendered_segments`; the clip's own window when none), replaced by
   // the one a ClipRendered event of this clip carries.
@@ -475,12 +489,13 @@ export function ClipEditorPage() {
     onSuccess: () => {
       setRerenderInFlight(true);
       setRerenderError(null);
-      toast.success("Re-render queued");
+      notifySuccess("Re-render queued");
     },
     onError: (err) => {
       const detail = apiErrorDetail(err);
-      toast.error(
+      notifyError(
         detail ? `Cannot re-render: ${detail}` : "Failed to queue re-render",
+        "rerender",
       );
     },
   });
@@ -491,7 +506,7 @@ export function ClipEditorPage() {
       try {
         await editor.save();
       } catch (e) {
-        toast.error(`Save failed: ${apiErrorDetail(e) ?? String(e)}`);
+        notifyError(`Save failed: ${apiErrorDetail(e) ?? String(e)}`, "save");
         return;
       }
     }
@@ -512,6 +527,15 @@ export function ClipEditorPage() {
       if (!editor.applyServerState(res.edit)) return;
       if (res.provider === "stub") toast.warning(STUB_VOICEOVER_WARNING);
       else toast.success("Voice-over added");
+    },
+    // The panel shows a failure while this clip's editor is open; after the
+    // page moved on, a toast naming the clip does.
+    onError: (err) => {
+      if (!editor.isShowing())
+        toast.error(
+          `Voice-over for ${clipName} failed: ${voiceoverErrorMessage(err)}`,
+          { id: `voiceover:${clipId}` },
+        );
     },
   });
 
@@ -605,9 +629,12 @@ export function ClipEditorPage() {
           }
           onClick={() =>
             editor.save().then(
-              () => toast.success("Saved"),
+              () => notifySuccess("Saved"),
               (e) =>
-                toast.error(`Save failed: ${apiErrorDetail(e) ?? String(e)}`),
+                notifyError(
+                  `Save failed: ${apiErrorDetail(e) ?? String(e)}`,
+                  "save",
+                ),
             )
           }
           className="px-3 py-1.5 rounded-lg border border-white/20 text-sm text-zinc-300 hover:text-white hover:border-white/40 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
