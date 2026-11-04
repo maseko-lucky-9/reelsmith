@@ -330,7 +330,8 @@ export function TrimPanel({
       return
     }
     setError(null)
-    if (value !== segments[idx][field]) onChange(setSegments(v2, next))
+    // A value that rounds to the time already there changes nothing (no undo step).
+    if (seg[field] !== segments[idx][field]) onChange(setSegments(v2, next))
   }
 
   return (

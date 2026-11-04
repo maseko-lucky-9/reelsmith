@@ -178,6 +178,16 @@ describe("Trim panel: typed times as written", () => {
   });
 });
 
+describe("Trim panel: a value that rounds to the time already there", () => {
+  it("changes nothing and adds no undo step (start 50.2496 on [50.25, 51])", () => {
+    mount([[50.25, 51]]);
+    type(1, "start", "50.2496");
+    expect(alertText()).toBeNull();
+    expect(cut()).toEqual([{ start: 50.25, end: 51 }]);
+    expect(store().history).toEqual([]);
+  });
+});
+
 describe("Trim panel: every typed value it takes is one the server takes", () => {
   it("over the ms grid, near the minimum, the source's end and the 20 minutes", () => {
     const rand = mulberry32(41);
@@ -217,7 +227,8 @@ describe("Trim panel: every typed value it takes is one the server takes", () =>
       type(segment, field, value);
       const context = `${JSON.stringify(before)} source ${source}: segment ${segment} ${field} = ${value} -> ${JSON.stringify(cut())} (${alertText()})`;
       expect(serverRefusal(store().toTimeline(), source), context).toBeNull();
-      if (alertText() === null) {
+      const unchanged = ms(Number(value)) === before[segment - 1][field];
+      if (alertText() === null && !unchanged) {
         taken++;
         expect(cut(), context).not.toEqual(before);
       } else {
