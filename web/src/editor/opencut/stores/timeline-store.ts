@@ -12,7 +12,9 @@ import type { TimelinePayload } from "@/api/client";
 import {
   longEnough,
   MAX_SEGMENTS,
+  MIN_EDIT_SEGMENT_SECONDS,
   MIN_SEGMENT_SECONDS,
+  segmentEditRefusal,
   segmentsOf,
   segmentsRefusal,
   setSegments,
@@ -100,10 +102,10 @@ const clamp = (n: number, lo: number, hi: number) =>
 const REFUSALS = {
   splitRole:
     "Only video segments can be split; captions, text and voice-overs are not split.",
-  splitEdge: `Split at least ${MIN_SEGMENT_SECONDS} s inside a segment: put the playhead inside the segment, away from its edges.`,
+  splitEdge: `Split at least ${MIN_EDIT_SEGMENT_SECONDS} s inside a segment: put the playhead inside the segment, away from its edges.`,
   lastSegment:
     "A clip needs at least one segment: the last one cannot be deleted.",
-  minLength: `A segment must be at least ${MIN_SEGMENT_SECONDS} s long.`,
+  minLength: `A segment must be at least ${MIN_EDIT_SEGMENT_SECONDS} s long.`,
   maxSegments: `A clip holds at most ${MAX_SEGMENTS} segments: delete one before splitting.`,
   segmentMove:
     "Segments sit back to back on the reel in source order: drag their edges to trim or extend them.",
@@ -254,8 +256,16 @@ interface TimelineStore {
 
   // Loading and the schema v2 form
   load: (timeline: TimelinePayload, ctx: AdapterContext) => AdapterResult;
-  /** A whole v2 timeline as one undoable step (the 016 tool panels, a voice-over the server added). */
-  replaceFromTimeline: (timeline: TimelinePayload) => EditResult;
+  /**
+   * A whole v2 timeline as one undoable step: an `edit` (the 016 tool panels;
+   * the segments it adds or changes must keep the editor's minimum and the
+   * server's segment rules, else it is refused with the reason) or the
+   * `server`'s answer (a voice-over appended: taken as it is).
+   */
+  replaceFromTimeline: (
+    timeline: TimelinePayload,
+    from?: "edit" | "server",
+  ) => EditResult;
   /** A whole v2 timeline with no history step (adopting the server's copy of a save). */
   adoptTimeline: (timeline: TimelinePayload) => EditResult;
   /**
@@ -1041,8 +1051,15 @@ export const useTimelineStore = create<TimelineStore>((set, get) => {
       return result;
     },
 
-    replaceFromTimeline: (timeline) => {
+    replaceFromTimeline: (timeline, from = "edit") => {
       if (get().readOnly) return refuse(get().readOnly as string);
+      if (from === "edit") {
+        const refusal = segmentEditRefusal(
+          segmentsOf(get().toTimeline()),
+          segmentsOf(timeline),
+        );
+        if (refusal) return refuse(refusal);
+      }
       const rebuilt = rebuild(timeline);
       if (!rebuilt.ok) return rebuilt;
       commit(rebuilt.state);

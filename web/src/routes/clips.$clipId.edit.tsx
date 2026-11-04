@@ -460,6 +460,9 @@ export function ClipEditorPage() {
 
   // A selected caption or text overlay opens its properties in place of the tool panel.
   const hasSelection = useTimelineStore((s) => s.selectedElements.length > 0);
+  // The source's length when known (data-model §3): bounds a typed segment end.
+  const probedDuration = useTimelineStore((s) => s.probedDuration);
+  const knownSourceDuration = probedDuration ?? job?.duration ?? null;
 
   const rerenderMutation = useMutation({
     mutationFn: () =>
@@ -813,6 +816,7 @@ export function ClipEditorPage() {
                       onChange={applyTimeline}
                       playhead={playhead}
                       sourceWindow={sourceWindow}
+                      sourceDuration={knownSourceDuration}
                       playheadStale={!gate.ok}
                       playheadStaleReason={gate.ok ? undefined : gate.reason}
                     />

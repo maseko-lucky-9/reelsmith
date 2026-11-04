@@ -284,7 +284,7 @@ export function useClipEdit(
       cacheAnswer(state);
       // Another clip's editor (or none) holds the stores now: leave them be.
       if (useSavedEdit.getState().clipId !== clipId) return false;
-      useTimelineStore.getState().replaceFromTimeline(state.timeline);
+      useTimelineStore.getState().replaceFromTimeline(state.timeline, "server");
       useSavedEdit.setState(savedFields(state, windowRef.current));
       return true;
     },

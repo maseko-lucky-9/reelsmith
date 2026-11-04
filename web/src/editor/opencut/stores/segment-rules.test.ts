@@ -11,7 +11,7 @@ import type React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, renderHook } from "@testing-library/react";
 import type { TimelinePayload } from "@/api/client";
-import { segmentsOf, splitAt } from "@/lib/timelineEdit";
+import { segmentsOf, segmentsRefusal, splitAt } from "@/lib/timelineEdit";
 import { useTimelineElementResize } from "@/editor/opencut/hooks/use-timeline-element-resize";
 import { useTimelineStore } from "./timeline-store";
 
@@ -108,6 +108,23 @@ describe("the server's segment rule on raw floats", () => {
     expect(50.3 - 50.25).toBeLessThan(0.05);
     expect(serverRefusal(oneSegment(50.25, 50.3))).toMatch(/shorter/);
     expect(serverRefusal(oneSegment(50.25, 50.301))).toBeNull();
+  });
+
+  it("segmentsRefusal (the editor's port) checks order with the server's 1 ms slack, and negative times", () => {
+    expect(
+      segmentsRefusal([
+        { start: 0, end: 1 },
+        { start: 0.5, end: 2 },
+      ]),
+    ).toMatch(/source order without overlapping/);
+    expect(
+      segmentsRefusal([
+        { start: 0, end: 1 },
+        { start: 0.9995, end: 2 },
+      ]),
+    ).toBeNull();
+    expect(segmentsRefusal([{ start: -0.5, end: 2 }])).toMatch(/negative/);
+    expect(segmentsRefusal([{ start: 50.25, end: 50.3 }])).toMatch(/0\.05 s/);
   });
 });
 

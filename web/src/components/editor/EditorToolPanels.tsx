@@ -11,8 +11,12 @@ import {
   type CaptionStyleName,
 } from '@/components/editor/CaptionTemplatePicker'
 import {
+  MIN_EDIT_SEGMENT_SECONDS,
   MIN_SEGMENT_SECONDS,
   addItem,
+  asWritten,
+  longEnough,
+  segmentsRefusal,
   isV2,
   itemsOf,
   reelDuration,
@@ -270,7 +274,12 @@ interface TrimPanelProps extends TimelineProps {
   playheadStale?: boolean
   /** Why, shown on the disabled Split at playhead (default: the 016 re-render reason). */
   playheadStaleReason?: string
+  /** The source video's length when known (its metadata, else the job's record): an end may not pass it. */
+  sourceDuration?: number | null
 }
+
+/** The server's slack on the source range (TIME_TOLERANCE). */
+const SOURCE_SLACK = 1e-3
 
 export function TrimPanel({
   timeline,
@@ -279,6 +288,7 @@ export function TrimPanel({
   sourceWindow,
   playheadStale = false,
   playheadStaleReason = STALE_PLAYHEAD_REASON,
+  sourceDuration = null,
 }: TrimPanelProps) {
   const [error, setError] = useState<string | null>(null)
   const v2 = upgradeTimeline(timeline, sourceWindow)
@@ -298,13 +308,25 @@ export function TrimPanel({
   const commit = (idx: number, field: keyof Segment, raw: string) => {
     const value = Number(raw)
     const next = segments.map((s, i) => (i === idx ? { ...s, [field]: value } : s))
-    const seg = next[idx]
-    if (!Number.isFinite(value) || value < 0 || seg.end - seg.start < MIN_SEGMENT_SECONDS) {
-      setError(`Segment ${idx + 1}: the end must be at least ${MIN_SEGMENT_SECONDS}s after the start.`)
+    // Checked as written: setSegments rounds to the ms, and the server checks
+    // the rounded values on raw floats (50.3 - 50.25 is under 0.05).
+    const written = next.map(asWritten)
+    const seg = written[idx]
+    if (!Number.isFinite(value) || value < 0 || !longEnough(seg.start, seg.end)) {
+      setError(`Segment ${idx + 1}: the end must be at least ${MIN_EDIT_SEGMENT_SECONDS} s after the start.`)
       return
     }
-    if ((idx > 0 && seg.start < next[idx - 1].end) || (idx < next.length - 1 && seg.end > next[idx + 1].start)) {
+    if ((idx > 0 && seg.start < written[idx - 1].end) || (idx < written.length - 1 && seg.end > written[idx + 1].start)) {
       setError(`Segment ${idx + 1}: segments must stay in order without overlapping.`)
+      return
+    }
+    if (sourceDuration !== null && seg.end > sourceDuration + SOURCE_SLACK) {
+      setError(`Segment ${idx + 1}: the source video is ${fmt(sourceDuration)} s long.`)
+      return
+    }
+    const refusal = segmentsRefusal(written)
+    if (refusal) {
+      setError(`Segment ${idx + 1}: ${refusal}`)
       return
     }
     setError(null)

@@ -250,7 +250,7 @@ describe("usePlaybackControls", () => {
 
     key({ key: "s" });
 
-    expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/0\.05 s/));
+    expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/0\.051 s/));
     expect(cut()).toHaveLength(2);
   });
 

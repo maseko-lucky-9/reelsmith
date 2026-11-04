@@ -58,9 +58,19 @@ export function longEnough(start: number, end: number): boolean {
   return end - start > MIN_EDIT_SEGMENT_SECONDS - 0.0005;
 }
 
+/** Float slack on the server's order and range checks (TIME_TOLERANCE). */
+const TIME_TOLERANCE = 1e-3;
+
+/** A segment as `setSegments` writes it (and the server reads it): times to the ms. */
+export function asWritten(segment: Segment): Segment {
+  return { start: round3(segment.start), end: round3(segment.end) };
+}
+
 /**
- * Why the server would refuse these segments (its `_segments` rules on raw
- * floats: count, minimum length, order, reel length), else null.
+ * Why the server would refuse these segments, as its `_segments` checks them
+ * on raw floats (no source range here): at most 100, times not negative,
+ * each at least 0.05 s, in source order without overlap (1 ms slack), and
+ * the reel at most 20 minutes; else null.
  */
 export function segmentsRefusal(segments: Segment[]): string | null {
   if (segments.length > MAX_SEGMENTS)
@@ -68,8 +78,12 @@ export function segmentsRefusal(segments: Segment[]): string | null {
   let total = 0;
   let prevEnd: number | null = null;
   for (const s of segments) {
+    if (!(s.start >= 0) || !(s.end >= 0))
+      return "Segment times must not be negative.";
     if (s.end - s.start < MIN_SEGMENT_SECONDS)
       return `A segment must be at least ${MIN_SEGMENT_SECONDS} s long.`;
+    if (prevEnd !== null && s.start < prevEnd - TIME_TOLERANCE)
+      return "Segments must stay in source order without overlapping.";
     const start = prevEnd === null ? s.start : Math.max(s.start, prevEnd);
     total += s.end - start;
     if (total > MAX_REEL_SECONDS)
@@ -77,6 +91,31 @@ export function segmentsRefusal(segments: Segment[]): string | null {
     prevEnd = s.end;
   }
   return null;
+}
+
+/**
+ * Why a whole-timeline edit's segments (a tool panel's) would not do, else
+ * null: the segments it adds or changes keep the editor's 51 ms minimum and
+ * are not negative, and the list passes the server's rules. Segments it
+ * keeps are the saved edit's and are not held to the 51 ms (a saved 0.05 s
+ * segment stays editable around); an edit that keeps every segment is never
+ * refused here.
+ */
+export function segmentEditRefusal(
+  before: Segment[],
+  after: Segment[],
+): string | null {
+  const key = (s: Segment) => `${s.start}:${s.end}`;
+  const kept = new Set(before.map(key));
+  if (after.length === before.length && after.every((s) => kept.has(key(s))))
+    return null;
+  for (const s of after) {
+    if (kept.has(key(s))) continue;
+    if (!(s.start >= 0)) return "Segment times must not be negative.";
+    if (!longEnough(s.start, s.end))
+      return `A segment must be at least ${MIN_EDIT_SEGMENT_SECONDS} s long.`;
+  }
+  return segmentsRefusal(after);
 }
 
 /**
@@ -288,11 +327,7 @@ function remapTimeline(
       if (track.kind === "video") {
         return {
           ...track,
-          items: segments.map((s) => ({
-            start: round3(s.start),
-            end: round3(s.end),
-            src: "main",
-          })),
+          items: segments.map((s) => ({ ...asWritten(s), src: "main" })),
         };
       }
       if (REEL_KINDS.includes(track.kind))

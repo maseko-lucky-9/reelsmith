@@ -72,7 +72,7 @@ VoiceoverElement = MediaElement & { origin: v2 audio item }      # role 'voiceov
 | `updateTextElement` | kept | captions: `content` only; overlays: `content`, `fontSize`, `color`, `x`, `y` |
 | `separateAudio`, `replaceElementMedia` | removed | no media import |
 | `loadProjectTimeline`, `saveProjectTimeline` (storageService) | removed | replaced by `load(timeline, ctx)` (clears history) and `toTimeline()`; persistence is `useClipEdit` |
-| new `replaceFromTimeline(t)` | | one history step; how the 016 tool panels (`EditorToolPanels.tsx`) and `applyServerState` write a whole v2 timeline back |
+| new `replaceFromTimeline(t, from)` | | one history step; how the 016 tool panels (`EditorToolPanels.tsx`) and `applyServerState` write a whole v2 timeline back. `from: 'edit'` (a panel): the segments it adds or changes must keep 51 ms and not be negative, and the list the server's segment rules, else it is refused with the reason (segments it keeps, such as a saved 0.05 s one, are not held to 51 ms); `from: 'server'` (a voice-over answer): taken as it is. The Trim panel checks typed times as written (to the ms) and against the source's known length (§3) before that |
 | new `sourceDuration`, `setSourceDuration(d, from)` | | re-derives segment `duration`/`trimEnd`, no history entry; `from` is `probe` (the preview's `<video>` metadata) or `job` (`JobState.duration`): a probed length wins whichever arrives first and is kept across `load` (§3) |
 | new `readOnly: string \| null` | | reason when a v1 edit cannot be converted |
 

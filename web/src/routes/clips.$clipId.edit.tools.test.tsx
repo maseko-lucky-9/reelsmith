@@ -211,7 +211,7 @@ describe('ClipEditorPage — trim tool', () => {
     fireEvent.change(end, { target: { value: '100' } })
     fireEvent.blur(end)
 
-    expect(screen.getByRole('alert').textContent).toMatch(/at least 0.05s/)
+    expect(screen.getByRole('alert').textContent).toMatch(/at least 0\.051 s after the start/)
     expect(screen.getByRole('button', { name: 'Saved' })).toBeTruthy()
   })
 })
