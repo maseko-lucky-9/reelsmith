@@ -156,6 +156,20 @@ describe("PropertiesPanel", () => {
     });
   });
 
+  it("draws the x/y values in the field colour, not the muted label colour", () => {
+    // T157: the X/Y inputs sat inside the muted label, so their values read as
+    // placeholders (about 3.9:1 on the panel) while Font size was full contrast.
+    select("overlays");
+    render(<PropertiesPanel />);
+    for (const name of ["X", "Y"]) {
+      const field = screen.getByRole("spinbutton", { name });
+      expect(field.closest(".text-muted-foreground")).toBeNull();
+    }
+    expect(screen.getByText("X", { exact: true })).toHaveClass(
+      "text-muted-foreground",
+    );
+  });
+
   it("shows a caption's text only, and edits it", () => {
     select("captions");
     render(<PropertiesPanel />);

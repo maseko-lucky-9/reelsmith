@@ -218,11 +218,11 @@ export function TextProperties({
               const draft = axis === "x" ? xDraft : yDraft;
               const setDraft = axis === "x" ? setXDraft : setYDraft;
               return (
-                <label
-                  key={axis}
-                  className="flex items-center gap-1.5 text-xs text-muted-foreground"
-                >
-                  {axis.toUpperCase()}
+                <label key={axis} className="flex items-center gap-1.5 text-xs">
+                  {/* Only the axis letter is muted: the value is drawn at full contrast, like Font size. */}
+                  <span className="text-muted-foreground">
+                    {axis.toUpperCase()}
+                  </span>
                   <Input
                     type="number"
                     aria-label={axis.toUpperCase()}
