@@ -71,7 +71,7 @@ VoiceoverElement = MediaElement & { origin: v2 audio item }      # role 'voiceov
 | `separateAudio`, `replaceElementMedia` | removed | no media import |
 | `loadProjectTimeline`, `saveProjectTimeline` (storageService) | removed | replaced by `load(timeline, ctx)` (clears history) and `toTimeline()`; persistence is `useClipEdit` |
 | new `replaceFromTimeline(t)` | | one history step; how the 016 tool panels (`EditorToolPanels.tsx`) and `applyServerState` write a whole v2 timeline back |
-| new `sourceDuration`, `setSourceDuration(d)` | | re-derives segment `duration`/`trimEnd`, no history entry |
+| new `sourceDuration`, `setSourceDuration(d, from)` | | re-derives segment `duration`/`trimEnd`, no history entry; `from` is `probe` (the preview's `<video>` metadata) or `job` (`JobState.duration`): a probed length wins whichever arrives first and is kept across `load` (§3) |
 | new `readOnly: string \| null` | | reason when a v1 edit cannot be converted |
 
 ### Persistence hook (`web/src/editor/useClipEdit.ts`, replaces `useTimelineEditor`)

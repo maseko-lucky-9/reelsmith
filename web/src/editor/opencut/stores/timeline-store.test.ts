@@ -46,7 +46,10 @@ const SINGLE: TimelinePayload = {
       kind: "text-overlay",
       items: [{ start: 3, end: 4.5, text: "hook", x: 0.5, y: 0.2 }],
     },
-    { kind: "audio", items: [{ start: 0.5, end: 4.8, src: "vo.wav", gain: 1 }] },
+    {
+      kind: "audio",
+      items: [{ start: 0.5, end: 4.8, src: "vo.wav", gain: 1 }],
+    },
   ],
 };
 
@@ -184,7 +187,9 @@ describe("split (FR-008)", () => {
     expect(spans(store().toTimeline(), "video")).toEqual([[100, 104]]);
     // The voice-over keeps its start and is cut at the new reel end; the later caption is gone.
     expect(spans(store().toTimeline(), "audio")).toEqual([[0.5, 4]]);
-    expect(itemsOf(store().toTimeline(), "caption").map((c) => c.text)).toEqual(["hello there"]);
+    expect(itemsOf(store().toTimeline(), "caption").map((c) => c.text)).toEqual(
+      ["hello there"],
+    );
 
     store().undo();
     expect(
@@ -245,11 +250,37 @@ describe("trim and extend (FR-006, FR-007)", () => {
     expect(spans(store().toTimeline(), "video")).toEqual([[100, 110]]);
     expect(store().history).toEqual([]);
 
-    store().setSourceDuration(118.5);
+    store().setSourceDuration(118.5, "probe");
     expect(store().history).toEqual([]);
     expect(store().toTimeline()).toStrictEqual(SINGLE);
     store().trimSegment(elementOf("segments", 0).id, { end: 120 });
     expect(spans(store().toTimeline(), "video")).toEqual([[100, 118.5]]);
+  });
+
+  it("keeps the source's own length (the preview's metadata) over the job's recorded one, whichever comes first", () => {
+    // The reviewer's order: the <video> metadata, then the edit, then the job (yt-dlp's 212 s).
+    store().setSourceDuration(211.98, "probe");
+    load(SINGLE, null);
+    expect(store().sourceDuration).toBe(211.98);
+    store().setSourceDuration(212, "job");
+    expect(store().sourceDuration).toBe(211.98);
+
+    const id = elementOf("segments", 0).id;
+    expect(store().trimSegment(id, { end: 400 }).ok).toBe(true);
+    expect(spans(store().toTimeline(), "video")).toEqual([[100, 211.98]]);
+  });
+
+  it("takes the job's length until the source's metadata arrives, then the metadata's", () => {
+    load(SINGLE, 212);
+    expect(store().sourceDuration).toBe(212);
+    store().setSourceDuration(211.98, "probe");
+    expect(store().sourceDuration).toBe(211.98);
+    store().setSourceDuration(213, "job");
+    expect(store().sourceDuration).toBe(211.98);
+    // A new editor forgets the old source's metadata.
+    store().clearTimeline();
+    load(SINGLE, 212);
+    expect(store().sourceDuration).toBe(212);
   });
 
   it("deletes a segment, and the captions on it with it", () => {

@@ -301,7 +301,8 @@ function SourceView({
     if (!video) return;
     if (video.videoWidth > 0 && video.videoHeight > 0)
       onSourceSize([video.videoWidth, video.videoHeight]);
-    if (Number.isFinite(video.duration)) setSourceDuration(video.duration);
+    if (Number.isFinite(video.duration))
+      setSourceDuration(video.duration, "probe");
     showReelTime(video, segments, usePlaybackStore.getState().currentTime);
   };
 

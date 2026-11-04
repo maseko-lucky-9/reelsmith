@@ -75,7 +75,7 @@ const useSavedEdit = create<SavedEdit>(() => NOT_LOADED);
 export interface UseClipEditOptions {
   /** The clip's window in its source video: converts a v1 edit. */
   sourceWindow?: SourceWindow | null;
-  /** The source video's length when known (the job's recorded duration): bounds an extension. */
+  /** The job's recorded source length: bounds an extension until the preview's `<video>` metadata gives the real one. */
   sourceDuration?: number | null;
 }
 
@@ -192,8 +192,9 @@ export function useClipEdit(
 
   const hydrated = useSavedEdit((s) => s.clipId === clipId);
   useEffect(() => {
+    // The job's record: the store keeps the preview's probed length over it.
     if (hydrated && sourceDuration)
-      useTimelineStore.getState().setSourceDuration(sourceDuration);
+      useTimelineStore.getState().setSourceDuration(sourceDuration, "job");
   }, [hydrated, sourceDuration]);
 
   const tracks = useTimelineStore((s) => s._tracks);

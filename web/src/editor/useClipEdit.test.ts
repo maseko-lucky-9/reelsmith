@@ -339,6 +339,46 @@ describe("useClipEdit — reopening the editor", () => {
   });
 });
 
+describe("useClipEdit — the source's length", () => {
+  it("keeps the preview's probed length when the job's recorded one answers later (211.98 s, not 212 s)", async () => {
+    const qc = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: qc }, children);
+    const pending = controlled<ClipEditState>();
+    vi.mocked(api.getClipEdit).mockReturnValue(pending.promise);
+    const { result, rerender } = renderHook(
+      ({ duration }: { duration: number | null }) =>
+        useClipEdit("clip-1", {
+          sourceWindow: WINDOW,
+          sourceDuration: duration,
+        }),
+      { wrapper, initialProps: { duration: null as number | null } },
+    );
+
+    // The source's metadata loads before the edit does.
+    act(() => useTimelineStore.getState().setSourceDuration(211.98, "probe"));
+    await act(async () => {
+      pending.resolve(edit(tl("loaded"), 1));
+    });
+    await waitFor(() => expect(result.current.isLoaded).toBe(true));
+    // Then the job (yt-dlp's metadata) answers.
+    rerender({ duration: 212 });
+
+    const store = useTimelineStore.getState();
+    expect(store.sourceDuration).toBe(211.98);
+    const segment = store._tracks.find((t) => t.role === "segments")!
+      .elements[0];
+    act(() => {
+      expect(store.trimSegment(segment.id, { end: 500 }).ok).toBe(true);
+    });
+    expect(result.current.timeline.tracks[0].items).toEqual([
+      { start: 100, end: 211.98, src: "main" },
+    ]);
+  });
+});
+
 describe("canonicalJson", () => {
   it("ignores key order and drops undefined like JSON", () => {
     expect(

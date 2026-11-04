@@ -4,7 +4,8 @@
 // (web/src/editor/types.ts); history holds whole EditorSnapshots, capped at 50, and redo stays undoable;
 // segment split/trim/delete go through timelineEdit (splitAt / setSegments) and the adapter; overlay and
 // voice-over moves are clamped to the reel; captions take their text only; edits that break a rule
-// return a reason and change nothing; new load / replaceFromTimeline / adoptTimeline / setSourceDuration /
+// return a reason and change nothing; new load / replaceFromTimeline / adoptTimeline / setSourceDuration
+// (the preview's probed length wins over the job's) /
 // toTimeline / readOnly. Licence: ../../LICENSE-OpenCut.
 import { create } from "zustand";
 import type { TimelinePayload } from "@/api/client";
@@ -131,6 +132,11 @@ interface TimelineStore {
   sourceWindow: SourceWindow | null;
   /** The source length bounding an extension (the furthest segment end until known). */
   sourceDuration: number | null;
+  /**
+   * The source's length from the preview's `<video>` metadata (data-model §3: it
+   * wins over the job's recorded length); kept across `load`, cleared with the editor.
+   */
+  probedDuration: number | null;
   /** Why the edit is read-only (a v1 edit that cannot be converted), else null. */
   readOnly: string | null;
   /** The loaded timeline while read-only: written back unchanged. */
@@ -241,8 +247,12 @@ interface TimelineStore {
   replaceFromTimeline: (timeline: TimelinePayload) => EditResult;
   /** A whole v2 timeline with no history step (adopting the server's copy of a save). */
   adoptTimeline: (timeline: TimelinePayload) => EditResult;
-  /** A better source length (the preview's metadata); no history step. */
-  setSourceDuration: (duration: number) => void;
+  /**
+   * A source length: `probe` is the preview's `<video>` metadata, `job` the
+   * job's recorded duration (yt-dlp's), used only until a probe arrives.
+   * Re-derives the segments' trims; no history step.
+   */
+  setSourceDuration: (duration: number, from: "probe" | "job") => void;
   toTimeline: () => TimelinePayload;
   clearTimeline: () => void;
   updateTextElement: (
@@ -453,6 +463,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => {
     selectedElements: [],
     sourceWindow: null,
     sourceDuration: null,
+    probedDuration: null,
     readOnly: null,
     readOnlyTimeline: null,
     converted: null,
@@ -959,7 +970,13 @@ export const useTimelineStore = create<TimelineStore>((set, get) => {
       set({ dragState: IDLE_DRAG });
     },
 
-    load: (timeline, context) => {
+    load: (timeline, loadContext) => {
+      // The source's metadata may have arrived before the edit: it bounds the segments.
+      const probed = get().probedDuration;
+      const context =
+        probed === null
+          ? loadContext
+          : { ...loadContext, sourceDuration: probed };
       const result = fromTimeline(timeline, context);
       let state: EditorState;
       if (result.ok) {
@@ -1008,8 +1025,11 @@ export const useTimelineStore = create<TimelineStore>((set, get) => {
       return OK;
     },
 
-    setSourceDuration: (duration) => {
+    setSourceDuration: (duration, from) => {
       if (!(duration > 0)) return;
+      // The source's own metadata wins over the job's record, whichever came first.
+      if (from === "job" && get().probedDuration !== null) return;
+      if (from === "probe") set({ probedDuration: duration });
       const current = get().sourceDuration;
       if (get().readOnly) {
         set({ sourceDuration: Math.max(duration, current ?? 0) });
@@ -1039,6 +1059,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => {
         timelineOrigin: EMPTY_STATE.timelineOrigin,
         sourceWindow: null,
         sourceDuration: null,
+        probedDuration: null,
         readOnly: null,
         readOnlyTimeline: null,
         converted: null,
