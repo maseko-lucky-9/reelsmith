@@ -21,6 +21,7 @@ Spec numbers and ADR numbers (`docs/decisions/NNN-*.md`) are separate sequences.
 | 011 repair-job-metadata | Implemented (T068-T070) | [spec](011-repair-job-metadata/spec.md) · [tasks](011-repair-job-metadata/tasks.md) |
 | 012 tiktok-posting-and-trends | Phase 1 built, not live (T071-T076; T077 go-live is an owner decision); phases 2-4 planned | [spec](012-tiktok-posting-and-trends/spec.md) · [tasks](012-tiktok-posting-and-trends/tasks.md) · [baseline](012-tiktok-posting-and-trends/baseline.md) |
 | 013 cancel-and-delete-jobs | Implemented (T084-T088, T090-T092 review rounds; T089 end-to-end check open) | [spec](013-cancel-and-delete-jobs/spec.md) · [plan](013-cancel-and-delete-jobs/plan.md) · [tasks](013-cancel-and-delete-jobs/tasks.md) |
+| 016 editor-render | Implemented (T126-T132); T133 real render check, T134 editor flow in dark and light, T135 live Piper voice check open | [spec](016-editor-render/spec.md) · [plan](016-editor-render/plan.md) · [tasks](016-editor-render/tasks.md) |
 
 ## Roadmap stubs
 
