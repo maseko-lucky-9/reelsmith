@@ -21,6 +21,7 @@ import { useTimelineStore } from "@/editor/opencut/stores/timeline-store";
 import { Timeline } from "./timeline";
 import { TimelinePlayhead } from "./timeline-playhead";
 import { TimelineTrackContent } from "./timeline-track";
+import { suppressNextClick } from "@/editor/suppressClick";
 
 vi.mock("sonner", () => ({
   toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), warning: vi.fn() },
@@ -554,6 +555,61 @@ describe("Timeline", () => {
       trackOf("overlays").elements.map((el) => el.id),
     );
     expect(usePlaybackStore.getState().currentTime).toBe(0);
+  });
+
+  describe("a context menu over the tracks (its items are portaled; React bubbles their events through the timeline)", () => {
+    /** Opens Segment 1's context menu and clicks Delete after a press that travelled `move` px. */
+    async function deleteFromMenu(move: number) {
+      stubLayout();
+      render(<Timeline />);
+      usePlaybackStore.setState({ currentTime: 3 });
+      fireEvent.contextMenu(element(/^Segment 1/));
+      await screen.findByRole("menu");
+      const del = screen.getByRole("menuitem", { name: "Delete" });
+      fireEvent.mouseDown(del, { clientX: 100, clientY: 100, button: 0 });
+      fireEvent.mouseMove(window, { clientX: 100 + move, clientY: 100 });
+      fireEvent.mouseUp(del, { clientX: 100 + move, clientY: 100, button: 0 });
+      fireEvent.click(del, { clientX: 100 + move, clientY: 100 });
+    }
+
+    it.each([2, 8])(
+      "runs Delete after a press that moved %i px: no selection box starts inside the menu, its click is not swallowed",
+      async (move) => {
+        await deleteFromMenu(move);
+        expect(cut()).toHaveLength(2);
+      },
+    );
+
+    it("never swallows a menu item's click, even with a drag's click pending", async () => {
+      stubLayout();
+      render(<Timeline />);
+      fireEvent.contextMenu(element(/^Segment 1/));
+      await screen.findByRole("menu");
+      suppressNextClick();
+      fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+      expect(cut()).toHaveLength(2);
+    });
+
+    it("keeps the selection after a menu action: the row's click does not see it", async () => {
+      stubLayout();
+      render(<Timeline />);
+      usePlaybackStore.setState({ currentTime: 3 });
+      fireEvent.click(element(/^Segment 1/));
+      const selected = store().selectedElements;
+      expect(selected).toHaveLength(1);
+      fireEvent.contextMenu(element(/^Segment 1/));
+      await screen.findByRole("menu");
+      fireEvent.click(screen.getByRole("menuitem", { name: "Split" }));
+
+      expect(cut()).toHaveLength(4);
+      expect(store().selectedElements).toEqual(selected);
+    });
+
+    it("does not move the playhead to where the menu item was", async () => {
+      await deleteFromMenu(0);
+      expect(cut()).toHaveLength(2);
+      expect(usePlaybackStore.getState().currentTime).toBe(3);
+    });
   });
 
   it("disables Split, keep left and keep right with the gate's reason", () => {

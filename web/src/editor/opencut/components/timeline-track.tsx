@@ -6,7 +6,8 @@
 // tracks of their own kind; the reason is toasted and the item moves in time on its own track); a
 // move between tracks is one undo step; the drag preview stays on the reel; right and middle
 // clicks never start a drag; the store refuses drags of segments (ripple) and captions (speech
-// timing). Rows carry data-track-row / data-track-id / data-track-role. Licence: ../../LICENSE-OpenCut.
+// timing). Rows carry data-track-row / data-track-id / data-track-role; a portaled menu's click,
+// which React bubbles through the row, does not deselect. Licence: ../../LICENSE-OpenCut.
 import type React from "react";
 import { useEffect, useRef, useState } from "react";
 import type { SplitGate } from "@/editor/renderedCut";
@@ -240,6 +241,8 @@ export function TimelineTrackContent({
       data-track-id={track.id}
       data-track-role={track.role}
       onClick={(e) => {
+        // A portaled menu's click (React bubbles it here) is not a click on the row.
+        if (!e.currentTarget.contains(e.target as Node)) return;
         // If clicking empty area (not on an element), deselect all elements
         if (!(e.target as HTMLElement).closest(".timeline-element")) {
           useTimelineStore.getState().clearSelectedElements();

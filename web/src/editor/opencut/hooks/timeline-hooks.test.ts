@@ -14,6 +14,7 @@ import type { EditorTrack, TrackRole } from "@/editor/types";
 import { usePlaybackStore } from "@/editor/opencut/stores/playback-store";
 import { useTimelineStore } from "@/editor/opencut/stores/timeline-store";
 import { usePlaybackControls } from "./use-playback-controls";
+import { useSelectionBox } from "./use-selection-box";
 import { useTimelineElementResize } from "./use-timeline-element-resize";
 import { TIMELINE_FPS, useTimelinePlayhead } from "./use-timeline-playhead";
 
@@ -206,6 +207,26 @@ describe("useTimelineElementResize", () => {
       }),
     );
     expect(result.current.handles).toEqual({ left: false, right: false });
+  });
+});
+
+describe("useSelectionBox", () => {
+  it("starts no box from a mousedown outside its container (a portaled menu's, which React bubbles through it)", () => {
+    const container = document.createElement("div");
+    const outside = document.createElement("div");
+    document.body.append(container, outside);
+    const { result } = renderHook(() =>
+      useSelectionBox({
+        containerRef: { current: container },
+        onSelectionComplete: vi.fn(),
+      }),
+    );
+
+    act(() => result.current.handleMouseDown(mouse(10, outside)));
+    expect(result.current.selectionBox).toBeNull();
+
+    act(() => result.current.handleMouseDown(mouse(10, container)));
+    expect(result.current.selectionBox).not.toBeNull();
   });
 });
 

@@ -12,8 +12,9 @@
 // playhead; track labels name the track (Video / Captions / Text / Voice-over) and the Video track
 // has the mute-source toggle (upstream's track context menu, whose only applicable item it was);
 // Base UI scroll viewports; the playhead is drawn at the tracks' scroll offset (upstream ignored it);
-// the click that ends an edge resize or a selection box is swallowed (suppressClick); a read-only
-// edit shows why. Licence: ../../LICENSE-OpenCut.
+// the click that ends an edge resize or a selection box is swallowed (suppressClick), and a portaled
+// menu's click (bubbled through React) neither seeks nor is swallowed; a read-only edit shows why.
+// Licence: ../../LICENSE-OpenCut.
 import type React from "react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
@@ -250,6 +251,8 @@ export function Timeline({
   // Timeline content click to seek handler
   const handleTimelineContentClick = useCallback(
     (e: React.MouseEvent) => {
+      // A portaled menu's click (React bubbles it here) is not a click on the tracks.
+      if (!e.currentTarget.contains(e.target as Node)) return;
       // Don't seek if this was a selection box operation (its release's click is swallowed below)
       if (isSelecting) {
         return;
@@ -401,8 +404,10 @@ export function Timeline({
       onMouseEnter={() => setIsInTimeline(true)}
       onMouseLeave={() => setIsInTimeline(false)}
       // The click that ends an edge resize or a selection box neither deselects nor seeks.
+      // Only a click on the timeline itself: React bubbles a portaled menu's click through here.
       onClickCapture={(e) => {
-        if (takeSuppressedClick()) e.stopPropagation();
+        if (e.currentTarget.contains(e.target as Node) && takeSuppressedClick())
+          e.stopPropagation();
       }}
     >
       {/* Toolbar */}

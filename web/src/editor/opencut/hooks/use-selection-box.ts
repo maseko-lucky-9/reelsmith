@@ -3,7 +3,8 @@
 // rectangle in selectElementsInBox removed (noUnusedLocals); the click that follows an active
 // box's release is swallowed (suppressClick) instead of upstream's justFinishedSelecting state and
 // its 50 ms timeout, which only the content's click read (a row's click still cleared a same-row
-// box's selection) and which outlived an unmount. Licence: ../../LICENSE-OpenCut.
+// box's selection) and which outlived an unmount; no box starts from a mousedown outside the
+// container (a portaled menu's, which React bubbles through it). Licence: ../../LICENSE-OpenCut.
 import { useState, useEffect, useCallback } from "react";
 import { suppressNextClick } from "@/editor/suppressClick";
 
@@ -36,6 +37,8 @@ export function useSelectionBox({
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
       if (!isEnabled) return;
+      // Only from the tracks themselves: React bubbles a portaled menu's mousedown through here.
+      if (!containerRef.current?.contains(e.target as Node)) return;
 
       // Only start selection on empty space clicks
       if ((e.target as HTMLElement).closest(".timeline-element")) {
@@ -58,7 +61,7 @@ export function useSelectionBox({
         isActive: false, // Will become active when mouse moves
       });
     },
-    [isEnabled, playheadRef],
+    [isEnabled, containerRef, playheadRef],
   );
 
   // Function to select elements within the selection box
