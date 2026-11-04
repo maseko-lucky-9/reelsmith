@@ -1,0 +1,98 @@
+[
+  {
+    "source_size": [1920, 1080],
+    "canvas_size": [1080, 1920],
+    "band_anchor_y": 1592,
+    "inset_height": 608
+  },
+  {
+    "source_size": [1280, 720],
+    "canvas_size": [1080, 1920],
+    "band_anchor_y": 1592,
+    "inset_height": 608
+  },
+  {
+    "source_size": [3840, 2160],
+    "canvas_size": [1080, 1920],
+    "band_anchor_y": 1592,
+    "inset_height": 608
+  },
+  {
+    "source_size": [854, 480],
+    "canvas_size": [854, 1518],
+    "band_anchor_y": 1258,
+    "inset_height": 480
+  },
+  {
+    "source_size": [853, 480],
+    "canvas_size": [853, 1516],
+    "band_anchor_y": 1257,
+    "inset_height": 480
+  },
+  {
+    "source_size": [640, 360],
+    "canvas_size": [640, 1137],
+    "band_anchor_y": 942,
+    "inset_height": 360
+  },
+  {
+    "source_size": [1440, 1080],
+    "canvas_size": [1080, 1920],
+    "band_anchor_y": 1642,
+    "inset_height": 810
+  },
+  {
+    "source_size": [1080, 1080],
+    "canvas_size": [1080, 1920],
+    "band_anchor_y": 1710,
+    "inset_height": 1080
+  },
+  {
+    "source_size": [1080, 1350],
+    "canvas_size": [1080, 1920],
+    "band_anchor_y": 1777,
+    "inset_height": 1350
+  },
+  {
+    "source_size": [1080, 1536],
+    "canvas_size": [1080, 1920],
+    "band_anchor_y": 1824,
+    "inset_height": 1536
+  },
+  {
+    "source_size": [1080, 1540],
+    "canvas_size": [1080, 1920],
+    "band_anchor_y": 1632,
+    "inset_height": 1540
+  },
+  {
+    "source_size": [720, 1280],
+    "canvas_size": [720, 1280],
+    "band_anchor_y": 1088,
+    "inset_height": 1280
+  },
+  {
+    "source_size": [576, 1024],
+    "canvas_size": [576, 1024],
+    "band_anchor_y": 870,
+    "inset_height": 1024
+  },
+  {
+    "source_size": [1080, 1920],
+    "canvas_size": [1080, 1920],
+    "band_anchor_y": 1632,
+    "inset_height": 1920
+  },
+  {
+    "source_size": [1080, 2340],
+    "canvas_size": [1080, 1920],
+    "band_anchor_y": 1632,
+    "inset_height": 2340
+  },
+  {
+    "source_size": [640, 1200],
+    "canvas_size": [640, 1137],
+    "band_anchor_y": 966,
+    "inset_height": 1200
+  }
+]

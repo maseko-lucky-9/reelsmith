@@ -1,0 +1,10 @@
+/*
+ * The clip editor's preview font (spec 017 FR-014, research R10): the file the
+ * server renders captions with by default (app/assets/fonts/Anton-Regular.ttf,
+ * OFL-1.1, see /fonts/OFL.txt), copied to web/public/fonts/ and kept equal by
+ * tests/unit/test_editor_preview_assets.py.
+ */
+@font-face {
+  font-family: "Reelsmith Caption";
+  src: url("/fonts/Anton-Regular.ttf") format("truetype");
+}
