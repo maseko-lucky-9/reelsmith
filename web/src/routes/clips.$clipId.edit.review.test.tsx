@@ -2,7 +2,8 @@
  * Clip editor review fixes (spec 016 Phase 4a): Save/Re-render locked while a
  * voice-over is made, its 409/503/422/404 messages, the stub-voice warning,
  * and the playhead guard while the segments are not rendered yet. Real
- * useTimelineEditor hook against a mocked API.
+ * useClipEdit hook against a mocked API. The playhead cases run in the
+ * rendered-clip view (spec 017 T155): the guard is for the rendered file's clock.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
@@ -27,10 +28,6 @@ vi.mock('@/api/client', () => ({
 
 vi.mock('sonner', () => ({
   toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
-}))
-
-vi.mock('@/components/editor/MultiTrackTimeline', () => ({
-  MultiTrackTimeline: () => null,
 }))
 
 import { api } from '@/api/client'
@@ -94,6 +91,11 @@ function editCaption(n: number, value: string) {
   const box = screen.getByRole('textbox', { name: `Caption ${n}` })
   fireEvent.change(box, { target: { value } })
   fireEvent.blur(box)
+}
+
+/** The rendered clip's clock: the view the 016 playhead guard is about. */
+function showRenderedClip() {
+  fireEvent.click(screen.getByRole('button', { name: 'Rendered clip' }))
 }
 
 function generateVoiceover() {
@@ -213,6 +215,7 @@ describe('voice-over messages', () => {
 describe('playhead while the segments are not rendered', () => {
   async function renderWithPlayhead(seconds: number) {
     const view = await renderPage({ output_path: '/data/clip-1.mp4' })
+    showRenderedClip()
     const video = view.container.querySelector('video') as HTMLVideoElement
     Object.defineProperty(video, 'currentTime', { configurable: true, value: seconds, writable: true })
     fireEvent(video, new Event('timeupdate'))
@@ -335,6 +338,7 @@ describe('playhead while the segments are not rendered', () => {
       trimmed.tracks[0].items[0] = { start: trimmedStart, end: 110, src: 'main' }
       vi.mocked(api.getClipEdit).mockResolvedValue(edit(trimmed, 2))
       const view = await renderPage({ output_path: '/data/clip-1.mp4', rendered_segments: rendered })
+      showRenderedClip()
       const video = view.container.querySelector('video') as HTMLVideoElement
       Object.defineProperty(video, 'currentTime', { configurable: true, value: 4, writable: true })
       fireEvent(video, new Event('timeupdate'))

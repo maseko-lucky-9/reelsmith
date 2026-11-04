@@ -220,6 +220,7 @@ def create_app() -> FastAPI:
     app.include_router(clips.router)
     app.include_router(clip_edits.router)
     app.include_router(media.router)
+    app.include_router(media.jobs_router)
     app.include_router(uploads.router)
     app.include_router(brand_templates.router)
     app.include_router(folders.router)

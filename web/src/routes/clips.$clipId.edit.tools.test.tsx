@@ -1,7 +1,7 @@
 /**
  * The clip editor's wired tools (spec 016 item 6): transcript caption edits,
  * caption style, text overlays, voice-over, trim and Re-render, through the
- * real useTimelineEditor hook against a mocked API.
+ * real useClipEdit hook against a mocked API.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
@@ -22,10 +22,6 @@ vi.mock('@/api/client', () => ({
     upsertClipEdit: vi.fn(),
     createVoiceover: vi.fn(),
   },
-}))
-
-vi.mock('@/components/editor/MultiTrackTimeline', () => ({
-  MultiTrackTimeline: () => null,
 }))
 
 import { api } from '@/api/client'
@@ -215,7 +211,7 @@ describe('ClipEditorPage — trim tool', () => {
     fireEvent.change(end, { target: { value: '100' } })
     fireEvent.blur(end)
 
-    expect(screen.getByRole('alert').textContent).toMatch(/at least 0.05s/)
+    expect(screen.getByRole('alert').textContent).toMatch(/at least 0\.051 s after the start/)
     expect(screen.getByRole('button', { name: 'Saved' })).toBeTruthy()
   })
 })
@@ -245,8 +241,9 @@ describe('ClipEditorPage — voice-over tool', () => {
     expect(vi.mocked(api.createVoiceover).mock.calls[0]).toEqual(['clip-1', { text: 'Wait for the twist', start: 0 }])
     // Nothing local to save: the server builds the v2 edit from the default.
     expect(api.upsertClipEdit).not.toHaveBeenCalled()
-    expect(await screen.findByRole('list', { name: 'Voice-overs' })).toBeTruthy()
-    expect(screen.getByText('voiceover_1.wav')).toBeTruthy()
+    const list = await screen.findByRole('list', { name: 'Voice-overs' })
+    // The panel's list (the timeline's audio track shows the same name).
+    expect(within(list).getByText('voiceover_1.wav')).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Saved' })).toBeTruthy()
   })
 

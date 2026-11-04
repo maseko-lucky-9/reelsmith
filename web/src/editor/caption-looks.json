@@ -1,0 +1,51 @@
+{
+  "default": {
+    "font_size": 96,
+    "fill": [255, 255, 255, 255],
+    "highlight_fill": [46, 204, 64, 255],
+    "stroke_fill": [0, 0, 0, 255],
+    "highlights": true
+  },
+  "static": {
+    "font_size": 72,
+    "fill": [255, 255, 255, 255],
+    "highlight_fill": [46, 204, 64, 255],
+    "stroke_fill": [0, 0, 0, 255],
+    "highlights": false
+  },
+  "hormozi": {
+    "font_size": 96,
+    "fill": [255, 255, 255, 255],
+    "highlight_fill": [255, 242, 0, 255],
+    "stroke_fill": [0, 0, 0, 255],
+    "highlights": true
+  },
+  "mrbeast": {
+    "font_size": 110,
+    "fill": [255, 255, 255, 255],
+    "highlight_fill": [255, 0, 102, 255],
+    "stroke_fill": [0, 0, 0, 255],
+    "highlights": true
+  },
+  "karaoke": {
+    "font_size": 82,
+    "fill": [255, 255, 255, 255],
+    "highlight_fill": [34, 211, 238, 255],
+    "stroke_fill": [0, 0, 0, 255],
+    "highlights": true
+  },
+  "boldpop": {
+    "font_size": 103,
+    "fill": [255, 255, 255, 255],
+    "highlight_fill": [124, 58, 237, 255],
+    "stroke_fill": [0, 0, 0, 255],
+    "highlights": true
+  },
+  "subtle": {
+    "font_size": 62,
+    "fill": [255, 255, 255, 255],
+    "highlight_fill": [46, 204, 64, 255],
+    "stroke_fill": [0, 0, 0, 255],
+    "highlights": false
+  }
+}

@@ -11,8 +11,12 @@ import {
   type CaptionStyleName,
 } from '@/components/editor/CaptionTemplatePicker'
 import {
+  MIN_EDIT_SEGMENT_SECONDS,
   MIN_SEGMENT_SECONDS,
   addItem,
+  asWritten,
+  longEnough,
+  segmentsRefusal,
   isV2,
   itemsOf,
   reelDuration,
@@ -25,6 +29,7 @@ import {
   type Segment,
   type SourceWindow,
 } from '@/lib/timelineEdit'
+import { STALE_PLAYHEAD_REASON } from '@/editor/renderedCut'
 
 const fmt = (n: number) => (Math.round(n * 100) / 100).toFixed(2)
 
@@ -262,16 +267,26 @@ interface TrimPanelProps extends TimelineProps {
   playhead: number
   sourceWindow: SourceWindow | null
   /**
-   * The segments differ from those the playing file was rendered from, so the
-   * playhead (the file's clock) is not a time on the edited reel.
+   * The playhead is not a time on the edited reel (the rendered file's clock
+   * while the segments differ from those it was rendered from), so Split at
+   * playhead is unavailable (the editor's split gate, `renderedCut.splitGate`).
    */
   playheadStale?: boolean
+  /** Why, shown on the disabled Split at playhead (default: the 016 re-render reason). */
+  playheadStaleReason?: string
+  /** The source video's length when known (its metadata, else the job's record): an end may not pass it. */
+  sourceDuration?: number | null
 }
 
-const STALE_PLAYHEAD_TITLE =
-  'Re-render first: the preview does not play these segments, so the playhead does not match them. Split is unavailable until the clip is re-rendered with them.'
-
-export function TrimPanel({ timeline, onChange, playhead, sourceWindow, playheadStale = false }: TrimPanelProps) {
+export function TrimPanel({
+  timeline,
+  onChange,
+  playhead,
+  sourceWindow,
+  playheadStale = false,
+  playheadStaleReason = STALE_PLAYHEAD_REASON,
+  sourceDuration = null,
+}: TrimPanelProps) {
   const [error, setError] = useState<string | null>(null)
   const v2 = upgradeTimeline(timeline, sourceWindow)
   if (!v2) {
@@ -287,20 +302,45 @@ export function TrimPanel({ timeline, onChange, playhead, sourceWindow, playhead
   const segments = segmentsOf(v2)
   const split = playheadStale ? null : splitAt(v2, playhead)
 
-  const commit = (idx: number, field: keyof Segment, raw: string) => {
+  const commit = (idx: number, field: keyof Segment, input: HTMLInputElement) => {
+    const raw = input.value
     const value = Number(raw)
-    const next = segments.map((s, i) => (i === idx ? { ...s, [field]: value } : s))
-    const seg = next[idx]
-    if (!Number.isFinite(value) || value < 0 || seg.end - seg.start < MIN_SEGMENT_SECONDS) {
-      setError(`Segment ${idx + 1}: the end must be at least ${MIN_SEGMENT_SECONDS}s after the start.`)
+    // An emptied or unreadable field is not 0 s (Number('') is 0): the time goes back.
+    if (raw.trim() === '' || !Number.isFinite(value) || value < 0) {
+      input.value = String(segments[idx][field])
+      setError(`Segment ${idx + 1}: enter a time of 0 s or more.`)
       return
     }
-    if ((idx > 0 && seg.start < next[idx - 1].end) || (idx < next.length - 1 && seg.end > next[idx + 1].start)) {
+    const next = segments.map((s, i) => (i === idx ? { ...s, [field]: value } : s))
+    // Checked as written: setSegments rounds to the ms, and the server checks
+    // the rounded values on raw floats (50.3 - 50.25 is under 0.05).
+    const written = next.map(asWritten)
+    const seg = written[idx]
+    if (!longEnough(seg.start, seg.end)) {
+      setError(`Segment ${idx + 1}: the end must be at least ${MIN_EDIT_SEGMENT_SECONDS} s after the start.`)
+      return
+    }
+    if ((idx > 0 && seg.start < written[idx - 1].end) || (idx < written.length - 1 && seg.end > written[idx + 1].start)) {
       setError(`Segment ${idx + 1}: segments must stay in order without overlapping.`)
       return
     }
+    // An end at most the source's length written to the ms, as the timeline's trim writes it:
+    // the server clamps an end past the source back to it before holding the segment to
+    // 0.05 s and measuring the reel, so 1 ms past turned 51 ms into 50 ms and the reel 1 ms
+    // shorter than the editor's. The trim's rounding of a source off the ms grid (at most
+    // 0.5 ms past, which the server takes) stays editable.
+    if (sourceDuration !== null && seg.end > Math.round(sourceDuration * 1000) / 1000) {
+      setError(`Segment ${idx + 1}: the source video is ${fmt(sourceDuration)} s long.`)
+      return
+    }
+    const refusal = segmentsRefusal(written)
+    if (refusal) {
+      setError(`Segment ${idx + 1}: ${refusal}`)
+      return
+    }
     setError(null)
-    if (value !== segments[idx][field]) onChange(setSegments(v2, next))
+    // A value that rounds to the time already there changes nothing (no undo step).
+    if (seg[field] !== segments[idx][field]) onChange(setSegments(v2, next))
   }
 
   return (
@@ -321,7 +361,7 @@ export function TrimPanel({ timeline, onChange, playhead, sourceWindow, playhead
                 step={0.1}
                 min={0}
                 defaultValue={s.start}
-                onBlur={(e) => commit(idx, 'start', e.target.value)}
+                onBlur={(e) => commit(idx, 'start', e.currentTarget)}
               />
             </label>
             <label className="block text-xs text-zinc-400">
@@ -332,7 +372,7 @@ export function TrimPanel({ timeline, onChange, playhead, sourceWindow, playhead
                 step={0.1}
                 min={0}
                 defaultValue={s.end}
-                onBlur={(e) => commit(idx, 'end', e.target.value)}
+                onBlur={(e) => commit(idx, 'end', e.currentTarget)}
               />
             </label>
             <button
@@ -352,7 +392,7 @@ export function TrimPanel({ timeline, onChange, playhead, sourceWindow, playhead
           type="button"
           className={buttonClass}
           disabled={!split}
-          title={playheadStale ? STALE_PLAYHEAD_TITLE : undefined}
+          title={playheadStale ? playheadStaleReason : undefined}
           onClick={() => split && onChange(split)}
         >
           Split at playhead
