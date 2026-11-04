@@ -29,7 +29,16 @@ import {
   TrimPanel,
   VoiceoverPanel,
 } from '@/components/editor/EditorToolPanels'
-import { isV2, itemsOf, reelDuration, setCaptionText, type SourceWindow } from '@/lib/timelineEdit'
+import type { TimelinePayload } from '@/api/client'
+import {
+  isV2,
+  itemsOf,
+  reelDuration,
+  segmentsOf,
+  setCaptionText,
+  upgradeTimeline,
+  type SourceWindow,
+} from '@/lib/timelineEdit'
 
 export const clipEditRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -58,12 +67,27 @@ function formatVideoTime(seconds: number): string {
   return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${cs.toString().padStart(2, '0')}`
 }
 
+/** Shown when the server had no Piper voice and wrote the stub's silent track. */
+const STUB_VOICEOVER_WARNING =
+  'Voice-over added as a silent placeholder: no Piper voice is installed on the server. ' +
+  'Run `python -m scripts.fetch_piper_voice` there, then generate it again.'
+
+/** The source segments a timeline plays, as a comparable key (v1 read through the clip's window). */
+function segmentsKey(timeline: TimelinePayload, window: SourceWindow | null): string {
+  return JSON.stringify(segmentsOf(upgradeTimeline(timeline, window) ?? timeline))
+}
+
 /** A voice-over request's failure as shown in its panel. */
 function voiceoverErrorMessage(err: unknown): string {
   const status = apiErrorStatus(err)
   const detail = apiErrorDetail(err)
   const reason = detail ? `: ${detail}` : ''
+  // The server re-checks the edit's version after synthesis (lost update).
+  if (status === 409 && detail?.startsWith("the clip's edit changed"))
+    return 'The edit changed while the voice-over was being generated, so it was not added. Reload the page and try again (409).'
   if (status === 409) return `Cannot add a voice-over (409)${reason}`
+  if (status === 503 && detail?.startsWith('voice-over busy'))
+    return 'The server is busy making other voice-overs. Try again in a moment (503).'
   if (status === 503) return `Voice-over is unavailable on the server (503)${reason}`
   if (status === 502) return `The voice engine failed (502)${reason}`
   if (status !== null) return `Voice-over failed (${status})${reason}`
@@ -146,10 +170,22 @@ export function ClipEditorPage() {
   )
   const editor = useTimelineEditor(clipId, { sourceWindow })
 
+  // The video plays the rendered file, so its clock (the playhead) only matches
+  // the edit while the edit's segments are the ones that file was rendered
+  // from: those loaded with the editor, then those of the last queued re-render.
+  const [renderedKey, setRenderedKey] = useState<string | null>(null)
+  const loadedTimeline = editor.loadedTimeline ?? null
+  const baselineKey = renderedKey ?? (loadedTimeline ? segmentsKey(loadedTimeline, sourceWindow) : null)
+  const segmentsUnrendered = baselineKey !== null && segmentsKey(editor.timeline, sourceWindow) !== baselineKey
+  const rerenderKeyRef = useRef<string | null>(null)
+
   const rerenderMutation = useMutation({
     mutationFn: () =>
       api.rerenderClip(clipId, { reframe_provider: 'letterbox', regenerate_copy: regenerateCopy }),
-    onSuccess: () => toast.success('Re-render queued'),
+    onSuccess: () => {
+      if (rerenderKeyRef.current !== null) setRenderedKey(rerenderKeyRef.current)
+      toast.success('Re-render queued')
+    },
     onError: (err) => {
       const detail = apiErrorDetail(err)
       toast.error(detail ? `Cannot re-render: ${detail}` : 'Failed to queue re-render')
@@ -158,6 +194,7 @@ export function ClipEditorPage() {
 
   // The render reads the saved edit, so pending changes are saved first.
   const rerender = useCallback(async () => {
+    rerenderKeyRef.current = segmentsKey(editor.timeline, sourceWindow)
     if (editor.isDirty) {
       try {
         await editor.save()
@@ -167,7 +204,7 @@ export function ClipEditorPage() {
       }
     }
     rerenderMutation.mutate()
-  }, [editor, rerenderMutation])
+  }, [editor, rerenderMutation, sourceWindow])
 
   const voiceoverMutation = useMutation({
     mutationFn: async (body: VoiceoverRequest) => {
@@ -178,7 +215,8 @@ export function ClipEditorPage() {
     },
     onSuccess: (res) => {
       editor.applyServerState?.(res.edit)
-      toast.success('Voice-over added')
+      if (res.provider === 'stub') toast.warning(STUB_VOICEOVER_WARNING)
+      else toast.success('Voice-over added')
     },
   })
 
@@ -192,6 +230,8 @@ export function ClipEditorPage() {
   )
   const captions = itemsOf(editor.timeline, 'caption')
 
+  // The <video> mounts once the clip has loaded with a file: attach to it then.
+  const hasVideo = Boolean(clip?.output_path)
   useEffect(() => {
     const video = videoRef.current
     if (!video) return
@@ -216,7 +256,7 @@ export function ClipEditorPage() {
       video.removeEventListener('play', onPlay)
       video.removeEventListener('pause', onPause)
     }
-  }, [words])
+  }, [words, hasVideo])
 
   const togglePlay = useCallback(() => {
     const v = videoRef.current
@@ -236,7 +276,10 @@ export function ClipEditorPage() {
     return <div className="flex items-center justify-center h-full text-red-400">Clip not found.</div>
   }
 
-  const busy = editor.isSaving || rerenderMutation.isPending
+  // A voice-over saves first and the server appends to the saved edit: a save
+  // or re-render meanwhile would race it.
+  const voiceoverPending = voiceoverMutation.isPending
+  const busy = editor.isSaving || rerenderMutation.isPending || voiceoverPending
 
   return (
     <div className="flex flex-col h-full -mx-6 -my-6 overflow-hidden" style={{ height: 'calc(100vh - 48px - 32px)' }}>
@@ -281,7 +324,8 @@ export function ClipEditorPage() {
 
         <button
           type="button"
-          disabled={!editor.isDirty || editor.isSaving}
+          disabled={!editor.isDirty || editor.isSaving || voiceoverPending}
+          title={voiceoverPending ? 'Wait for the voice-over to finish' : undefined}
           onClick={() =>
             editor.save().then(
               () => toast.success('Saved'),
@@ -348,7 +392,7 @@ export function ClipEditorPage() {
                     start={start}
                     end={end}
                     text={String(c.text ?? '')}
-                    active={currentTime >= start && currentTime < end}
+                    active={!segmentsUnrendered && currentTime >= start && currentTime < end}
                     onSeek={() => seek(start)}
                     onCommit={(text) => editor.setTimeline(setCaptionText(editor.timeline, i, text))}
                   />
@@ -445,6 +489,7 @@ export function ClipEditorPage() {
                 onChange={editor.setTimeline}
                 playhead={currentTime}
                 sourceWindow={sourceWindow}
+                playheadStale={segmentsUnrendered}
               />
             )}
           </div>

@@ -45,6 +45,8 @@ export interface UseTimelineEditor {
   words?: EditWord[]
   /** Adopts an edit the server changed (e.g. a voice-over appended), as saved. */
   applyServerState?: (state: ClipEditState) => void
+  /** The timeline as loaded from the server when the editor opened (null until loaded). */
+  loadedTimeline?: TimelinePayload | null
 }
 
 export function useTimelineEditor(
@@ -71,6 +73,7 @@ export function useTimelineEditor(
   const [savedSnapshot, setSavedSnapshot] = useState<string>(
     JSON.stringify(EMPTY_TIMELINE),
   )
+  const [loadedTimeline, setLoadedTimeline] = useState<TimelinePayload | null>(null)
   const sourceWindow = options.sourceWindow ?? null
   const windowRef = useRef<SourceWindow | null>(sourceWindow)
   useEffect(() => {
@@ -88,6 +91,7 @@ export function useTimelineEditor(
     setHistoryIdx(0)
     setVersion(server?.version ?? 0)
     setSavedSnapshot(JSON.stringify(tl))
+    setLoadedTimeline(tl)
     hydratedRef.current = true
   }, [editQuery.data, editQuery.isLoading])
 
@@ -111,26 +115,47 @@ export function useTimelineEditor(
     setHistoryIdx((idx) => Math.min(history.length - 1, idx + 1))
   }, [history.length])
 
-  /** The server's copy becomes the current entry, so it reads as saved. */
+  // The current entry, readable from mutation callbacks that outlive a render.
+  const currentRef = useRef<TimelinePayload>(timeline)
+  useEffect(() => {
+    currentRef.current = timeline
+  }, [timeline])
+  // The history entry the save in flight sent.
+  const sentRef = useRef<TimelinePayload | null>(null)
+
+  /**
+   * A save answered. When the current entry is still what was sent, the
+   * server's copy replaces it, so it reads as saved. When it was edited while
+   * the save was in flight, the newer local edits are kept (and stay dirty):
+   * only the version and the saved snapshot move on.
+   */
   const adopt = useCallback(
     (state: ClipEditState) => {
+      const sent = sentRef.current
+      sentRef.current = null
       setVersion(state.version)
       setSavedSnapshot(JSON.stringify(state.timeline))
-      setHistory((prev) => prev.map((tl, i) => (i === historyIdx ? state.timeline : tl)))
+      const current = currentRef.current
+      if (sent === null || JSON.stringify(current) === JSON.stringify(sent)) {
+        setHistory((prev) => prev.map((tl) => (tl === current ? state.timeline : tl)))
+      }
       queryClient.setQueryData(['clip-edit', clipId], (old: ClipEditState | null | undefined) => ({
         ...state,
         words: state.words ?? old?.words,
       }))
     },
-    [clipId, historyIdx, queryClient],
+    [clipId, queryClient],
   )
 
   const saveMutation = useMutation({
-    mutationFn: () =>
-      api.upsertClipEdit(clipId, {
-        timeline: prepareForSave(timeline, windowRef.current),
+    mutationFn: () => {
+      const sent = currentRef.current
+      sentRef.current = sent
+      return api.upsertClipEdit(clipId, {
+        timeline: prepareForSave(sent, windowRef.current),
         version: version || undefined,
-      }),
+      })
+    },
     onSuccess: adopt,
   })
 
@@ -171,5 +196,6 @@ export function useTimelineEditor(
     canRedo: historyIdx < history.length - 1,
     words: editQuery.data?.words ?? NO_WORDS,
     applyServerState,
+    loadedTimeline,
   }
 }

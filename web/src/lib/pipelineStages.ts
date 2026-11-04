@@ -456,6 +456,9 @@ const NON_STAGE_EVENT_TYPES = [
   // RepromptFailed ends a failed one (the job stays completed with its old clips).
   'JobReprompted',
   'RepromptFailed',
+  // A queued clip re-render ended without a new file (reason "refused" | "failed").
+  // Not terminal: the job stays completed and the stream stays open.
+  'ClipRerenderFailed',
   'StageSkipped', // emitted when orchestrator skips a stage per pipeline_options
   'SubtitleImageRendered', // emitted but not rendered as its own row (rolled into render)
   'SegmentsProposed',

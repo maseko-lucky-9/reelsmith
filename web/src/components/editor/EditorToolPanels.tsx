@@ -257,9 +257,17 @@ export function VoiceoverPanel({
 interface TrimPanelProps extends TimelineProps {
   playhead: number
   sourceWindow: SourceWindow | null
+  /**
+   * The segments differ from those the playing file was rendered from, so the
+   * playhead (the file's clock) is not a time on the edited reel.
+   */
+  playheadStale?: boolean
 }
 
-export function TrimPanel({ timeline, onChange, playhead, sourceWindow }: TrimPanelProps) {
+const STALE_PLAYHEAD_TITLE =
+  'Re-render first: the preview still plays the last rendered cut, so the playhead does not match the edited segments.'
+
+export function TrimPanel({ timeline, onChange, playhead, sourceWindow, playheadStale = false }: TrimPanelProps) {
   const [error, setError] = useState<string | null>(null)
   const v2 = upgradeTimeline(timeline, sourceWindow)
   if (!v2) {
@@ -273,7 +281,7 @@ export function TrimPanel({ timeline, onChange, playhead, sourceWindow }: TrimPa
     )
   }
   const segments = segmentsOf(v2)
-  const split = splitAt(v2, playhead)
+  const split = playheadStale ? null : splitAt(v2, playhead)
 
   const commit = (idx: number, field: keyof Segment, raw: string) => {
     const value = Number(raw)
@@ -336,7 +344,13 @@ export function TrimPanel({ timeline, onChange, playhead, sourceWindow }: TrimPa
         ))}
       </ol>
       <div className="flex flex-wrap gap-2">
-        <button type="button" className={buttonClass} disabled={!split} onClick={() => split && onChange(split)}>
+        <button
+          type="button"
+          className={buttonClass}
+          disabled={!split}
+          title={playheadStale ? STALE_PLAYHEAD_TITLE : undefined}
+          onClick={() => split && onChange(split)}
+        >
           Split at playhead
         </button>
         {sourceWindow ? (
