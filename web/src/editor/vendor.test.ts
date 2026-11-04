@@ -1,3 +1,4 @@
+/// <reference types="node" />
 /**
  * Vendored OpenCut code keeps its MIT notice (spec 017 FR-022, FR-023):
  * every file under `opencut/` names its upstream file and revision, the
@@ -7,6 +8,13 @@
 import { describe, expect, it } from "vitest";
 import license from "./LICENSE-OpenCut?raw";
 import packageJson from "../../package.json?raw";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+const vendorMd = readFileSync(
+  resolve(process.cwd(), "..", "VENDOR.md"),
+  "utf8",
+);
 
 const OPENCUT_REVISION = "3037a7e";
 
@@ -77,4 +85,21 @@ describe("web dependencies", () => {
   it("depends on zustand (the ported stores)", () => {
     expect(names).toContain("zustand");
   });
+});
+
+describe("VENDOR.md OpenCut entry", () => {
+  const entry = (() => {
+    const start = vendorMd.indexOf("## maseko-lucky-9/OpenCut");
+    expect(start).toBeGreaterThanOrEqual(0);
+    const rest = vendorMd.slice(start + 1);
+    const next = rest.search(/\n## /);
+    return next < 0 ? rest : rest.slice(0, next);
+  })();
+
+  it.each(sources.map(([path]) => path.replace("./opencut/", "")))(
+    "names %s",
+    (name) => {
+      expect(entry).toContain(`\`${name}\``);
+    },
+  );
 });

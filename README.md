@@ -42,7 +42,7 @@ Speech enhancement cleans only the audio used for transcription. AI hook text an
 
 - like and dislike;
 - re-render one clip from the job's retained source;
-- a timeline editor that saves a versioned timeline and returns a render plan (nothing renders a timeline into a video yet);
+- a timeline editor on OpenCut's timeline ([ADR-015](docs/decisions/015-opencut-timeline-port.md), [ADR-014](docs/decisions/014-timeline-schema-v2.md)): split, trim and delete segments, edit captions and text overlays, add a voice-over, undo and redo, and Re-render applies the edit. Its preview plays the job's clean source (`GET /jobs/{id}/source`, with `Range` support) through the edit's segments, in the render's caption font and position; the saved result stays the fallback when the source is gone. Code in `web/src/editor/`, vendored OpenCut files listed in [VENDOR.md](VENDOR.md);
 - Premiere and DaVinci XML;
 - a bulk zip export;
 - publish now. `YTVIDEO_SOCIAL_PROVIDER` defaults to `stub`; YouTube has a real OAuth adapter, and TikTok has a cookie session or an n8n sidecar.
@@ -252,3 +252,6 @@ Reloading a client route such as `/uploads/new` or `/jobs/<id>` serves the UI (`
 | [010](docs/decisions/010-map-export-folder.md) | Map the export folder into the database; the expiry sweep deletes only below managed roots |
 | [011](docs/decisions/011-repair-job-metadata.md) | Repair job metadata from the URL instead of re-running the job; drop the placeholder imports |
 | [012](docs/decisions/012-tiktok-posting-gatekeeper.md) | The sidecar is the gatekeeper for TikTok posting; a 15-minute dispatcher replaces the Wait |
+| [013](docs/decisions/013-local-scene-search-models.md) | Local scene search runs Qwen3-VL-Embedding 2B (MLX, 8-bit) in a sidecar venv, judged by qwen2.5vl:7b |
+| [014](docs/decisions/014-timeline-schema-v2.md) | Editor timeline schema v2: source segments, caption words, voice-over audio |
+| [015](docs/decisions/015-opencut-timeline-port.md) | OpenCut timeline as the clip editor: a port, with a clean-source preview |

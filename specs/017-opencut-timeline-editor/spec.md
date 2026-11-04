@@ -4,7 +4,7 @@
 
 **Created**: 2026-11-04
 
-**Status**: Draft (decisions final: owner plan "Phase 4b", no `/speckit-clarify`)
+**Status**: Implemented; browser check (T157) open (decisions final: owner plan "Phase 4b", no `/speckit-clarify`)
 
 **Plan**: [plan.md](plan.md) | **Tasks**: [tasks.md](tasks.md) | **Decision**: [ADR-015](../../docs/decisions/015-opencut-timeline-port.md) | **Builds on**: [spec 016](../016-editor-render/spec.md), [ADR-014](../../docs/decisions/014-timeline-schema-v2.md) (timeline schema v2)
 
@@ -86,7 +86,7 @@ Everything the 016 editor guaranteed still holds on the new editor: Save sends t
 
 ## Requirements *(mandatory)*
 
-Status tags follow the constitution (`Implemented | Partial | Scaffolded-unwired | Missing`); every requirement starts **Missing**.
+Status tags follow the constitution (`Implemented | Partial | Scaffolded-unwired | Missing`); every requirement started **Missing**; the Status table at the end has the current states.
 
 ### Clean source for preview (server)
 
@@ -181,12 +181,12 @@ Status tags follow the constitution (`Implemented | Partial | Scaffolded-unwired
 
 | Requirement | State | Proving test |
 |---|---|---|
-| FR-001, FR-002 | Missing | `tests/contract/test_job_source_route.py` |
-| FR-003 | Missing | `tests/unit/test_http_range.py`, `tests/contract/test_media_router.py` |
-| FR-004, FR-005 | Missing | `web/src/editor/adapter.test.ts` |
-| FR-006..FR-009, FR-012 | Missing | `web/src/editor/opencut/stores/timeline-store.test.ts`, `web/src/editor/useClipEdit.test.ts`, `web/src/editor/opencut/components/properties-panel.test.tsx` |
-| FR-010, FR-011 | Missing | `web/src/editor/opencut/hooks/timeline-hooks.test.ts`, `web/src/editor/opencut/components/timeline.test.tsx` |
-| FR-013..FR-016 | Missing | `web/src/editor/preview.test.ts`, `web/src/editor/opencut/components/preview-panel.test.tsx`, `tests/unit/test_editor_preview_assets.py` |
-| FR-017..FR-021 | Missing | `web/src/editor/renderedCut.test.ts`, `web/src/routes/clips.$clipId.edit.review.test.tsx`, `web/src/routes/clips.$clipId.edit.tools.test.tsx`, `web/src/routes/clips.$clipId.edit.preview.test.tsx` |
-| FR-022..FR-024 | Missing | `web/src/editor/vendor.test.ts`, `pnpm build` with the old files deleted |
-| All UI | Missing | `playwright-cli` flow in dark and light (T157) |
+| FR-001, FR-002 | Done | `tests/contract/test_job_source_route.py` |
+| FR-003 | Done | `tests/unit/test_http_range.py`, `tests/contract/test_media_router.py` |
+| FR-004, FR-005 | Done | `web/src/editor/adapter.test.ts` |
+| FR-006..FR-009, FR-012 | Done | `web/src/editor/opencut/stores/timeline-store.test.ts`, `web/src/editor/useClipEdit.test.ts`, `web/src/editor/opencut/components/properties-panel.test.tsx` |
+| FR-010, FR-011 | Implemented, browser check open (T157) | `web/src/editor/opencut/hooks/timeline-hooks.test.ts`, `web/src/editor/opencut/components/timeline.test.tsx` |
+| FR-013..FR-016 | Implemented, browser check open (T157): clock, layout and sync logic tested in jsdom, real playback and caption position not yet seen | `web/src/editor/preview.test.ts`, `web/src/editor/opencut/components/preview-panel.test.tsx`, `tests/unit/test_editor_preview_assets.py` |
+| FR-017..FR-021 | Done | `web/src/editor/renderedCut.test.ts`, `web/src/routes/clips.$clipId.edit.review.test.tsx`, `web/src/routes/clips.$clipId.edit.tools.test.tsx`, `web/src/routes/clips.$clipId.edit.preview.test.tsx` |
+| FR-022..FR-024 | Done (the old timeline files are deleted, T156; `vendor.test.ts` also checks that `VENDOR.md` names every vendored file) | `web/src/editor/vendor.test.ts`, `pnpm build` with the old files deleted |
+| All UI | Open (T157) | `playwright-cli` flow in dark and light (T157) |

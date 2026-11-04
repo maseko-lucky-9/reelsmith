@@ -1,6 +1,6 @@
 # ADR-015: OpenCut Timeline as the Clip Editor (Port, Clean-Source Preview)
 
-**Status:** Proposed (accepted when spec 017 merges)
+**Status:** Accepted (implemented on `feat/017-opencut-timeline-editor`; PR TBD, browser check T157 open)
 **Date:** 2026-11-04
 **Author:** Thulani Maseko
 **Implements:** [spec 017](../../specs/017-opencut-timeline-editor/spec.md) · **Builds on:** [ADR-014](014-timeline-schema-v2.md) (timeline schema v2), [spec 016](../../specs/016-editor-render/spec.md)

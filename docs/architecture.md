@@ -138,6 +138,10 @@ Two optional inputs extend the same graph (FR-010): `broll` is passed by the orc
 
 All providers follow the same pattern: `get_<feature>_service()` factory reads the setting and returns a Protocol implementation. Adding a new provider only requires implementing the Protocol and registering in the factory. Reframe differs: `orchestrator._reframe_step` reads the setting, and the face detector behind the `FaceDetector` protocol comes from `face_detector.get_face_detector()`.
 
+## Clip Editor (spec 017)
+
+The clip editor route (`web/src/routes/clips.$clipId.edit.tsx`) edits timeline schema v2 ([ADR-014](decisions/014-timeline-schema-v2.md)) on OpenCut's timeline, vendored under `web/src/editor/opencut/` ([ADR-015](decisions/015-opencut-timeline-port.md), [VENDOR.md](../VENDOR.md)). `web/src/editor/adapter.ts` converts schema v2 to the editor's tracks and back with an exact round trip; the zustand timeline store sends segment split, trim and delete through `web/src/lib/timelineEdit.ts`; `useClipEdit` persists the timeline and Re-render applies it. The preview plays one `<video>` of the job's clean source, served by `GET /jobs/{job_id}/source` (`app/routers/media.py`, shared `range_response` with the clip route), through the edit's segments (`previewClock.ts`), laid out as the render lays the reel out (`previewLayout.ts` mirrors `reel_geometry`, including PR #96's caption anchor for sources that already fill 9:16). Without the source file the preview falls back to the saved result. Voice-overs are drawn as a plain bar and not heard in the preview (T160), captions cannot be retimed on the timeline (T161).
+
 ## Key Services
 
 | Service | Responsibility |

@@ -12,6 +12,7 @@ Learning project: YouTube-to-reels pipeline. FastAPI backend + React UI (`web/`)
 - **ffmpeg** (bundled `imageio-ffmpeg` binary) + **PyAV** — one-pass rendering, probing, frame grabs (`app/services/ffmpeg_tools.py`)
 - **faster-whisper** — transcription (word-level timings)
 - **React + Vite** — UI (`web/`); Streamlit thin client is legacy (`ui/_legacy/`)
+- **Clip editor** — OpenCut's timeline, vendored (MIT) under `web/src/editor/opencut/` with its stores on **zustand**; schema v2 adapter, `useClipEdit` and the preview clock in `web/src/editor/`; vendored files and licence in `VENDOR.md` (ADR-015)
 - **pytest + pytest-asyncio** — tests
 
 ## Entry Points
