@@ -50,6 +50,10 @@ _MANIFEST_COLUMNS = [
     "clip_id", "title", "summary", "start", "end", "output_path",
     "thumbnail_path", "virality_score", "hashtags",
 ]  # fmt: skip
+_PUBLISH_COLUMNS = ["source", "segment_origin", "source_url"]
+# A comma and quotes, so the CSV cell must be quoted and escaped.
+_JOB_URL = 'https://www.youtube.com/watch?v=abc,def&t="1"'
+_JOB_SOURCE = "youtube"
 
 
 @pytest.fixture
@@ -70,7 +74,7 @@ async def export_client(tmp_path):
     mp4_c.write_bytes(b"video-c")
 
     async with factory() as session:
-        job = JobRecord(youtube_url="https://x.test")
+        job = JobRecord(youtube_url=_JOB_URL, source=_JOB_SOURCE)
         session.add(job)
         await session.flush()
         a = ClipRecord(
@@ -80,6 +84,7 @@ async def export_client(tmp_path):
             output_path=str(mp4_a),
             thumbnail_path=str(jpg_a),
             title="A",
+            segment_origin="chapters",
             hashtags=["fun"],
             # The Pexels asset is inserted twice; credits list it once.
             broll_assets=[_PEXELS_ASSET, _LOCAL_ASSET, {**_PEXELS_ASSET, "start": 9.0}],
@@ -152,7 +157,20 @@ async def test_bulk_manifest_appends_broll_credits_after_the_existing_columns(
 
     header, _rows = await _manifest_rows(client, ids)
 
-    assert header == [*_MANIFEST_COLUMNS, "broll_credits"]
+    assert header == [*_MANIFEST_COLUMNS, "broll_credits", *_PUBLISH_COLUMNS]
+
+
+async def test_bulk_manifest_carries_source_origin_and_url(export_client):
+    client, ids = export_client
+
+    _header, rows = await _manifest_rows(client, ids)
+
+    # Clip A was cut from the source's chapters; B predates the column: unknown.
+    assert rows[ids[0]]["segment_origin"] == "chapters"
+    assert rows[ids[1]]["segment_origin"] == ""
+    for clip_id in ids:
+        assert rows[clip_id]["source"] == _JOB_SOURCE
+        assert rows[clip_id]["source_url"] == _JOB_URL
 
 
 async def test_bulk_manifest_credits_each_distinct_broll_asset(export_client):

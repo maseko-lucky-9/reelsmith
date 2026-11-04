@@ -137,6 +137,34 @@ export interface CreateJobResponse {
   status: string
 }
 
+/** One result of GET /api/sources/youtube/search. */
+export interface YoutubeSearchItem {
+  id: string
+  title: string
+  channel: string
+  /** null for a live stream or when YouTube gives no length. */
+  duration_seconds: number | null
+  thumbnail_url: string
+  /** The watch URL; what POST /api/jobs and /workflow take. */
+  url: string
+}
+
+/**
+ * GET /api/sources/youtube/{id}/clean. `clean: null` means the check could not be made
+ * (no vision model running, no stream): show "unknown", not an error.
+ */
+export interface SourceCleanCheck {
+  clean: boolean | null
+  confidence: number
+  reason: string
+  frames_checked: number
+  /**
+   * Why `clean` is null: stream_blocked (YouTube refused the stream request), stream_failed,
+   * frames_failed, ollama_unavailable, reply_unusable, inconclusive, timeout or internal.
+   */
+  cause?: string | null
+}
+
 /** One AI-generated shot — a prompt plus a target duration in seconds. */
 export interface GenerateShot {
   prompt: string
@@ -227,6 +255,16 @@ export const api = {
     const q = new URLSearchParams({ url })
     return apiFetch<VideoPreviewResponse>(`/api/jobs/preview?${q}`)
   },
+
+  /** 400 for an unusable query, 502/504 when YouTube or yt-dlp fails. */
+  searchYoutube: (q: string, limit = 12, signal?: AbortSignal) => {
+    const params = new URLSearchParams({ q, limit: String(limit) })
+    return apiFetch<{ items: YoutubeSearchItem[] }>(`/api/sources/youtube/search?${params}`, { signal })
+  },
+
+  /** Whether the video carries burned-in captions; takes seconds (a vision model looks at 4 frames). */
+  checkYoutubeClean: (videoId: string, signal?: AbortSignal) =>
+    apiFetch<SourceCleanCheck>(`/api/sources/youtube/${encodeURIComponent(videoId)}/clean`, { signal }),
 
   listClips: (params?: { job_id?: string; min_score?: number; search?: string }) => {
     const q = new URLSearchParams()

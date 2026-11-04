@@ -29,9 +29,9 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import ClipRecord
+from app.db.models import ClipRecord, JobRecord
 from app.db.session import get_session
-from app.services.manifest_service import broll_credits
+from app.services.manifest_service import broll_credits, clean_segment_origin
 from app.settings import settings
 
 router = APIRouter(prefix="/clips", tags=["bulk-export"])
@@ -55,18 +55,31 @@ def csv_safe(value: object) -> object:
     return value
 
 
-def _build_manifest(clips: list[ClipRecord]) -> bytes:
+type JobOrigins = dict[str, tuple[str | None, str | None]]
+"""job id -> (``jobs.source``, ``jobs.youtube_url``) of the exported clips."""
+
+
+def _build_manifest(
+    clips: list[ClipRecord], jobs: JobOrigins | None = None
+) -> bytes:
     """The zip's ``manifest.csv``. ``broll_credits`` is the job manifest's
     column (``manifest_service.broll_credits``): a JSON list with one
     ``{provider, author, source_url}`` per distinct B-roll asset, ``[]`` for a
-    clip without B-roll. Asset paths are never written."""
+    clip without B-roll. Asset paths are never written.
+
+    The last three columns (``source``, ``segment_origin``, ``source_url``)
+    mean what they do in the job manifest (``manifest_service.COLUMNS``): the
+    job's platform id, how the clip's segment was produced and the job's
+    original URL; empty when unknown (``jobs`` omitted, a legacy clip)."""
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow([
         "clip_id", "title", "summary", "start", "end", "output_path",
         "thumbnail_path", "virality_score", "hashtags", "broll_credits",
+        "source", "segment_origin", "source_url",
     ])
     for c in clips:
+        source, source_url = (jobs or {}).get(c.job_id, (None, None))
         w.writerow([
             csv_safe(cell)
             for cell in (
@@ -75,14 +88,17 @@ def _build_manifest(clips: list[ClipRecord]) -> bytes:
                 c.virality_score or 0,
                 ",".join(c.hashtags or []),
                 json.dumps(broll_credits(c.broll_assets)),
+                source or "", clean_segment_origin(c.segment_origin), source_url or "",
             )
         ])
     return buf.getvalue().encode("utf-8")
 
 
-def _write_zip(clips: list[ClipRecord], dest: BinaryIO) -> None:
+def _write_zip(
+    clips: list[ClipRecord], dest: BinaryIO, jobs: JobOrigins | None = None
+) -> None:
     with zipfile.ZipFile(dest, "w", zipfile.ZIP_STORED) as zf:
-        zf.writestr("manifest.csv", _build_manifest(clips))
+        zf.writestr("manifest.csv", _build_manifest(clips, jobs))
         for c in clips:
             for kind, path in (("mp4", c.output_path), ("jpg", c.thumbnail_path)):
                 if not path:
@@ -93,14 +109,16 @@ def _write_zip(clips: list[ClipRecord], dest: BinaryIO) -> None:
                 zf.write(p, arcname=f"clips/{c.id}.{kind}")
 
 
-def _build_zip_file(clips: list[ClipRecord]) -> tuple[BinaryIO, int]:
+def _build_zip_file(
+    clips: list[ClipRecord], jobs: JobOrigins | None = None
+) -> tuple[BinaryIO, int]:
     """Write the export zip to an unlinked temp file.
 
     Returns the open handle, rewound, and its size. The caller owns the handle.
     """
     handle = tempfile.TemporaryFile()
     try:
-        _write_zip(clips, handle)
+        _write_zip(clips, handle, jobs)
         size = os.fstat(handle.fileno()).st_size
         handle.seek(0)
     except BaseException:
@@ -164,7 +182,14 @@ async def bulk_export(
     if not rows:
         raise HTTPException(status_code=404, detail="no clips matched")
 
-    handle, size = await asyncio.to_thread(_build_zip_file, list(rows))
+    job_rows = await session.execute(
+        select(JobRecord.id, JobRecord.source, JobRecord.youtube_url).where(
+            JobRecord.id.in_({r.job_id for r in rows})
+        )
+    )
+    jobs: JobOrigins = {job_id: (source, url) for job_id, source, url in job_rows.all()}
+
+    handle, size = await asyncio.to_thread(_build_zip_file, list(rows), jobs)
     return _TempFileResponse(
         handle,
         media_type="application/zip",

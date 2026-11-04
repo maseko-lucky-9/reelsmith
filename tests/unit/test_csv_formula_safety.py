@@ -38,7 +38,7 @@ def test_other_values_are_unchanged(value):
 def test_bulk_manifest_neutralises_title_and_summary():
     clip = SimpleNamespace(
         id="c1", title="+HYPERLINK(1)", summary="-2+3", start=0.0, end=4.0, output_path="/x.mp4",
-        thumbnail_path=None, virality_score=50, hashtags=["#a"], broll_assets=None,
+        thumbnail_path=None, virality_score=50, hashtags=["#a"], broll_assets=None, job_id="j1", segment_origin=None,
     )  # fmt: skip
     rows = list(csv.reader(io.StringIO(_build_manifest([clip]).decode("utf-8"))))
     assert rows[1][1:3] == ["'+HYPERLINK(1)", "'-2+3"]
@@ -49,7 +49,7 @@ def test_bulk_manifest_neutralises_title_and_summary():
 def test_bulk_manifest_quotes_captions_a_spreadsheet_would_run(text):
     clip = SimpleNamespace(
         id="c1", title=text, summary=text, start=0.0, end=4.0, output_path="/x.mp4",
-        thumbnail_path=None, virality_score=50, hashtags=[], broll_assets=None,
+        thumbnail_path=None, virality_score=50, hashtags=[], broll_assets=None, job_id="j1", segment_origin=None,
     )  # fmt: skip
     rows = list(csv.reader(io.StringIO(_build_manifest([clip]).decode("utf-8"))))
     assert rows[1][1:3] == ["'" + text, "'" + text]
