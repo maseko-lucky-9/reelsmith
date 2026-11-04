@@ -101,9 +101,36 @@ function generateVoiceover() {
   fireEvent.click(screen.getByRole('button', { name: 'Generate voice-over' }))
 }
 
+/** jsdom has no EventSource: records the editor's live stream and lets a test push named events. */
+class FakeEventSource {
+  static instances: FakeEventSource[] = []
+  static last() {
+    return FakeEventSource.instances[FakeEventSource.instances.length - 1]
+  }
+  listeners: Record<string, Array<(e: Event) => void>> = {}
+  closed = false
+  url: string
+  constructor(url: string) {
+    this.url = url
+    FakeEventSource.instances.push(this)
+  }
+  addEventListener(type: string, fn: (e: Event) => void) {
+    ;(this.listeners[type] ??= []).push(fn)
+  }
+  close() {
+    this.closed = true
+  }
+  emit(type: string, payload: Record<string, unknown>) {
+    const e = { type, data: JSON.stringify({ type, payload }) } as unknown as MessageEvent
+    this.listeners[type]?.forEach((fn) => fn(e))
+  }
+}
+
 const button = (name: string | RegExp) => screen.getByRole('button', { name }) as HTMLButtonElement
 
 beforeEach(() => {
+  FakeEventSource.instances = []
+  vi.stubGlobal('EventSource', FakeEventSource)
   vi.mocked(api.getClipEdit).mockReset().mockResolvedValue(edit(structuredClone(SAVED), 1))
   vi.mocked(api.upsertClipEdit)
     .mockReset()
@@ -112,9 +139,11 @@ beforeEach(() => {
   vi.mocked(api.createVoiceover).mockReset()
   vi.mocked(toast.success).mockReset()
   vi.mocked(toast.warning).mockReset()
+  vi.mocked(toast.error).mockReset()
 })
 
 afterEach(() => {
+  vi.unstubAllGlobals()
   vi.restoreAllMocks()
 })
 
@@ -208,7 +237,37 @@ describe('playhead while the segments are not rendered', () => {
 
     fireEvent.click(button('Re-render'))
     await waitFor(() => expect(api.rerenderClip).toHaveBeenCalled())
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Re-render queued'))
+
+    // 202 means queued: the preview still plays the old cut.
+    expect(button('Split at playhead').disabled).toBe(true)
+    const video = document.querySelector('video') as HTMLVideoElement
+    const oldSrc = video.getAttribute('src')
+    expect(oldSrc).toBe('/api/clips/clip-1/video')
+
+    // Another clip's render does not count.
+    act(() => FakeEventSource.last().emit('ClipRendered', { clip_id: 'other' }))
+    expect(button('Split at playhead').disabled).toBe(true)
+
+    act(() => FakeEventSource.last().emit('ClipRendered', { clip_id: 'clip-1' }))
     await waitFor(() => expect(button('Split at playhead').disabled).toBe(false))
+    const newSrc = (document.querySelector('video') as HTMLVideoElement).getAttribute('src')
+    expect(newSrc).not.toBe(oldSrc)
+    expect(newSrc).toMatch(/^\/api\/clips\/clip-1\/video\?v=\d+$/)
+  })
+
+  it('keeps Split disabled and shows the error when the re-render fails', async () => {
+    await renderWithPlayhead(4)
+    trimStart('101.5')
+    fireEvent.click(button('Re-render'))
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Re-render queued'))
+
+    act(() => FakeEventSource.last().emit('ClipRerenderFailed', { clip_id: 'clip-1', error: 'ffmpeg exploded' }))
+
+    expect((await screen.findByRole('alert')).textContent).toContain('ffmpeg exploded')
+    expect(toast.error).toHaveBeenCalledWith('Re-render failed: ffmpeg exploded')
+    expect(button('Split at playhead').disabled).toBe(true)
+    expect(document.querySelector('video')?.getAttribute('src')).toBe('/api/clips/clip-1/video')
   })
 
   it('does not count a caption edit as an unrendered segment change', async () => {

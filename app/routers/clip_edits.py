@@ -166,15 +166,23 @@ async def _clip_words(session: AsyncSession, clip: ClipRecord, clip_file: str) -
     if orchestrator.deleting(job_id) or orchestrator.job_active(job_id):
         log.info("clip %s: no words sidecar; its job is busy, not transcribed now", clip.id)
         return []
-    job = await session.get(JobRecord, job_id)
-    language = job.language if job is not None else None
-    # No connection or transaction is held while the clip is transcribed:
-    # the session is reopened by its next use (its loaded objects stay
-    # readable, detached).
-    await session.close()
-    # Counted as work on the job, so a job delete meanwhile answers 409.
+    # Counted as work on the job (so a job delete meanwhile answers 409), and
+    # claimed with no await since the check above: a job that starts or is
+    # deleted from here on finds the claim.
     orchestrator.claim_work(job_id)
     try:
+        job = await session.get(JobRecord, job_id)
+        language = job.language if job is not None else None
+        # No connection or transaction is held while the clip is transcribed:
+        # the session is reopened by its next use (its loaded objects stay
+        # readable, detached).
+        await session.close()
+        # A concurrent request may have written the sidecar while this one
+        # waited; the claim does not exclude it, so look again before paying
+        # for a transcription.
+        cached = await asyncio.to_thread(clip_words.read_clip_words, clip_file)
+        if cached is not None:
+            return clip_words.clip_window_words(cached, duration)
         words = await clip_words.backfill_clip_words(clip_file, duration=duration, language=language)
     finally:
         orchestrator.release_work(job_id)

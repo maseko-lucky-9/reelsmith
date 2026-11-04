@@ -286,3 +286,20 @@ def test_fetch_script_keeps_existing_files_without_network(tmp_path, monkeypatch
 
     monkeypatch.setattr(fetch_piper_voice.urllib.request, "urlopen", no_network)
     assert fetch_piper_voice.main(["--dest", str(tmp_path)]) == 0
+
+
+class TestPiperCommand:
+    def test_installed_package_wins_over_a_piper_on_path(self, monkeypatch):
+        monkeypatch.setattr(svc.importlib.util, "find_spec", lambda name: object())
+        monkeypatch.setattr(svc.shutil, "which", lambda name: "/usr/bin/piper")
+        assert svc.piper_command() == [svc.sys.executable, "-m", "piper"]
+
+    def test_falls_back_to_piper_on_path(self, monkeypatch):
+        monkeypatch.setattr(svc.importlib.util, "find_spec", lambda name: None)
+        monkeypatch.setattr(svc.shutil, "which", lambda name: "/usr/bin/piper")
+        assert svc.piper_command() == ["/usr/bin/piper"]
+
+    def test_none_when_neither(self, monkeypatch):
+        monkeypatch.setattr(svc.importlib.util, "find_spec", lambda name: None)
+        monkeypatch.setattr(svc.shutil, "which", lambda name: None)
+        assert svc.piper_command() is None

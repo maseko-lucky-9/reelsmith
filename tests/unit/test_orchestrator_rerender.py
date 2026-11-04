@@ -185,6 +185,8 @@ async def test_rerender_updates_same_clip_in_place(store, layout, render_calls):
     rendered = [e for e in recorder.events if e.type is EventType.CLIP_RENDERED]
     assert len(rendered) == 1
     assert rendered[0].payload["chapter_index"] == 1
+    # The editor matches the event to its clip by this id.
+    assert rendered[0].payload["clip_id"] == CLIP_ID
     assert EventType.THUMBNAIL_GENERATED in types
     assert not (layout["clips"] / "_tmp" / f"{JOB_ID}-rerender-{CLIP_ID[:8]}").exists()
 

@@ -178,12 +178,50 @@ export function ClipEditorPage() {
   const baselineKey = renderedKey ?? (loadedTimeline ? segmentsKey(loadedTimeline, sourceWindow) : null)
   const segmentsUnrendered = baselineKey !== null && segmentsKey(editor.timeline, sourceWindow) !== baselineKey
   const rerenderKeyRef = useRef<string | null>(null)
+  // Bumped when the clip's file is re-rendered: busts the preview's cache.
+  const [videoVersion, setVideoVersion] = useState(0)
+  const [rerenderError, setRerenderError] = useState<string | null>(null)
+
+  // A re-render of a completed job is reported on its live event stream
+  // (no replay: the job's old events are not for this page).
+  const clipJobId = clip?.job_id
+  useEffect(() => {
+    if (!clipJobId || typeof EventSource === 'undefined') return
+    const source = new EventSource(`/api/jobs/${clipJobId}/events?live=true`)
+    const payloadOf = (e: Event): Record<string, unknown> | null => {
+      try {
+        const parsed = JSON.parse((e as MessageEvent).data as string) as { payload?: Record<string, unknown> }
+        return parsed.payload && parsed.payload.clip_id === clipId ? parsed.payload : null
+      } catch {
+        return null
+      }
+    }
+    const onRendered = (e: Event) => {
+      if (!payloadOf(e)) return
+      if (rerenderKeyRef.current !== null) setRenderedKey(rerenderKeyRef.current)
+      setRerenderError(null)
+      setVideoVersion((v) => v + 1)
+      toast.success('Re-render finished')
+    }
+    const onFailed = (e: Event) => {
+      const payload = payloadOf(e)
+      if (!payload) return
+      const error = typeof payload.error === 'string' && payload.error ? payload.error : 'unknown error'
+      setRerenderError(`Re-render failed: ${error}`)
+      toast.error(`Re-render failed: ${error}`)
+    }
+    source.addEventListener('ClipRendered', onRendered)
+    source.addEventListener('ClipRerenderFailed', onFailed)
+    return () => source.close()
+  }, [clipJobId, clipId])
 
   const rerenderMutation = useMutation({
     mutationFn: () =>
       api.rerenderClip(clipId, { reframe_provider: 'letterbox', regenerate_copy: regenerateCopy }),
+    // 202 only means queued: the preview keeps playing the old cut until this
+    // clip's ClipRendered event arrives (below), so renderedKey is not advanced here.
     onSuccess: () => {
-      if (rerenderKeyRef.current !== null) setRenderedKey(rerenderKeyRef.current)
+      setRerenderError(null)
       toast.success('Re-render queued')
     },
     onError: (err) => {
@@ -447,10 +485,18 @@ export function ClipEditorPage() {
             <>
               <video
                 ref={videoRef}
-                src={`/api/clips/${clip.clip_id}/video`}
+                src={`/api/clips/${clip.clip_id}/video${videoVersion > 0 ? `?v=${videoVersion}` : ''}`}
                 className="max-h-full"
                 style={{ aspectRatio: '9/16' }}
               />
+              {rerenderError ? (
+                <p
+                  role="alert"
+                  className="absolute bottom-3 left-3 right-3 rounded bg-red-950/90 px-2 py-1 text-xs text-red-200 border border-red-500/40"
+                >
+                  {rerenderError}
+                </p>
+              ) : null}
               <span className="absolute top-3 left-3 text-[10px] px-2 py-0.5 rounded bg-black/70 text-white border border-white/20">
                 9:16
               </span>

@@ -344,7 +344,11 @@ _TERMINAL_TYPES = {
 
 
 @router.get("/{job_id}/events")
-async def stream_job_events(job_id: str, request: Request):
+async def stream_job_events(job_id: str, request: Request, live: bool = False):
+    """Stream a job's events. ``live=true`` skips the history replay and does
+    not end the stream on a terminal event: for a page that watches a
+    completed job for what happens to it later (a clip re-render), where the
+    replay would only hand it the old JobCompleted."""
     bus = request.app.state.event_bus
     store = request.app.state.job_store
 
@@ -354,13 +358,13 @@ async def stream_job_events(job_id: str, request: Request):
         raise HTTPException(status_code=404, detail=f"job not found: {job_id}") from e
 
     async def event_source():
-        async for event in bus.subscribe(job_id=job_id):
+        async for event in bus.subscribe(job_id=job_id, replay=not live):
             yield {
                 "event": event.type.value,
                 "id": event.event_id,
                 "data": json.dumps(event.to_dict()),
             }
-            if event.type in _TERMINAL_TYPES:
+            if not live and event.type in _TERMINAL_TYPES:
                 return
 
     return EventSourceResponse(event_source(), ping=settings.sse_keepalive_seconds)

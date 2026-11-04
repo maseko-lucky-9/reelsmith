@@ -326,3 +326,57 @@ async def test_saving_the_default_timeline_round_trips(downloads, make_client, t
     plan = await client.get(f"/api/clips/{clip_id}/edit/plan")
     assert plan.status_code == 200
     assert [c["text"] for c in plan.json()["captions"]] == ["we saw the", "sea"]
+
+
+async def test_concurrent_first_opens_transcribe_once(downloads, make_client, monkeypatch):
+    """The claim is taken right after the busy check, so a second open that
+    arrives while the first transcribes sees the job busy (no words yet)
+    instead of starting a second transcription."""
+    import asyncio
+
+    clip = _clip_file(downloads / "Talk-1234" / "clips")
+    client, clip_id, _ = await make_client(str(clip))
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls: list[str] = []
+
+    async def _slow(audio_path, *, language, audio_duration_s, repeatable=False):
+        calls.append(audio_path)
+        started.set()
+        await release.wait()
+        return [WordTiming("hi", 0.2, 0.5)]
+
+    monkeypatch.setattr(transcription_service, "transcribe_words_async", _slow)
+
+    first = asyncio.create_task(client.get(f"/api/clips/{clip_id}/edit"))
+    second = asyncio.create_task(client.get(f"/api/clips/{clip_id}/edit"))
+    await asyncio.wait_for(started.wait(), timeout=5)
+    await asyncio.sleep(0.2)  # the second request reaches its busy check
+    release.set()
+    responses = await asyncio.gather(first, second)
+
+    assert [r.status_code for r in responses] == [200, 200]
+    assert len(calls) == 1
+    assert sorted(len(r.json()["words"]) for r in responses) == [0, 1]
+
+
+async def test_sidecar_written_after_the_claim_is_not_transcribed_again(downloads, make_client, transcriber, monkeypatch):
+    """A concurrent request that already wrote the sidecar wins: it is re-read
+    after the claim, before any transcription."""
+    clip = _clip_file(downloads / "Talk-1234" / "clips")
+    fake = transcriber(RuntimeError("must not transcribe"))
+    client, clip_id, job_id = await make_client(str(clip))
+    real_claim = orchestrator.claim_work
+
+    def _claim_then_other_request_writes(job_id: str) -> None:
+        real_claim(job_id)
+        clip_words.write_clip_words(str(clip), [WordTiming(**w) for w in CLIP_WORDS])
+
+    monkeypatch.setattr(orchestrator, "claim_work", _claim_then_other_request_writes)
+
+    r = await client.get(f"/api/clips/{clip_id}/edit")
+
+    assert r.status_code == 200
+    assert r.json()["words"] == _approx(CLIP_WORDS)
+    assert fake.calls == []
+    assert not orchestrator.job_has_work(job_id)

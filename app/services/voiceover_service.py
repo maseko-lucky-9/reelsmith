@@ -254,13 +254,15 @@ def _config_path(model: Path) -> Path:
 
 
 def piper_command() -> list[str] | None:
-    """How to run Piper: the ``piper`` command on PATH, else this Python with
-    ``-m piper`` when the ``piper-tts`` package is installed, else None."""
+    """How to run Piper: this Python with ``-m piper`` when the ``piper-tts``
+    package (the pinned one) is installed, else a ``piper`` command on PATH,
+    else None. The package comes first: a ``piper`` on PATH can be any other
+    program of that name."""
+    if importlib.util.find_spec("piper") is not None:
+        return [sys.executable, "-m", "piper"]
     found = shutil.which("piper")
     if found:
         return [found]
-    if importlib.util.find_spec("piper") is not None:
-        return [sys.executable, "-m", "piper"]
     return None
 
 

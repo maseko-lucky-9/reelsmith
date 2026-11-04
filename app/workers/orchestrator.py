@@ -2359,6 +2359,9 @@ async def _process_chapter(
             job_id,
             chapter_index=index,
             output_path=output_path,
+            # Set when the render is of an existing clip (re-render, reprompt):
+            # the editor waits for its own clip's file to change.
+            **({"clip_id": clip_id} if clip_id else {}),
         )
     else:
         log.info("[%s] Chapter %d  skipping render (render=False)", job_id, index)
