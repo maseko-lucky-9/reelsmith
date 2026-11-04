@@ -51,8 +51,8 @@ def test_a_zero_gain_voiceover_never_ducks_the_source():
     argv = _argv(voiceovers=(VoiceOver("/clip/vo.wav", 0.5, 1.75, 0.0),))
     graph = _graph(argv)
     assert graph[-3:] == [
-        "[2:a]atrim=end=1.25,asetpts=PTS-STARTPTS,volume=0,adelay=delays=500:all=1[vo0]",
-        "[sa]apad=whole_dur=2.75[base]",
+        "[2:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,atrim=end=1.25,asetpts=PTS-STARTPTS,volume=0,adelay=delays=500:all=1[vo0]",
+        "[sa]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,apad=whole_dur=2.75[base]",
         "[base][vo0]amix=inputs=2:duration=first:normalize=0[a]",
     ]
 
@@ -61,9 +61,9 @@ def test_mixed_gains_duck_only_while_an_audible_voiceover_plays():
     argv = _argv(voiceovers=(VoiceOver("/clip/mute.wav", 0.0, 1.0, 0.0), VoiceOver("/clip/vo.wav", 2.0, 2.5, 1.0)))
     graph = _graph(argv)
     assert graph[-4:] == [
-        "[2:a]atrim=end=1,asetpts=PTS-STARTPTS,volume=0,adelay=delays=0:all=1[vo0]",
-        "[3:a]atrim=end=0.5,asetpts=PTS-STARTPTS,volume=1,adelay=delays=2000:all=1[vo1]",
-        "[sa]apad=whole_dur=2.75,volume=volume='if(between(t,2,2.5),0.25,1)':eval=frame[base]",
+        "[2:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,atrim=end=1,asetpts=PTS-STARTPTS,volume=0,adelay=delays=0:all=1[vo0]",
+        "[3:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,atrim=end=0.5,asetpts=PTS-STARTPTS,volume=1,adelay=delays=2000:all=1[vo1]",
+        "[sa]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,apad=whole_dur=2.75,volume=volume='if(between(t,2,2.5),0.25,1)':eval=frame[base]",
         "[base][vo0][vo1]amix=inputs=3:duration=first:normalize=0[a]",
     ]
 

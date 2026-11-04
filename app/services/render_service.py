@@ -88,8 +88,8 @@ segment is cut out with trim/atrim and the pieces are concatenated::
     [g0][h0][g1][h1] concat=n=N:v=1:a=1                     [in][sa]
     [bg][in] overlay ... [b] -> captions [c] -> overlays [oK] -> even crop [v]
 
-    [k:a] atrim=end=LEN, asetpts, volume=GAIN, adelay=MS:all=1  [voK]
-    [sa] apad=whole_dur=T, volume='if(between(t,..)+..,DUCK,1)' [base]
+    [k:a] MIXFMT, atrim=end=LEN, asetpts, volume=GAIN, adelay=MS:all=1  [voK]
+    [sa] MIXFMT, apad=whole_dur=T, volume='if(between(t,..)+..,DUCK,1)' [base]
     [base][vo0]... amix=inputs=..:duration=first:normalize=0    [a]
 
 * Segments must be in source order and must not overlap: the source is
@@ -547,6 +547,10 @@ def build_trim_argv(src: str, output_path: str, *, start: float, duration: float
 VOICEOVER_DUCK_VOLUME = 0.25
 """Source audio level (about -12 dB) while a voice-over plays."""
 _SILENCE = "anullsrc=r=48000:cl=stereo"
+# Every branch of a voice-over mix is brought to this format first: amix takes
+# its output format from the first input, so a 22.05 kHz mono voice-over used to
+# collapse the whole reel's audio to 22.05 kHz mono (and sum the stereo source).
+_MIX_FORMAT = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo"
 _SEGMENT_TOLERANCE = 1e-3
 """Float slack for segments touching each other or the render window."""
 
@@ -843,7 +847,7 @@ def build_plan_argv(
         for k, vo in enumerate(voiceovers):
             inputs += ["-protocol_whitelist", "file", "-i", vo.path]
             graph.append(
-                f"[{n_inputs}:a]atrim=end={t_(vo.end - vo.start)},asetpts=PTS-STARTPTS,"
+                f"[{n_inputs}:a]{_MIX_FORMAT},atrim=end={t_(vo.end - vo.start)},asetpts=PTS-STARTPTS,"
                 f"volume={_num(vo.gain, 3)},adelay=delays={round(vo.start * 1000)}:all=1[vo{k}]"
             )
             n_inputs += 1
@@ -851,7 +855,7 @@ def build_plan_argv(
         if use_source_audio:
             speaking = "+".join(f"between(t,{t_(vo.start)},{t_(vo.end)})" for vo in voiceovers if vo.gain > 0)
             duck = f",volume=volume='if({speaking},{_num(VOICEOVER_DUCK_VOLUME, 3)},1)':eval=frame" if speaking else ""
-            graph.append(f"[sa]apad=whole_dur={t_(total)}{duck}[base]")
+            graph.append(f"[sa]{_MIX_FORMAT},apad=whole_dur={t_(total)}{duck}[base]")
         else:
             graph.append(f"{_SILENCE},atrim=end={t_(total)}[base]")
         graph.append("[base]" + "".join(labels) + f"amix=inputs={1 + len(labels)}:duration=first:normalize=0[a]")
