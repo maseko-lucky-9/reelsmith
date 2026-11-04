@@ -15,24 +15,27 @@ vi.mock('@/api/client', () => ({
   },
 }))
 
-vi.mock('@/hooks/useTimelineEditor', () => ({
-  useTimelineEditor: () => ({
+vi.mock('@/editor/useClipEdit', () => ({
+  useClipEdit: () => ({
     timeline: { tracks: [] },
     version: 0,
+    isLoaded: true,
     isDirty: false,
     isSaving: false,
     saveError: null,
+    loadError: null,
     canUndo: false,
     canRedo: false,
-    setTimeline: vi.fn(),
+    setTimeline: vi.fn(() => ({ ok: true })),
     undo: vi.fn(),
     redo: vi.fn(),
     save: vi.fn(),
+    words: [],
+    applyServerState: vi.fn(),
+    loadedTimeline: null,
+    savedIsV1: false,
+    readOnly: null,
   }),
-}))
-
-vi.mock('@/components/editor/MultiTrackTimeline', () => ({
-  MultiTrackTimeline: () => null,
 }))
 
 import { api } from '@/api/client'

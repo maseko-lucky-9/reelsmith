@@ -321,6 +321,22 @@ describe("useClipEdit — reopening the editor", () => {
     expect(second.result.current.canUndo).toBe(false);
     expect(api.getClipEdit).toHaveBeenCalledTimes(1);
   });
+
+  it("clears the timeline store when the editor closes, so the next editor never shows this edit", async () => {
+    const first = setup();
+    await waitFor(() => expect(first.result.current.isLoaded).toBe(true));
+    act(() => {
+      first.result.current.setTimeline(tl("unsaved"));
+    });
+    first.unmount();
+
+    const store = useTimelineStore.getState();
+    expect(
+      store._tracks.flatMap((t) => t.elements).map((el) => el.name),
+    ).toEqual([]);
+    expect(store.history).toEqual([]);
+    expect(store.selectedElements).toEqual([]);
+  });
 });
 
 describe("canonicalJson", () => {

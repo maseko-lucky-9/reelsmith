@@ -177,8 +177,10 @@ export function useClipEdit(
   useEffect(
     () => () => {
       // Closing the editor forgets the edit: reopening it (or StrictMode's
-      // second mount) loads the saved edit afresh.
+      // second mount) loads the saved edit afresh, and the next editor never
+      // shows this one's tracks before its own edit arrives.
       useSavedEdit.setState(NOT_LOADED);
+      useTimelineStore.getState().clearTimeline();
     },
     [clipId],
   );

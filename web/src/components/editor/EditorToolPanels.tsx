@@ -25,6 +25,7 @@ import {
   type Segment,
   type SourceWindow,
 } from '@/lib/timelineEdit'
+import { STALE_PLAYHEAD_REASON } from '@/editor/renderedCut'
 
 const fmt = (n: number) => (Math.round(n * 100) / 100).toFixed(2)
 
@@ -262,16 +263,23 @@ interface TrimPanelProps extends TimelineProps {
   playhead: number
   sourceWindow: SourceWindow | null
   /**
-   * The segments differ from those the playing file was rendered from, so the
-   * playhead (the file's clock) is not a time on the edited reel.
+   * The playhead is not a time on the edited reel (the rendered file's clock
+   * while the segments differ from those it was rendered from), so Split at
+   * playhead is unavailable (the editor's split gate, `renderedCut.splitGate`).
    */
   playheadStale?: boolean
+  /** Why, shown on the disabled Split at playhead (default: the 016 re-render reason). */
+  playheadStaleReason?: string
 }
 
-const STALE_PLAYHEAD_TITLE =
-  'Re-render first: the preview does not play these segments, so the playhead does not match them. Split is unavailable until the clip is re-rendered with them.'
-
-export function TrimPanel({ timeline, onChange, playhead, sourceWindow, playheadStale = false }: TrimPanelProps) {
+export function TrimPanel({
+  timeline,
+  onChange,
+  playhead,
+  sourceWindow,
+  playheadStale = false,
+  playheadStaleReason = STALE_PLAYHEAD_REASON,
+}: TrimPanelProps) {
   const [error, setError] = useState<string | null>(null)
   const v2 = upgradeTimeline(timeline, sourceWindow)
   if (!v2) {
@@ -352,7 +360,7 @@ export function TrimPanel({ timeline, onChange, playhead, sourceWindow, playhead
           type="button"
           className={buttonClass}
           disabled={!split}
-          title={playheadStale ? STALE_PLAYHEAD_TITLE : undefined}
+          title={playheadStale ? playheadStaleReason : undefined}
           onClick={() => split && onChange(split)}
         >
           Split at playhead
