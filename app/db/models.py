@@ -15,6 +15,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -47,6 +48,17 @@ class JobRecord(Base):
     # Downloaded source video; kept so a single clip can be re-rendered.
     # NULL for jobs created before this column existed.
     video_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Job progress (T052). chapters_done is only ever incremented in SQL
+    # (SqlJobStore.increment_chapters_done), never written from a JobState.
+    chapters_total: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    chapters_done: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    # JobState fields without a column of their own (title, duration,
+    # current_step, folders, request options, ...). Empty for older rows.
+    state: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_now
     )
@@ -73,6 +85,8 @@ class ChapterRecord(Base):
     title: Mapped[str] = mapped_column(Text, nullable=False, default="")
     start_time: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     end_time: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    # One chapter's ChapterArtifacts. Empty for rows written before it existed.
+    artifacts: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     job: Mapped[JobRecord] = relationship("JobRecord", back_populates="chapters")
     clips: Mapped[list[ClipRecord]] = relationship(
@@ -124,10 +138,16 @@ class ClipRecord(Base):
     ai_hook_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     ai_hook_audio_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     broll_assets: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # The source cut the clip's file was last rendered from: [[start, end], ...]
+    # in source seconds. NULL = the clip's own window (never edited).
+    rendered_segments: Mapped[list | None] = mapped_column(JSON, nullable=True)
     caption_style: Mapped[str] = mapped_column(
         String(32), nullable=False, default="static"
     )
     captions_burnt_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # chapters | discovered | full_video; NULL = unknown (a clip stored before
+    # the column existed, a reprompt over an explicit time range). Never guessed.
+    segment_origin: Mapped[str | None] = mapped_column(String(16), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_now
     )

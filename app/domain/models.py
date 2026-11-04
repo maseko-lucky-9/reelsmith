@@ -4,7 +4,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-JobStatus = Literal["pending", "running", "completed", "failed"]
+# "cancelled": stopped by the user (POST /jobs/{id}/cancel), never by a shutdown.
+JobStatus = Literal["pending", "running", "completed", "failed", "cancelled"]
 
 
 class PipelineOptions(BaseModel):
@@ -75,6 +76,10 @@ class JobState(BaseModel):
     title: str | None = None
     duration: float | None = None
     chapters: dict[int, ChapterArtifacts] = Field(default_factory=dict)
+    # Job progress: chapters detected, and chapters that finished every
+    # stage. Only the initial run counts; a re-render or reprompt does not.
+    chapters_total: int = 0
+    chapters_done: int = 0
     output_paths: list[str] = Field(default_factory=list)
     error: str | None = None
     clips: dict[str, Any] = Field(default_factory=dict)

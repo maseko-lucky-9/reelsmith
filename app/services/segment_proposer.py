@@ -101,6 +101,22 @@ class ProposedSegment:
     # Full transcript of the window (``summary`` is cut at 200 characters);
     # clip discovery compares it across clips to skip near-duplicates.
     text: str = ""
+    # Set by the scene-search vision judge (spec 014): why the clip matches
+    # the prompt, and the dominant emotion on screen ("" when none).
+    reason: str = ""
+    emotion: str = ""
+    # Scene search (spec 014): the span inside the window that matched the
+    # prompt (at most 3 chunks around the best one) and what is said in it.
+    # The judge looks there, not at the whole clip window.
+    focus: tuple[float, float] | None = None
+    focus_text: str = ""
+    # A no-hit fallback of scene search: nothing cleared the bar, so it is a
+    # clip only if the judge looks at it and says it matches.
+    tentative: bool = False
+    # Scene search: the moment is closer to the prompt than any unrelated
+    # chunk or sentence measured, so it may be a clip when the judge cannot
+    # answer (``scene_search.NO_JUDGE_*``); every other one needs its yes.
+    strong: bool = False
 
     @property
     def virality_score(self) -> int:

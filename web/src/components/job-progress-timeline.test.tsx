@@ -27,6 +27,8 @@ const baseJob: JobState = {
   title: null,
   duration: null,
   chapters: {},
+  chapters_total: 0,
+  chapters_done: 0,
   output_paths: [],
   error: null,
   pipeline_options: {
@@ -125,6 +127,42 @@ describe('<JobProgressTimeline />', () => {
     // Gray dash icon has aria-label="skipped"
     const skippedIcons = screen.getAllByLabelText('skipped')
     expect(skippedIcons.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('main bar shows done, remaining and the finished share once chapters are known', () => {
+    const job: JobState = { ...baseJob, video_path: '/v/x.mp4', chapters_total: 10, chapters_done: 3 }
+    wrap(<JobProgressTimeline job={job} />)
+    expect(screen.getByText('3 of 10 chapters done · 7 remaining')).toBeTruthy()
+    expect(screen.getByText('30%')).toBeTruthy()
+    const bar = screen.getByRole('progressbar', { name: /job progress/i })
+    expect(bar.getAttribute('aria-valuenow')).toBe('30')
+    expect(bar.getAttribute('aria-valuetext')).toBe('3 of 10 chapters done · 7 remaining 30%')
+    expect((bar.firstElementChild as HTMLElement).style.width).toBe('30%')
+    expect(bar.firstElementChild!.className).toContain('bg-emerald-500')
+  })
+
+  it('main bar is indeterminate while downloading without a percent', () => {
+    wrap(<JobProgressTimeline job={baseJob} />)
+    expect(screen.getByText('Downloading source…')).toBeTruthy()
+    const bar = screen.getByRole('progressbar', { name: /job progress/i })
+    expect(bar.hasAttribute('aria-valuenow')).toBe(false)
+    expect(bar.getAttribute('aria-valuetext')).toBe('Downloading source…')
+    expect((bar.firstElementChild as HTMLElement).style.width).toBe('0%')
+  })
+
+  it('main bar turns red when the job failed', () => {
+    const job: JobState = { ...baseJob, status: 'failed', chapters_total: 10, chapters_done: 3 }
+    wrap(<JobProgressTimeline job={job} />)
+    expect(screen.getByText('Failed after 3 of 10 chapters')).toBeTruthy()
+    const bar = screen.getByRole('progressbar', { name: /job progress/i })
+    expect(bar.firstElementChild!.className).toContain('bg-red-500')
+    expect(bar.firstElementChild!.className).not.toContain('bg-emerald-500')
+  })
+
+  it('shows the chapter total on the detect-chapters row', () => {
+    const job: JobState = { ...baseJob, chapters_total: 10, chapters_done: 0 }
+    wrap(<JobProgressTimeline job={job} />)
+    expect(screen.getByText('Detect chapters (10)')).toBeTruthy()
   })
 
   it('live region announces skipped stages on mount', () => {

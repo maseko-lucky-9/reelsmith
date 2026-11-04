@@ -74,6 +74,7 @@ CLIENT_ROUTES: tuple[str, ...] = (
     "/team",
     "/analytics",
     "/share/$token",
+    "/sources/youtube",
 )
 
 # Fixed API GET paths that a ``$param`` above would capture. They are API

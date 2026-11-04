@@ -3,10 +3,14 @@ import { useQuery } from '@tanstack/react-query'
 import { Check, Loader2, XCircle, Circle, Minus } from 'lucide-react'
 import type { JobState } from '@/api/client'
 import {
+  deriveOverallProgress,
   deriveStageStates,
   describeActiveStage,
   describeSkippedStages,
+  sceneIndexLabel,
+  sceneIndexProgress,
   type DerivedStage,
+  type OverallProgress,
   type PipelineEvent,
 } from '@/lib/pipelineStages'
 
@@ -34,7 +38,14 @@ export function JobProgressTimeline({ job }: Props) {
     [job, eventsQuery.data],
   )
 
+  const overall = useMemo(
+    () => deriveOverallProgress(job, eventsQuery.data),
+    [job, eventsQuery.data],
+  )
+
   const announce = describeActiveStage(stages)
+  const scenes = sceneIndexProgress(eventsQuery.data)
+  const scenesLabel = scenes ? sceneIndexLabel(scenes) : null
 
   // One-shot skipped-stages announcement on initial mount
   const skippedAnnouncedRef = useRef(false)
@@ -47,9 +58,14 @@ export function JobProgressTimeline({ job }: Props) {
 
   return (
     <div className="rounded-xl border border-white/10 bg-[var(--card-bg,#1a1a1a)] p-4">
+      <OverallBar progress={overall} />
       <ol role="list" className="space-y-1">
         {stages.map((s) => (
-          <StageRow key={s.descriptor.id} stage={s} />
+          <StageRow
+            key={s.descriptor.id}
+            stage={s}
+            detail={s.descriptor.id === 'chapters' && s.state === 'active' ? scenesLabel : null}
+          />
         ))}
       </ol>
       {/* Visually hidden live region — announces stage transitions + skipped stages. */}
@@ -61,13 +77,41 @@ export function JobProgressTimeline({ job }: Props) {
   )
 }
 
-function StageRow({ stage }: { stage: DerivedStage }) {
+/** Plain div rather than ui/progress.tsx, which hard-wires its colours and injects a span. */
+function OverallBar({ progress }: { progress: OverallProgress }) {
+  const { label, percent, percentText, failed } = progress
+  return (
+    <div className="mb-3">
+      <div className="mb-1 flex items-baseline justify-between gap-3 text-sm">
+        <span className={failed ? 'text-red-300 font-medium' : 'text-zinc-200'}>{label}</span>
+        {percentText && <span className="text-zinc-400 tabular-nums">{percentText}</span>}
+      </div>
+      <div
+        role="progressbar"
+        aria-label="Job progress"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={percent ?? undefined}
+        aria-valuetext={percentText ? `${label} ${percentText}` : label}
+        className="h-2 w-full rounded-full bg-zinc-800 overflow-hidden"
+      >
+        <div
+          className={`h-full transition-all duration-300 ${failed ? 'bg-red-500' : 'bg-emerald-500'}`}
+          style={{ width: `${percent ?? 0}%` }}
+        />
+      </div>
+    </div>
+  )
+}
+
+function StageRow({ stage, detail = null }: { stage: DerivedStage; detail?: string | null }) {
   const { descriptor, state, done, total, error } = stage
   const isActive = state === 'active'
   const isDone = state === 'done'
   const isFailed = state === 'failed'
   const isSkipped = state === 'skipped'
   const isPerChapter = descriptor.perChapter && total !== null && total > 0
+  const label = descriptor.id === 'chapters' && total ? `${descriptor.label} (${total})` : descriptor.label
 
   const rowBg =
     isActive
@@ -117,7 +161,7 @@ function StageRow({ stage }: { stage: DerivedStage }) {
                       : 'text-zinc-500'
             }
           >
-            {descriptor.label}
+            {label}
           </span>
           {isPerChapter && !isSkipped && (
             <span className="text-xs text-zinc-500 tabular-nums">
@@ -129,6 +173,8 @@ function StageRow({ stage }: { stage: DerivedStage }) {
         {isSkipped && (
           <p className="mt-0.5 text-xs text-zinc-500">Skipped (per job options)</p>
         )}
+
+        {detail && <p className="mt-0.5 text-xs text-zinc-400 tabular-nums">{detail}</p>}
 
         {isPerChapter && !isSkipped && (
           <div className="mt-1 h-1 w-full rounded-full bg-zinc-800 overflow-hidden">

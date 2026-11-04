@@ -1,3 +1,10 @@
+/** The HTTP status of an error `apiFetch` rethrew as `Error("<status> <body>")`, or null. */
+export function apiErrorStatus(err: unknown): number | null {
+  if (!(err instanceof Error)) return null
+  const match = /^(\d{3})\s/.exec(err.message)
+  return match ? Number(match[1]) : null
+}
+
 /**
  * The `detail` string of a FastAPI error that `apiFetch` rethrew as
  * `Error("<status> <json body>")`, or null when there is none.

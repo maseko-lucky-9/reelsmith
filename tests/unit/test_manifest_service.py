@@ -97,8 +97,8 @@ def _broll(provider, asset_id, author, url, query="ocean"):
     }  # fmt: skip
 
 
-def test_broll_credits_column_is_last():
-    assert COLUMNS[-1] == "broll_credits"
+def test_broll_credits_column_keeps_its_place():
+    assert COLUMNS.index("broll_credits") == COLUMNS.index("job_id") + 1
 
 
 def test_each_broll_asset_is_credited(tmp_path):
@@ -137,3 +137,162 @@ def test_a_clip_without_broll_has_no_credits(tmp_path, assets):
 
     rows = _read_csv(str(tmp_path / "manifest.csv"))
     assert json.loads(rows[0]["broll_credits"]) == []
+
+
+# ── source column (spec 012) ──────────────────────────────────────────────────
+
+
+def test_columns_keep_their_order_with_new_ones_appended_last():
+    # n8n reads the manifest by header name; an existing column must never
+    # move, so a new one is appended.
+    assert COLUMNS == [
+        "filename", "title", "duration_seconds", "file_size_mb",
+        "description", "hashtags", "export_path", "thumbnail_path", "job_id",
+        "broll_credits", "source", "segment_origin", "source_url",
+    ]  # fmt: skip
+
+
+@pytest.mark.parametrize("source", ["youtube", "tiktok", "upload", "generate"])
+def test_source_is_written_on_every_row(tmp_path, source):
+    clips = [{"start": 0, "end": 5}, {"start": 5, "end": 9}]
+    write_manifest(clips, str(tmp_path), source=source)
+
+    rows = _read_csv(str(tmp_path / "manifest.csv"))
+    assert [r["source"] for r in rows] == [source, source]
+
+
+@pytest.mark.parametrize("source", [None, ""])
+def test_a_legacy_job_without_a_source_writes_an_empty_cell(tmp_path, source):
+    write_manifest([{"start": 0, "end": 5}], str(tmp_path), source=source)
+
+    rows = _read_csv(str(tmp_path / "manifest.csv"))
+    assert rows[0]["source"] == ""
+
+
+def test_source_defaults_to_an_empty_cell(tmp_path):
+    write_manifest([{"start": 0, "end": 5}], str(tmp_path))
+
+    rows = _read_csv(str(tmp_path / "manifest.csv"))
+    assert rows[0]["source"] == ""
+
+
+def test_source_leaves_the_other_columns_untouched(tmp_path):
+    clip = {"title": "My Clip", "job_id": "j1", "start": 0, "end": 10}
+    write_manifest([clip], str(tmp_path), source="tiktok")
+
+    rows = _read_csv(str(tmp_path / "manifest.csv"))
+    assert (rows[0]["title"], rows[0]["job_id"], rows[0]["duration_seconds"]) == (
+        "My Clip", "j1", "10",
+    )  # fmt: skip
+
+
+# ── segment_origin + source_url (publisher: YouTube with chapters only) ───────
+
+
+def _header_line(tmp_path) -> str:
+    return (tmp_path / "manifest.csv").read_text(encoding="utf-8").splitlines()[0]
+
+
+def test_the_header_row_is_the_columns_in_order(tmp_path):
+    write_manifest([], str(tmp_path), source="youtube", source_url="https://y")
+
+    assert _header_line(tmp_path) == ",".join(COLUMNS)
+    assert _header_line(tmp_path).endswith(",source,segment_origin,source_url")
+
+
+@pytest.mark.parametrize("origin", ["chapters", "discovered", "full_video"])
+def test_each_clips_segment_origin_is_written(tmp_path, origin):
+    write_manifest([{"start": 0, "end": 5, "segment_origin": origin}], str(tmp_path))
+
+    rows = _read_csv(str(tmp_path / "manifest.csv"))
+    assert rows[0]["segment_origin"] == origin
+
+
+def test_origins_are_per_clip_not_per_job(tmp_path):
+    clips = [
+        {"start": 0, "end": 5, "segment_origin": "chapters"},
+        {"start": 5, "end": 9, "segment_origin": "discovered"},
+        {"start": 9, "end": 12, "segment_origin": "full_video"},
+        {"start": 12, "end": 15},
+    ]
+    write_manifest(clips, str(tmp_path), source="youtube")
+
+    rows = _read_csv(str(tmp_path / "manifest.csv"))
+    assert [r["segment_origin"] for r in rows] == [
+        "chapters", "discovered", "full_video", "",
+    ]  # fmt: skip
+
+
+@pytest.mark.parametrize("origin", [None, "", "Chapters", "manual", 3, ["chapters"]])
+def test_an_unknown_origin_is_an_empty_cell_never_a_guess(tmp_path, origin):
+    write_manifest([{"start": 0, "end": 5, "segment_origin": origin}], str(tmp_path))
+
+    rows = _read_csv(str(tmp_path / "manifest.csv"))
+    assert rows[0]["segment_origin"] == ""
+
+
+def test_a_clip_without_the_key_is_legacy_and_empty(tmp_path):
+    write_manifest([{"start": 0, "end": 5}], str(tmp_path), source="youtube")
+
+    rows = _read_csv(str(tmp_path / "manifest.csv"))
+    assert rows[0]["segment_origin"] == ""
+
+
+def test_a_non_youtube_source_keeps_its_source_beside_the_origin(tmp_path):
+    clip = {"start": 0, "end": 5, "segment_origin": "chapters"}
+    write_manifest([clip], str(tmp_path), source="tiktok", source_url="https://tt/v/1")
+
+    rows = _read_csv(str(tmp_path / "manifest.csv"))
+    assert (rows[0]["source"], rows[0]["segment_origin"]) == ("tiktok", "chapters")
+
+
+def test_source_url_is_written_on_every_row(tmp_path):
+    url = "https://www.youtube.com/watch?v=abc"
+    write_manifest(
+        [{"start": 0, "end": 5}, {"start": 5, "end": 9}],
+        str(tmp_path),
+        source_url=url,
+    )
+
+    rows = _read_csv(str(tmp_path / "manifest.csv"))
+    assert [r["source_url"] for r in rows] == [url, url]
+
+
+def test_an_upload_url_is_written_as_is(tmp_path):
+    write_manifest([{"start": 0, "end": 5}], str(tmp_path), source_url="upload://a b.mp4")
+
+    rows = _read_csv(str(tmp_path / "manifest.csv"))
+    assert rows[0]["source_url"] == "upload://a b.mp4"
+
+
+@pytest.mark.parametrize("url", [None, ""])
+def test_no_source_url_is_an_empty_cell(tmp_path, url):
+    write_manifest([{"start": 0, "end": 5}], str(tmp_path), source_url=url)
+
+    rows = _read_csv(str(tmp_path / "manifest.csv"))
+    assert rows[0]["source_url"] == ""
+
+
+def test_a_url_with_commas_and_quotes_round_trips(tmp_path):
+    url = 'https://example.com/v?a=1,2&t="x"'
+    write_manifest(
+        [{"title": "T", "start": 0, "end": 5, "segment_origin": "chapters"}],
+        str(tmp_path),
+        source="youtube",
+        source_url=url,
+    )
+
+    rows = _read_csv(str(tmp_path / "manifest.csv"))
+    assert len(rows) == 1
+    assert rows[0]["source_url"] == url
+    assert (rows[0]["source"], rows[0]["segment_origin"]) == ("youtube", "chapters")
+
+
+def test_old_callers_without_the_new_arguments_still_work(tmp_path):
+    # Positional (clips, export_dir, source) and the two-argument form.
+    write_manifest([{"title": "T", "start": 0, "end": 5}], str(tmp_path), "youtube")
+
+    rows = _read_csv(str(tmp_path / "manifest.csv"))
+    assert (rows[0]["source"], rows[0]["segment_origin"], rows[0]["source_url"]) == (
+        "youtube", "", "",
+    )  # fmt: skip

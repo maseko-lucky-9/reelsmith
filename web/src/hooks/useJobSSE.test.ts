@@ -18,6 +18,7 @@ class FakeEventSource {
   url: string
   closed = false
   onmessage: Listener | null = null
+  onopen: (() => void) | null = null
   onerror: (() => void) | null = null
   private listeners: Record<string, Listener[]> = {}
 
@@ -46,6 +47,9 @@ class FakeEventSource {
     const e = { type: 'message', data: JSON.stringify(data), lastEventId: '' } as MessageEvent
     this.onmessage?.(e)
     this.listeners.message?.forEach((fn) => fn(e))
+  }
+  open() {
+    this.onopen?.()
   }
   fail() {
     this.onerror?.()
@@ -128,6 +132,20 @@ describe('useJobSSE — connection', () => {
     expect(FakeEventSource.instances.length).toBe(0)
   })
 
+  it('every (re)connect refetches the job and its clips, even if the stream stays silent', () => {
+    const { invalidate } = setup(JOB)
+    act(() => latestEs().open())
+    expect(invalidatedKeys(invalidate)).toEqual([['job', JOB], ['clips', JOB]])
+
+    act(() => latestEs().fail())
+    act(() => {
+      vi.advanceTimersByTime(5000)
+    })
+    invalidate.mockClear()
+    act(() => latestEs().open())
+    expect(invalidatedKeys(invalidate)).toEqual([['job', JOB], ['clips', JOB]])
+  })
+
   it('registers a named-event listener for EVERY known backend event type', () => {
     setup(JOB)
     const types = new Set(latestEs().listenerTypes())
@@ -165,6 +183,15 @@ describe('useJobSSE — named events (real browser delivery)', () => {
     for (const k of keys) {
       expect([JSON.stringify(['job', JOB]), JSON.stringify(['clips', JOB])]).toContain(JSON.stringify(k))
     }
+  })
+
+  it('DownloadProgress updates the events cache without refetching the job', () => {
+    const { qc, invalidate } = setup(JOB)
+    act(() => emit(latestEs(), 'DownloadProgress', 'ev-1', { percent: 42 }))
+    flush()
+
+    expect(qc.getQueryData<PipelineEvent[]>(['job-events', JOB])).toHaveLength(1)
+    expect(invalidatedKeys(invalidate)).not.toContainEqual(['job', JOB])
   })
 
   it('coalesces a burst of events (history replay) into one invalidation per key', () => {
@@ -248,6 +275,22 @@ describe('useJobSSE — SSE failure fallback', () => {
     expect(keys).toContainEqual(['job', JOB])
     expect(keys).toContainEqual(['clips', JOB])
     expect(keys).not.toContainEqual(['jobs'])
+  })
+
+  it('a successful open restarts the failure count, so it keeps streaming instead of polling', () => {
+    setup(JOB)
+    for (let i = 0; i < 2; i++) {
+      act(() => latestEs().fail())
+      act(() => {
+        vi.advanceTimersByTime(10_000)
+      })
+    }
+    act(() => latestEs().open())
+    act(() => latestEs().fail())
+    act(() => {
+      vi.advanceTimersByTime(10_000)
+    })
+    expect(FakeEventSource.instances.length).toBe(4)
   })
 
   it('stops the fallback poll when the job becomes terminal (enabled → false)', () => {

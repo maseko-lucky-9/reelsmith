@@ -17,6 +17,23 @@ def test_defaults_to_the_local_docker_compose_database():
     assert "@localhost:5432/" in DEFAULT_TEST_DB_URL
 
 
+def test_default_is_a_separate_test_database_not_the_app_database():
+    """The app's Postgres is ``reelsmith``; the TRUNCATE fixture must not use it."""
+    assert DEFAULT_TEST_DB_URL.endswith("/reelsmith_test")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql+asyncpg://reelsmith:reelsmith@localhost:5432/reelsmith",
+        "postgresql+asyncpg://reelsmith:reelsmith@127.0.0.1:55432/jobs",
+    ],
+)
+def test_refuses_a_database_not_named_for_tests(url):
+    with pytest.raises(UnsafeTestDatabaseError, match="_test"):
+        resolve_test_db_url({"YTVIDEO_TEST_DB_URL": url})
+
+
 def test_ignores_the_app_database_url():
     """YTVIDEO_DB_URL may point at a real database (e.g. from .env)."""
     environ = {"YTVIDEO_DB_URL": "postgresql+asyncpg://u:p@prod.example.com/reelsmith"}
@@ -26,7 +43,7 @@ def test_ignores_the_app_database_url():
 
 @pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "[::1]"])
 def test_accepts_a_local_test_database_override(host):
-    url = f"postgresql+asyncpg://reelsmith:reelsmith@{host}:55432/reelsmith"
+    url = f"postgresql+asyncpg://reelsmith:reelsmith@{host}:55432/reelsmith_test"
 
     assert resolve_test_db_url({"YTVIDEO_TEST_DB_URL": url}) == url
 
