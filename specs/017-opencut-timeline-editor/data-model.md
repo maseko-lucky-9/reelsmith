@@ -15,6 +15,8 @@ No database change: `clip_edits.timeline` stays the JSON column of ADR-014, `cli
 | Reel length | at most 20 minutes (`MAX_OUTPUT_SECONDS`) |
 | Reel-clock items | must not end past the reel's end (+1 ms, `TIME_TOLERANCE`) |
 | Text per caption or overlay | at most 500 characters (`MAX_TEXT_CHARS`) |
+| Words per caption | at most 100 (`MAX_CAPTION_WORDS`, its text split on whitespace); at most 5000 across all captions (`MAX_TIMELINE_CAPTION_WORDS`) |
+| Overlay text in all | at most 5000 characters across all text overlays (`MAX_TIMELINE_OVERLAY_CHARS`) |
 | Overlay line breaks | at most 10 (`MAX_OVERLAY_LINES`) |
 | Overlay `font_size` | integer in [6, 400] (`FONT_SIZE_RANGE`), default 36 |
 | Overlay `x`, `y` | fractions of the canvas, centre of the text; defaults 0.5 and 0.1 |

@@ -52,6 +52,11 @@ export const HISTORY_LIMIT = 50;
 const MAX_TEXT_CHARS = 500;
 const MAX_OVERLAY_LINES = 10;
 const MAX_COLOR_CHARS = 32;
+/** Words in one caption's text (server MAX_CAPTION_WORDS) and in all captions (MAX_TIMELINE_CAPTION_WORDS). */
+const MAX_CAPTION_WORDS = 100;
+const MAX_TIMELINE_CAPTION_WORDS = 5000;
+/** Characters in all text overlays (server MAX_TIMELINE_OVERLAY_CHARS). */
+const MAX_TIMELINE_OVERLAY_CHARS = 5000;
 const EPS = 1e-9;
 
 export type EditResult = { ok: true } | { ok: false; reason: string };
@@ -84,6 +89,9 @@ const refuse = (reason: string): { ok: false; reason: string } => ({
   reason,
 });
 const round3 = (n: number) => Math.round(n * 1000) / 1000;
+/** The server's word count (Python's `str.split()`: runs of whitespace). */
+const wordCount = (text: string) =>
+  text.split(/\s+/).filter((w) => w.length > 0).length;
 const visibleLength = (el: EditorElement) =>
   el.duration - el.trimStart - el.trimEnd;
 const clamp = (n: number, lo: number, hi: number) =>
@@ -109,6 +117,9 @@ const REFUSALS = {
   textLength: `At most ${MAX_TEXT_CHARS} characters.`,
   lineBreaks: `At most ${MAX_OVERLAY_LINES} line breaks.`,
   color: `A colour is at most ${MAX_COLOR_CHARS} characters.`,
+  captionWords: `A caption holds at most ${MAX_CAPTION_WORDS} words.`,
+  captionWordsTotal: `The captions hold at most ${MAX_TIMELINE_CAPTION_WORDS} words in all.`,
+  overlayCharsTotal: `The text overlays hold at most ${MAX_TIMELINE_OVERLAY_CHARS} characters in all.`,
   notFound: "That item is no longer on the timeline.",
   serverVoiceover:
     "Voice-overs are made on the server: use the Voice-over panel.",
@@ -445,6 +456,27 @@ export const useTimelineStore = create<TimelineStore>((set, get) => {
         (content.match(/\n/g) ?? []).length > MAX_OVERLAY_LINES
       ) {
         return refuse(REFUSALS.lineBreaks);
+      }
+      // The timeline's totals: every other item of the role, plus this one's new text.
+      const others = get()
+        ._tracks.filter((t) => t.role === el.role)
+        .flatMap((t) => t.elements)
+        .filter((other) => other.id !== el.id && other.type === "text");
+      const textOf = (other: EditorElement) =>
+        other.type === "text" ? other.content : "";
+      if (el.role === "captions") {
+        const words = wordCount(content);
+        if (words > MAX_CAPTION_WORDS) return refuse(REFUSALS.captionWords);
+        const total = others.reduce((n, o) => n + wordCount(textOf(o)), words);
+        if (total > MAX_TIMELINE_CAPTION_WORDS)
+          return refuse(REFUSALS.captionWordsTotal);
+      } else {
+        const total = others.reduce(
+          (n, o) => n + textOf(o).length,
+          content.length,
+        );
+        if (total > MAX_TIMELINE_OVERLAY_CHARS)
+          return refuse(REFUSALS.overlayCharsTotal);
       }
     }
     if (updates.color !== undefined && updates.color.length > MAX_COLOR_CHARS) {

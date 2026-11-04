@@ -524,6 +524,113 @@ describe("overlays, voice-overs and captions (FR-009)", () => {
     });
   });
 
+  describe("the server's text caps (data-model §1, PR #97 review should-fix 3)", () => {
+    const words = (n: number, w = "a") => Array(n).fill(w).join(" ");
+    const reel = { kind: "video" as const, items: [{ start: 0, end: 60 }] };
+
+    it("refuses a caption of more than 100 words, with the reason, and takes 100", () => {
+      load(SINGLE);
+      const id = elementOf("captions", 0).id;
+      const before = store().toTimeline();
+      const refused = store().updateTextElement(trackOf("captions").id, id, {
+        content: words(101),
+      });
+      expect(refused).toEqual({
+        ok: false,
+        reason: expect.stringMatching(/at most 100 words/),
+      });
+      expect(store().toTimeline()).toStrictEqual(before);
+      expect(
+        store().updateTextElement(trackOf("captions").id, id, {
+          content: ` ${words(100)}\n`,
+        }).ok,
+      ).toBe(true);
+    });
+
+    it("refuses caption text past 5000 words in all", () => {
+      // 51 captions of 98 words: 4998.
+      const items = Array.from({ length: 51 }, (_, i) => ({
+        start: i,
+        end: i + 0.5,
+        text: words(98),
+        words: [],
+      }));
+      load({ schema_version: 2, tracks: [reel, { kind: "caption", items }] });
+      const track = trackOf("captions").id;
+      expect(
+        store().updateTextElement(track, elementOf("captions", 0).id, {
+          content: words(100),
+        }).ok,
+      ).toBe(true);
+      const refused = store().updateTextElement(
+        track,
+        elementOf("captions", 1).id,
+        { content: words(99) },
+      );
+      expect(refused).toEqual({
+        ok: false,
+        reason: expect.stringMatching(/5000 words/),
+      });
+    });
+
+    it("refuses overlay text past 5000 characters in all, on an edit and on a new overlay", () => {
+      // 11 overlays of 450 characters: 4950.
+      const items = Array.from({ length: 11 }, (_, i) => ({
+        start: i,
+        end: i + 0.5,
+        text: "x".repeat(450),
+        x: 0.5,
+        y: 0.5,
+      }));
+      load({
+        schema_version: 2,
+        tracks: [reel, { kind: "text-overlay", items }],
+      });
+      const track = trackOf("overlays").id;
+      expect(
+        store().updateTextElement(track, elementOf("overlays", 0).id, {
+          content: "x".repeat(500),
+        }).ok,
+      ).toBe(true);
+      const refused = store().updateTextElement(
+        track,
+        elementOf("overlays", 1).id,
+        { content: "x".repeat(451) },
+      );
+      expect(refused).toEqual({
+        ok: false,
+        reason: expect.stringMatching(/5000 characters/),
+      });
+      // A new overlay (no id yet): OpenCut's text element with one character.
+      const added = store().addElementToTrack(track, {
+        type: "text",
+        name: "Text",
+        content: "y",
+        startTime: 20,
+        duration: 1,
+        trimStart: 0,
+        trimEnd: 0,
+        fontSize: 36,
+        fontFamily: "Arial",
+        color: "#ffffff",
+        backgroundColor: "transparent",
+        textAlign: "center",
+        fontWeight: "normal",
+        fontStyle: "normal",
+        textDecoration: "none",
+        x: 0,
+        y: 0,
+        rotation: 0,
+        opacity: 1,
+      });
+      expect(added).toEqual({
+        ok: false,
+        reason: expect.stringMatching(/5000 characters/),
+      });
+      expect(trackOf("overlays").elements).toHaveLength(11);
+    });
+  });
+
   it("deletes a caption (a click selects, Delete removes)", () => {
     load(SINGLE);
     store().selectElement(trackOf("captions").id, elementOf("captions", 0).id);
