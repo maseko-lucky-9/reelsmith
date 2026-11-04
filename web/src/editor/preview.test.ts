@@ -9,6 +9,7 @@ import cases from "./reel-geometry-cases.json";
 import {
   activeWordIndex,
   captionWords,
+  continueAt,
   nextBoundary,
   reelTimeAt,
   segmentIndexAt,
@@ -71,6 +72,23 @@ describe("previewClock", () => {
     expect(reelTimeAt(SEGMENTS, 16)).toBeNull();
     expect(reelTimeAt(SEGMENTS, 5)).toBeNull();
     expect(reelTimeAt(SEGMENTS, 26)).toBeNull();
+  });
+
+  it("continues a video that left its segment at the next segment's start", () => {
+    expect(continueAt(SEGMENTS, 12)).toBe(12);
+    expect(continueAt(SEGMENTS, 14)).toBe(20);
+    expect(continueAt(SEGMENTS, 16)).toBe(20);
+    expect(continueAt(SEGMENTS, 5)).toBe(10);
+    expect(continueAt(SEGMENTS, 25.5)).toBeNull();
+  });
+
+  it("plays through where a split's two halves meet", () => {
+    const split = [
+      { start: 10, end: 12 },
+      { start: 12, end: 14 },
+    ];
+    expect(continueAt(split, 12)).toBe(12);
+    expect(continueAt(split, 14)).toBe(14);
   });
 });
 

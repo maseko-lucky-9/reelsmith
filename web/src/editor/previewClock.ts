@@ -110,6 +110,21 @@ export function reelTimeAt(
   return p ? p.reel + Math.min(Math.max(s - p.start, 0), p.len) : null;
 }
 
+/**
+ * Where a video at source time `s` should be for the edit: `s` itself inside
+ * a segment (also where a split's two halves meet); the next segment's start
+ * once it reached a segment's end before a cut part, or sits in a cut part
+ * (before the first segment, between two); null past the last segment.
+ */
+export function continueAt(
+  segments: readonly Segment[],
+  s: number,
+): number | null {
+  const reel = reelTimeAt(segments, s);
+  if (reel !== null) return sourceTimeAt(segments, reel);
+  return segments.find((seg) => seg.start > s)?.start ?? null;
+}
+
 export interface CaptionWord {
   text: string;
   start: number;
