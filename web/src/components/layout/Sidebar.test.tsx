@@ -4,8 +4,8 @@ import { createElement, type ReactNode } from 'react'
 
 vi.mock('@tanstack/react-router', () => ({
   useRouterState: () => ({ location: { pathname: '/' } }),
-  Link: ({ to, children }: { to: string; children: ReactNode }) =>
-    createElement('a', { href: to }, children),
+  Link: ({ to, children, onClick }: { to: string; children: ReactNode; onClick?: () => void }) =>
+    createElement('a', { href: to, onClick }, children),
 }))
 
 import { Sidebar } from './Sidebar'
@@ -24,7 +24,7 @@ describe('Sidebar — only advertises pages that have a backend', () => {
     render(<Sidebar />)
     const hrefs = screen.getAllByRole('link').map((a) => a.getAttribute('href'))
     expect(hrefs).toEqual(
-      expect.arrayContaining(['/', '/generate/new', '/settings/brand', '/settings/social']),
+      expect.arrayContaining(['/', '/generate/new', '/sources/youtube', '/settings/brand', '/settings/social']),
     )
   })
 })
@@ -107,5 +107,29 @@ describe('Sidebar — responsive', () => {
     expect(localStorage.getItem('sidebar-expanded')).toBe('false')
     expect(aside().style.width).toBe('48px')
   })
-})
 
+  it('closes the drawer when the current page nav item is tapped', () => {
+    stubViewport(true)
+    render(<Sidebar />)
+    fireEvent.click(toggle())
+    fireEvent.click(screen.getByText('Home'))
+    expect(screen.queryByTestId('sidebar-backdrop')).toBeNull()
+  })
+
+  it('closes the drawer on Escape', () => {
+    stubViewport(true)
+    render(<Sidebar />)
+    fireEvent.click(toggle())
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByTestId('sidebar-backdrop')).toBeNull()
+  })
+
+  it('exposes the toggle state and the controlled element', () => {
+    stubViewport(true)
+    render(<Sidebar />)
+    expect(toggle().getAttribute('aria-expanded')).toBe('false')
+    expect(toggle().getAttribute('aria-controls')).toBe(aside().id)
+    fireEvent.click(toggle())
+    expect(toggle().getAttribute('aria-expanded')).toBe('true')
+  })
+})

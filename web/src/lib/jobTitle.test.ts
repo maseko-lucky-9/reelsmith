@@ -38,6 +38,7 @@ describe('jobStatusLabel', () => {
     ['running', 'Processing…'],
     ['completed', 'Completed'],
     ['failed', 'Failed'],
+    ['cancelled', 'Cancelled'],
   ] as const)('%s -> %s', (status, label) => {
     expect(jobStatusLabel(status)).toBe(label)
   })

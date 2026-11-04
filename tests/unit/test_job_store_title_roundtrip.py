@@ -1,9 +1,8 @@
 """JobState.title and .duration survive a store round trip on both stores.
 
-The orchestrator sets them after the download. The SQL store only copied a
-fixed list of fields back to the row, so with the default ``sql`` store they
-were always ``None`` on the next read and the job page showed "Loading title…"
-forever (``jobs.title`` / ``jobs.duration``).
+The orchestrator sets them after the download. They persist in the ``jobs.state``
+JSON (``_STATE_FIELDS``); a regression there left them ``None`` on the next
+read and the job page showed "Loading title…" forever.
 """
 
 from __future__ import annotations

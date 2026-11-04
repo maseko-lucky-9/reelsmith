@@ -331,3 +331,33 @@ async def test_cancelled_call_that_raises_logs_no_asyncio_error(caplog):
         await asyncio.sleep(0.05)  # let the futures' done-callbacks run
 
     assert "exception in shielded future" not in caplog.text
+
+
+async def test_to_thread_cancellable_waits_for_its_worker_through_repeated_cancels():
+    """A further cancel during the wait for the worker (a user cancel after a
+    timeout's, a second click) must not cut it: the task ends cancelled, but
+    only after the worker has returned (spec 013)."""
+    started, finished = threading.Event(), threading.Event()
+
+    def _slow_to_stop() -> None:
+        started.set()
+        event = ffmpeg_tools.current_cancel_event()
+        while not event.is_set():
+            time.sleep(0.01)
+        time.sleep(0.3)
+        finished.set()
+
+    task = asyncio.create_task(ffmpeg_tools.to_thread_cancellable(_slow_to_stop))
+    await asyncio.to_thread(started.wait, 5)
+
+    task.cancel()
+    await asyncio.sleep(0.05)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    task.cancel()
+    await asyncio.sleep(0.05)
+
+    assert not task.done(), "a repeated cancel cut the wait for the worker"
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert finished.is_set()

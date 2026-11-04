@@ -159,3 +159,23 @@ async def test_download_progress_reaches_live_subscribers_but_is_not_replayed():
 
     assert received == [progress, downloaded]
     assert await _replayed(bus, "j1") == [downloaded]
+
+
+async def test_subscribe_without_replay_gets_only_later_events():
+    """The live SSE stream of a completed job must not be handed its old history."""
+    bus = AsyncEventBus()
+    await bus.publish(Event(type=EventType.JOB_COMPLETED, job_id="j1"))
+    received: list[Event] = []
+
+    async def consume():
+        async for event in bus.subscribe(job_id="j1", replay=False):
+            received.append(event)
+            return
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0)
+    later = Event(type=EventType.CLIP_RENDERED, job_id="j1")
+    await bus.publish(later)
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert received == [later]

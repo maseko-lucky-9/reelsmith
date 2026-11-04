@@ -9,6 +9,7 @@ from typing import Any
 
 from yt_dlp import YoutubeDL
 from yt_dlp.postprocessor import PostProcessor
+from yt_dlp.utils import DownloadCancelled
 
 import app.logging_config  # noqa: F401
 from app.services import ffmpeg_tools
@@ -17,7 +18,14 @@ from app.services.platforms.base import DownloadResult
 log = logging.getLogger(__name__)
 
 
-_DEFAULT_FORMAT = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+# H.264 first: the old pick was whichever codec had the highest bitrate (VP9 or
+# AV1), and libaom decodes 1080p AV1 ~10x slower than H.264. The reel canvas is
+# 1080 wide, so avc1's 1080p ceiling costs nothing; videos without H.264 fall
+# through to the old chain.
+_DEFAULT_FORMAT = (
+    "bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]"
+    "/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+)
 
 # Called with the overall download percent (0-100) each time it rises. Set by
 # the caller around the download; ``asyncio.to_thread`` copies the context,
@@ -25,6 +33,22 @@ _DEFAULT_FORMAT = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
 download_progress: ContextVar[Callable[[int], None] | None] = ContextVar(
     "download_progress", default=None
 )
+
+# Polled on each progress tick; once it returns True the download is aborted
+# with yt-dlp's ``DownloadCancelled`` (a raising progress hook is how yt-dlp
+# lets a caller stop it). Set by the orchestrator's download thread, so a
+# cancelled job's thread does not keep downloading (spec 013).
+download_stop: ContextVar[Callable[[], bool] | None] = ContextVar(
+    "download_stop", default=None
+)
+
+
+def _stop_hook(should_stop: Callable[[], bool]) -> Callable[[dict[str, Any]], None]:
+    def _hook(status: dict[str, Any]) -> None:
+        if should_stop():
+            raise DownloadCancelled("the job was cancelled")
+
+    return _hook
 
 
 class DownloadTracker:
@@ -154,15 +178,22 @@ def yt_dlp_download(
     """Download `url` into `destination_folder` via yt-dlp.
 
     Reports the overall percent to the ``download_progress`` callback, if one
-    is set.
+    is set, and aborts when the ``download_stop`` check, if one is set, turns
+    True.
+
+    Raises:
+        DownloadCancelled: ``download_stop`` turned True during the download.
     """
     ydl_opts = build_ydl_opts(
         destination_folder, format_string=format_string, extra_opts=extra_opts
     )
     on_percent = download_progress.get()
+    should_stop = download_stop.get()
 
     log.info("[%s] yt-dlp download  url=%s  dest=%s", source, url, destination_folder)
     with YoutubeDL(ydl_opts) as ydl:
+        if should_stop is not None:
+            ydl.add_progress_hook(_stop_hook(should_stop))
         if on_percent is not None:
             tracker = DownloadTracker(on_percent)
             ydl.add_progress_hook(tracker.progress_hook)

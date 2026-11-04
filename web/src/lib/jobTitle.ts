@@ -7,6 +7,7 @@ const STATUS_LABELS: Record<JobState['status'], string> = {
   running: 'Processing…',
   completed: 'Completed',
   failed: 'Failed',
+  cancelled: 'Cancelled',
 }
 
 /**

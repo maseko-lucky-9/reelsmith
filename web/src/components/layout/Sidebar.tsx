@@ -5,6 +5,7 @@ import {
   Sparkles,
   LayoutTemplate,
   FolderOpen,
+  Search,
   Share2,
   ChevronLeft,
   ChevronRight,
@@ -26,6 +27,7 @@ interface NavItem {
 const CREATE_ITEMS: NavItem[] = [
   { label: 'Home', icon: Home, to: '/' },
   { label: 'Generate', icon: Sparkles, to: '/generate/new' },
+  { label: 'Search YouTube', icon: Search, to: '/sources/youtube' },
   { label: 'Brand template', icon: LayoutTemplate, to: '/settings/brand' },
   { label: 'Asset library', icon: FolderOpen, to: '/', placeholder: true },
 ]
@@ -34,6 +36,8 @@ const POST_ITEMS: NavItem[] = [
   // hidden: no backend, see specs roadmap (Analytics -> /analytics)
   { label: 'Social accounts', icon: Share2, to: '/settings/social' },
 ]
+
+const SIDEBAR_ID = 'app-sidebar'
 
 export function Sidebar() {
   const [expanded, setExpanded] = useState(() => {
@@ -65,6 +69,15 @@ export function Sidebar() {
     } catch {}
   }, [expanded])
 
+  useEffect(() => {
+    if (!overlay) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setDrawerOpen(false)
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [overlay])
+
   function isActive(to: string) {
     if (to === '/' || to === '#') return pathname === to
     return pathname.startsWith(to)
@@ -82,6 +95,7 @@ export function Sidebar() {
       {/* Keeps the page where the icon rail was while the drawer floats over it. */}
       {overlay && <div className="w-12 flex-shrink-0" aria-hidden />}
       <aside
+        id={SIDEBAR_ID}
         className={cn(
           'flex flex-col flex-shrink-0 h-screen overflow-hidden transition-[width] duration-200 ease-in-out border-r border-white/8',
           overlay ? 'fixed left-0 top-0 z-40 shadow-2xl' : 'sticky top-0',
@@ -97,6 +111,8 @@ export function Sidebar() {
             onClick={() => (narrow ? setDrawerOpen(!drawerOpen) : setExpanded(!expanded))}
             className="p-1.5 rounded-md text-zinc-400 hover:text-white hover:bg-white/10 transition-colors"
             title={showLabels ? 'Collapse sidebar' : 'Expand sidebar'}
+            aria-expanded={showLabels}
+            aria-controls={SIDEBAR_ID}
           >
             {showLabels ? <ChevronLeft className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
           </button>
@@ -110,6 +126,7 @@ export function Sidebar() {
               item={item}
               expanded={showLabels}
               active={isActive(item.to)}
+              onNavigate={() => setDrawerOpen(false)}
             />
           ))}
         </NavSection>
@@ -122,6 +139,7 @@ export function Sidebar() {
               item={item}
               expanded={showLabels}
               active={false}
+              onNavigate={() => setDrawerOpen(false)}
             />
           ))}
         </NavSection>
@@ -155,10 +173,12 @@ function NavItemRow({
   item,
   expanded,
   active,
+  onNavigate,
 }: {
   item: NavItem
   expanded: boolean
   active: boolean
+  onNavigate: () => void
 }) {
   const Icon = item.icon
 
@@ -185,7 +205,7 @@ function NavItemRow({
   }
 
   return (
-    <Link to={item.to} className="w-full">
+    <Link to={item.to} className="w-full" onClick={onNavigate}>
       {inner}
     </Link>
   )

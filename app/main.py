@@ -33,9 +33,11 @@ from app.routers import (
     renders,
     reprompt,
     social_publish,
+    sources,
     subtitle_images,
     transcriptions,
     uploads,
+    voiceover,
     xml_export,
 )
 from app.services import transcription_service
@@ -76,13 +78,9 @@ async def lifespan(app: FastAPI):
 
     # Run DB migrations on startup when using the SQL store.
     if settings.job_store == "sql" and not settings.skip_alembic:
-        from alembic import command as alembic_command
-        from alembic.config import Config as AlembicConfig
+        from app.db.migrate import upgrade_to_head
 
-        cfg_path = Path(__file__).parents[1] / "alembic.ini"
-        if cfg_path.exists():
-            alembic_cfg = AlembicConfig(str(cfg_path))
-            await asyncio.to_thread(alembic_command.upgrade, alembic_cfg, "head")
+        await asyncio.to_thread(upgrade_to_head, settings.db_url)
 
     app.state.event_bus = AsyncEventBus()
     app.state.job_store = _make_store()
@@ -233,9 +231,11 @@ def create_app() -> FastAPI:
     app.include_router(social_publish.router)
     app.include_router(xml_export.router)
     app.include_router(ai_hook.router)
+    app.include_router(voiceover.router)
     app.include_router(enhance_speech.router)
     app.include_router(reprompt.router)
     app.include_router(bulk_export.router)
+    app.include_router(sources.router)
 
     # Serve the built React app in production (YTVIDEO_SERVE_FRONTEND=true).
     if settings.serve_frontend:

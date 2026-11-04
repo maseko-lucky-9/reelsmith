@@ -21,9 +21,12 @@ export interface ChapterArtifacts {
   error: string | null
 }
 
+/** `cancelled`: stopped by the user (POST /api/jobs/{id}/cancel). Mirrors app/domain/models.py JobStatus. */
+export type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+
 export interface JobState {
   job_id: string
-  status: 'pending' | 'running' | 'completed' | 'failed'
+  status: JobStatus
   current_step: string | null
   url: string
   source: string | null
@@ -65,6 +68,10 @@ export interface ClipRecord {
   disliked: boolean
   /** B-roll inserted into the rendered reel (`clips.broll_assets`); null or absent without B-roll. */
   broll_assets?: BrollAsset[] | null
+  /** The clip's generated AI hook line; the editor's default voice-over script. */
+  ai_hook_text?: string | null
+  /** The source cut the clip's file was rendered from, `[[start, end], ...]`; null = its own window. */
+  rendered_segments?: Array<[number, number]> | null
 }
 
 /**
@@ -134,6 +141,34 @@ export interface CreateJobResponse {
   status: string
 }
 
+/** One result of GET /api/sources/youtube/search. */
+export interface YoutubeSearchItem {
+  id: string
+  title: string
+  channel: string
+  /** null for a live stream or when YouTube gives no length. */
+  duration_seconds: number | null
+  thumbnail_url: string
+  /** The watch URL; what POST /api/jobs and /workflow take. */
+  url: string
+}
+
+/**
+ * GET /api/sources/youtube/{id}/clean. `clean: null` means the check could not be made
+ * (no vision model running, no stream): show "unknown", not an error.
+ */
+export interface SourceCleanCheck {
+  clean: boolean | null
+  confidence: number
+  reason: string
+  frames_checked: number
+  /**
+   * Why `clean` is null: stream_blocked (YouTube refused the stream request), stream_failed,
+   * frames_failed, ollama_unavailable, reply_unusable, inconclusive, timeout or internal.
+   */
+  cause?: string | null
+}
+
 /** One AI-generated shot — a prompt plus a target duration in seconds. */
 export interface GenerateShot {
   prompt: string
@@ -171,6 +206,8 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     const text = await res.text().catch(() => res.statusText)
     throw new Error(`${res.status} ${text}`)
   }
+  // 204 No Content (every DELETE): there is no body to parse.
+  if (res.status === 204) return undefined as T
   return res.json() as Promise<T>
 }
 
@@ -184,15 +221,29 @@ async function apiUpload(path: string, formData: FormData): Promise<Response> {
 export const api = {
   health: () => apiFetch<{ status: string; job_store: string }>('/api/health'),
 
+  // The API's own default is 20 jobs, which hid the older history.
+  // ponytail: one page of 500; add "load more" pagination when history outgrows it.
   listJobs: (params?: { limit?: number; offset?: number; search?: string }) => {
     const q = new URLSearchParams()
-    if (params?.limit != null) q.set('limit', String(params.limit))
+    q.set('limit', String(params?.limit ?? 500))
     if (params?.offset != null) q.set('offset', String(params.offset))
     if (params?.search) q.set('search', params.search)
     return apiFetch<JobState[]>(`/api/jobs?${q}`)
   },
 
   getJob: (id: string) => apiFetch<JobState>(`/api/jobs/${id}`),
+
+  /**
+   * 202: `cancelling` (its tasks were told to stop) or `cancelled` (it had none and was
+   * marked at once). 409 when nothing of the job is running.
+   */
+  cancelJob: (id: string) =>
+    apiFetch<{ job_id: string; status: 'cancelling' | 'cancelled' }>(`/api/jobs/${id}/cancel`, {
+      method: 'POST',
+    }),
+
+  /** 204: the job's files, then its rows, are gone (also for an unknown job). 409 while it runs. */
+  deleteJob: (id: string) => apiFetch<void>(`/api/jobs/${id}`, { method: 'DELETE' }),
 
   createJob: (req: CreateJobRequest) =>
     apiFetch<CreateJobResponse>('/api/jobs', { method: 'POST', body: JSON.stringify(req) }),
@@ -208,6 +259,16 @@ export const api = {
     const q = new URLSearchParams({ url })
     return apiFetch<VideoPreviewResponse>(`/api/jobs/preview?${q}`)
   },
+
+  /** 400 for an unusable query, 502/504 when YouTube or yt-dlp fails. */
+  searchYoutube: (q: string, limit = 12, signal?: AbortSignal) => {
+    const params = new URLSearchParams({ q, limit: String(limit) })
+    return apiFetch<{ items: YoutubeSearchItem[] }>(`/api/sources/youtube/search?${params}`, { signal })
+  },
+
+  /** Whether the video carries burned-in captions; takes seconds (a vision model looks at 4 frames). */
+  checkYoutubeClean: (videoId: string, signal?: AbortSignal) =>
+    apiFetch<SourceCleanCheck>(`/api/sources/youtube/${encodeURIComponent(videoId)}/clean`, { signal }),
 
   listClips: (params?: { job_id?: string; min_score?: number; search?: string }) => {
     const q = new URLSearchParams()
@@ -265,6 +326,17 @@ export const api = {
 
   getClipRenderPlan: (clipId: string) =>
     apiFetch<RenderPlan>(`/api/clips/${clipId}/edit/plan`),
+
+  /**
+   * POST /clips/{id}/voiceover (spec 016): synthesises the script and appends an
+   * `audio` item to the clip's saved edit (schema v2). 409 export copy, busy job
+   * or a saved v1 edit; 503 voice-over off; 502 the engine failed.
+   */
+  createVoiceover: (clipId: string, body: VoiceoverRequest) =>
+    apiFetch<VoiceoverResponse>(`/api/clips/${clipId}/voiceover`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
 
   // ── Wave 1 — AI hook ─────────────────────────────────────────────────────
   generateAiHook: (clipId: string) =>
@@ -332,10 +404,14 @@ export const api = {
   },
 
   // ── TikTok — direct upload ───────────────────────────────────────────────
-  /** POST /api/uploads — multipart upload of a local video file. */
-  uploadVideo: async (file: File): Promise<{ job_id: string; upload_path: string; status: string }> => {
+  /** POST /api/uploads — multipart upload of a local video file, with an optional prompt (spec 014). */
+  uploadVideo: async (
+    file: File,
+    prompt?: string,
+  ): Promise<{ job_id: string; upload_path: string; status: string }> => {
     const fd = new FormData()
     fd.append('file', file)
+    if (prompt) fd.append('prompt', prompt)
     const res = await apiUpload('/api/uploads', fd)
     return res.json() as Promise<{ job_id: string; upload_path: string; status: string }>
   },
@@ -362,21 +438,61 @@ export interface TimelineItem {
   [key: string]: unknown
 }
 
+export type TimelineTrackKind = 'video' | 'caption' | 'text-overlay' | 'audio'
+
 export interface TimelineTrack {
-  kind: 'video' | 'caption' | 'text-overlay'
+  /** `audio` (voice-over) is schema v2 only. */
+  kind: TimelineTrackKind
   items: TimelineItem[]
 }
 
+/** One word of a clip's transcript, seconds on the clip's clock. */
+export interface EditWord {
+  word: string
+  start: number
+  end: number
+}
+
+/**
+ * Editor timeline (app/services/timeline_render_service.py). Without
+ * `schema_version` it is v1: video items on the reel's clock. v2: video items
+ * are source segments in source seconds; captions, overlays and audio are on
+ * the edited reel's clock (the segments back to back).
+ */
 export interface TimelinePayload {
   tracks: TimelineTrack[]
+  schema_version?: 1 | 2
+  /** Caption preset key (CaptionTemplatePicker names); null = the default style. */
+  caption_style?: string | null
+  mute_source?: boolean
 }
 
 export interface ClipEditState {
   clip_id: string
   timeline: TimelinePayload
+  /** 0 for the server-built default timeline (no saved edit). */
   version: number
-  created_at: string
-  updated_at: string
+  created_at: string | null
+  updated_at: string | null
+  /** True when no edit is saved and `timeline` is built from the clip's words. */
+  is_default?: boolean
+  /** The clip's word timings (GET only). */
+  words?: EditWord[]
+}
+
+/** Body of POST /clips/{id}/voiceover (app/routers/voiceover.py VoiceoverRequest). */
+export interface VoiceoverRequest {
+  /** Omitted: the server speaks the clip's AI hook. */
+  text?: string
+  voice?: string
+  /** Seconds on the edited reel where the voice-over starts (default 0). */
+  start?: number
+}
+
+export interface VoiceoverResponse {
+  edit: ClipEditState
+  item: { start: number; end: number; src: string; gain: number }
+  provider: string
 }
 
 export interface ClipEditUpsert {

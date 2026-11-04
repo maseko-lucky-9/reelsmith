@@ -4,7 +4,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-JobStatus = Literal["pending", "running", "completed", "failed"]
+# "cancelled": stopped by the user (POST /jobs/{id}/cancel), never by a shutdown.
+JobStatus = Literal["pending", "running", "completed", "failed", "cancelled"]
 
 
 class PipelineOptions(BaseModel):

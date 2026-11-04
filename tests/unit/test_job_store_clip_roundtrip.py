@@ -44,6 +44,7 @@ CLIP_VALUES: dict[str, Any] = {
     "broll_assets": [{"query": "city", "url": "https://pexels.test/1.mp4"}],
     "caption_style": "karaoke",
     "captions_burnt_path": "/out/job-roundtrip/captions/01.mp4",
+    "rendered_segments": [[12.5, 20.0], [30.0, 47.25]],
 }
 FIELDS = sorted(CLIP_VALUES)
 

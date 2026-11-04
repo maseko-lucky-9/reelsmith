@@ -21,6 +21,10 @@ os.environ.setdefault("YTVIDEO_SEGMENT_PROVIDER", "chapter")
 # The LLM re-rank of discovered clips stays off (a developer's .env may turn
 # it on); tests that need it set it on settings and stub the model.
 os.environ.setdefault("YTVIDEO_SEGMENT_RERANK_PROVIDER", "none")
+# AI scene search (spec 014) stays off whatever the machine has: the default
+# "auto" would start the real MLX sidecar wherever .venv-mlx exists. Tests
+# that need it set the provider on settings and fake the sidecar.
+os.environ.setdefault("YTVIDEO_SCENE_SEARCH_PROVIDER", "off")
 os.environ.setdefault("YTVIDEO_JOB_STORE", "memory")
 # Never load a real Whisper model in the default run: the stub provider for
 # every test, and no lifespan warm-up. Real-model coverage lives in
@@ -50,6 +54,25 @@ for _platform in ("YOUTUBE", "TIKTOK", "INSTAGRAM", "LINKEDIN", "X"):
 # model, if a test does download it, never lands in the project's data/models.
 os.environ.setdefault("YTVIDEO_REFRAME_PROVIDER", "letterbox")
 os.environ.setdefault("YTVIDEO_REFRAME_MODEL_DIR", tempfile.mkdtemp(prefix="reelsmith-test-models-"))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_export_base_folder(tmp_path_factory, monkeypatch):
+    """Point the export base folder at a per-test tmp dir, however it is read.
+
+    The ``setdefault`` above only wins while ``YTVIDEO_EXPORT_BASE_FOLDER`` is
+    unset in the process environment; a shell that exports it (or the ``.env``
+    path, when a test builds a fresh ``Settings``) would send the pipeline's job
+    directories into the developer's real export folder (a Syncthing share).
+    So every test gets both the shared ``settings`` object and the environment
+    pointed at its own folder. A test that needs another value sets it on
+    ``settings`` itself, which runs after this fixture and wins.
+    """
+    from app.settings import settings
+
+    export_base = str(tmp_path_factory.mktemp("export-base"))
+    monkeypatch.setattr(settings, "export_base_folder", export_base)
+    monkeypatch.setenv("YTVIDEO_EXPORT_BASE_FOLDER", export_base)
 
 
 @pytest.fixture(autouse=True)

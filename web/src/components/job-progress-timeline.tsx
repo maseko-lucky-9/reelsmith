@@ -7,6 +7,8 @@ import {
   deriveStageStates,
   describeActiveStage,
   describeSkippedStages,
+  sceneIndexLabel,
+  sceneIndexProgress,
   type DerivedStage,
   type OverallProgress,
   type PipelineEvent,
@@ -42,6 +44,8 @@ export function JobProgressTimeline({ job }: Props) {
   )
 
   const announce = describeActiveStage(stages)
+  const scenes = sceneIndexProgress(eventsQuery.data)
+  const scenesLabel = scenes ? sceneIndexLabel(scenes) : null
 
   // One-shot skipped-stages announcement on initial mount
   const skippedAnnouncedRef = useRef(false)
@@ -57,7 +61,11 @@ export function JobProgressTimeline({ job }: Props) {
       <OverallBar progress={overall} />
       <ol role="list" className="space-y-1">
         {stages.map((s) => (
-          <StageRow key={s.descriptor.id} stage={s} />
+          <StageRow
+            key={s.descriptor.id}
+            stage={s}
+            detail={s.descriptor.id === 'chapters' && s.state === 'active' ? scenesLabel : null}
+          />
         ))}
       </ol>
       {/* Visually hidden live region — announces stage transitions + skipped stages. */}
@@ -96,7 +104,7 @@ function OverallBar({ progress }: { progress: OverallProgress }) {
   )
 }
 
-function StageRow({ stage }: { stage: DerivedStage }) {
+function StageRow({ stage, detail = null }: { stage: DerivedStage; detail?: string | null }) {
   const { descriptor, state, done, total, error } = stage
   const isActive = state === 'active'
   const isDone = state === 'done'
@@ -165,6 +173,8 @@ function StageRow({ stage }: { stage: DerivedStage }) {
         {isSkipped && (
           <p className="mt-0.5 text-xs text-zinc-500">Skipped (per job options)</p>
         )}
+
+        {detail && <p className="mt-0.5 text-xs text-zinc-400 tabular-nums">{detail}</p>}
 
         {isPerChapter && !isSkipped && (
           <div className="mt-1 h-1 w-full rounded-full bg-zinc-800 overflow-hidden">
