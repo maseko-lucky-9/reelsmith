@@ -18,6 +18,7 @@ import type { EditorTrack, TrackRole } from "@/editor/types";
 import type { SplitGate } from "@/editor/renderedCut";
 import { usePlaybackStore } from "@/editor/opencut/stores/playback-store";
 import { useTimelineStore } from "@/editor/opencut/stores/timeline-store";
+import { Timeline } from "./timeline";
 import { TimelinePlayhead } from "./timeline-playhead";
 import { TimelineTrackContent } from "./timeline-track";
 
@@ -314,3 +315,161 @@ describe("timeline elements and tracks", () => {
     expect(onKeyDown).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("Timeline", () => {
+  const button = (name: string) =>
+    screen.getByRole("button", { name }) as HTMLButtonElement;
+  const content = (container: HTMLElement) =>
+    container.querySelector("[data-timeline-content]") as HTMLElement;
+
+  it("renders the four tracks of the edit with their labels", () => {
+    const { container } = render(<Timeline />);
+
+    const rows = Array.from(
+      container.querySelectorAll<HTMLElement>("[data-track-row]"),
+    );
+    expect(rows.map((row) => row.dataset.trackRole)).toEqual([
+      "captions",
+      "overlays",
+      "segments",
+      "voiceovers",
+    ]);
+    const labels = container.querySelector("[data-track-labels]") as HTMLElement;
+    for (const name of ["Captions", "Text", "Video", "Voice-over"]) {
+      expect(within(labels).getByText(name)).toBeInTheDocument();
+    }
+    expect(screen.getAllByRole("button", { name: /^Segment / })).toHaveLength(3);
+    expect(screen.getAllByRole("button", { name: /^Caption: / })).toHaveLength(3);
+    expect(screen.getAllByRole("button", { name: /^Text: / })).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: /^Voice-over: / })).toHaveLength(1);
+  });
+
+  it("runs the playhead on the reel's length and shows it", () => {
+    render(<Timeline />);
+
+    expect(usePlaybackStore.getState().duration).toBeCloseTo(24.95, 9);
+    expect(screen.getByRole("slider", { name: "Playhead" })).toHaveAttribute(
+      "aria-valuemax",
+      "24.95",
+    );
+  });
+
+  it("doubles the content width on Zoom in and halves it on Zoom out", () => {
+    const { container } = render(<Timeline />);
+    const width = () => parseFloat(content(container).style.width);
+    // 24.95 s at 50 px/s.
+    expect(width()).toBeCloseTo(1247.5, 6);
+
+    fireEvent.click(button("Zoom in"));
+    expect(width()).toBeCloseTo(2495, 6);
+
+    fireEvent.click(button("Zoom out"));
+    fireEvent.click(button("Zoom out"));
+    expect(width()).toBeCloseTo(623.75, 6);
+  });
+
+  it("selects the overlays a drag-out selection box crosses", () => {
+    stubLayout();
+    const { container } = render(<Timeline />);
+    const area = container.querySelector("[data-tracks-area]") as HTMLElement;
+    // Rows: captions 0-50, overlays 50-100, video 100-150. Overlays at 100-200 and 500-600 px.
+    fireEvent.mouseDown(area, { button: 0, clientX: 50, clientY: ROW + 5 });
+    fireEvent.mouseMove(window, { clientX: 650, clientY: 2 * ROW - 5 });
+    fireEvent.mouseUp(window, { clientX: 650, clientY: 2 * ROW - 5 });
+
+    const overlays = trackOf("overlays");
+    expect(store().selectedElements).toEqual(
+      overlays.elements.map((el) => ({ trackId: overlays.id, elementId: el.id })),
+    );
+  });
+
+  it("disables Split, keep left and keep right with the gate's reason", () => {
+    usePlaybackStore.setState({ currentTime: 4 });
+    render(<Timeline splitGate={{ ok: false, reason: "Re-render first." }} />);
+
+    for (const name of ["Split", "Split keep left", "Split keep right"]) {
+      expect(button(name)).toBeDisabled();
+      expect(button(name)).toHaveAccessibleDescription("Re-render first.");
+      expect(button(name).title).toBe("Re-render first.");
+    }
+    fireEvent.keyDown(document.body, { key: "s" });
+    expect(toast.error).toHaveBeenCalledWith("Re-render first.");
+    expect(cut()).toHaveLength(3);
+  });
+
+  it("splits the segment under the playhead from the toolbar when the gate is open", () => {
+    usePlaybackStore.setState({ currentTime: 10 });
+    render(<Timeline />);
+
+    expect(button("Split")).toBeEnabled();
+    expect(button("Split").title).toBe("");
+    fireEvent.click(button("Split"));
+
+    // Reel 10 s is 2.5 s into segment 2 (reel 7.5-24.75, source 30-47.25).
+    expect(cut()).toEqual([
+      [12.5, 20],
+      [30, 32.5],
+      [32.5, 47.25],
+      [50.1, 50.3],
+    ]);
+  });
+
+  it("enables Undo and Redo as the store's history allows", () => {
+    usePlaybackStore.setState({ currentTime: 4 });
+    render(<Timeline />);
+    expect(button("Undo")).toBeDisabled();
+    expect(button("Redo")).toBeDisabled();
+
+    fireEvent.click(button("Split keep left"));
+    expect(cut()[0]).toEqual([12.5, 16.5]);
+    expect(button("Undo")).toBeEnabled();
+
+    fireEvent.click(button("Undo"));
+    expect(cut()[0]).toEqual([12.5, 20]);
+    expect(button("Undo")).toBeDisabled();
+    expect(button("Redo")).toBeEnabled();
+
+    fireEvent.click(button("Redo"));
+    expect(cut()[0]).toEqual([12.5, 16.5]);
+  });
+
+  it("deletes the selection from the toolbar", () => {
+    render(<Timeline />);
+    expect(button("Delete")).toBeDisabled();
+
+    fireEvent.click(element("Text: cta"));
+    fireEvent.click(button("Delete"));
+
+    expect(
+      trackOf("overlays").elements.map((el) =>
+        el.type === "text" ? el.content : null,
+      ),
+    ).toEqual(["hook"]);
+  });
+
+  it("moves the playhead to a ruler click, snapped to a frame", () => {
+    const { container } = render(<Timeline />);
+    const ruler = container.querySelector("[data-ruler]") as HTMLElement;
+
+    fireEvent.mouseDown(ruler, { button: 0, clientX: 101 });
+    fireEvent.mouseUp(window, { clientX: 101 });
+
+    expect(usePlaybackStore.getState().currentTime).toBeCloseTo(61 / 30, 9);
+    expect(screen.getByRole("slider", { name: "Playhead" })).toHaveAttribute(
+      "aria-valuenow",
+      "2.033",
+    );
+  });
+
+  it("toggles the source's mute from the Video track label", () => {
+    render(<Timeline />);
+    const mute = button("Mute source audio");
+    expect(mute).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.click(mute);
+
+    expect(mute).toHaveAttribute("aria-pressed", "true");
+    expect(store().toTimeline().mute_source).toBe(true);
+  });
+});
+
