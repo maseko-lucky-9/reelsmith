@@ -128,9 +128,9 @@ def test_voiceover_is_delayed_mixed_and_ducks_the_source():
     graph = _graph(argv)
     assert graph[: len(_TWO_SEGMENT_VIDEO)] == _TWO_SEGMENT_VIDEO
     assert graph[len(_TWO_SEGMENT_VIDEO) :] == [
-        "[2:a]atrim=end=1.25,asetpts=PTS-STARTPTS,volume=1.5,adelay=delays=500:all=1[vo0]",
-        "[3:a]atrim=end=0.5,asetpts=PTS-STARTPTS,volume=1,adelay=delays=2000:all=1[vo1]",
-        "[sa]apad=whole_dur=2.75,volume=volume='if(between(t,0.5,1.75)+between(t,2,2.5),0.25,1)':eval=frame[base]",
+        "[2:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,atrim=end=1.25,asetpts=PTS-STARTPTS,volume=1.5,adelay=delays=500:all=1[vo0]",
+        "[3:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,atrim=end=0.5,asetpts=PTS-STARTPTS,volume=1,adelay=delays=2000:all=1[vo1]",
+        "[sa]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,apad=whole_dur=2.75,volume=volume='if(between(t,0.5,1.75)+between(t,2,2.5),0.25,1)':eval=frame[base]",
         "[base][vo0][vo1]amix=inputs=3:duration=first:normalize=0[a]",
     ]
     assert _after(argv, "-map") == ["[v]", "[a]"]
@@ -142,7 +142,7 @@ def test_muted_voiceover_render_drops_the_source_audio():
     assert not any("[0:a]" in f or "[sa]" in f or "atrim=start" in f for f in graph)
     assert "[g0][g1]concat=n=2:v=1:a=0[in]" in graph
     assert graph[-3:] == [
-        "[2:a]atrim=end=1,asetpts=PTS-STARTPTS,volume=1,adelay=delays=1000:all=1[vo0]",
+        "[2:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,atrim=end=1,asetpts=PTS-STARTPTS,volume=1,adelay=delays=1000:all=1[vo0]",
         "anullsrc=r=48000:cl=stereo,atrim=end=2.75[base]",
         "[base][vo0]amix=inputs=2:duration=first:normalize=0[a]",
     ]
