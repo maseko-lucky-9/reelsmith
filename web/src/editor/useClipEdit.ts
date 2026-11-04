@@ -98,8 +98,12 @@ export interface UseClipEdit {
   canRedo: boolean;
   /** The clip's word timings from the edit API (empty until loaded). */
   words: EditWord[];
-  /** Adopts an edit the server changed (a voice-over appended): one undoable step, saved. */
-  applyServerState: (state: ClipEditState) => void;
+  /**
+   * Adopts an edit the server changed (a voice-over appended): one undoable
+   * step, saved. False (and only this clip's cached edit is updated) when the
+   * editor no longer holds this clip: the answer came after it closed.
+   */
+  applyServerState: (state: ClipEditState) => boolean;
   /** The timeline as loaded from the server when the editor opened (null until loaded). */
   loadedTimeline: TimelinePayload | null;
   /** The saved row is schema v1 (the server refuses a voice-over on it: save first). */
@@ -216,30 +220,40 @@ export function useClipEdit(
   // canonicalJson of what the save in flight sent.
   const sentRef = useRef<string | null>(null);
 
-  /**
-   * A save answered. The version and the saved snapshot always move on. When
-   * the edit is still what was sent, the server's copy replaces it (no
-   * history step), so it reads as saved; edits made while the save was in
-   * flight are kept and stay dirty.
-   */
-  const adopt = useCallback(
-    (state: ClipEditState) => {
-      const sent = sentRef.current;
-      sentRef.current = null;
-      const store = useTimelineStore.getState();
-      const unchanged =
-        sent === null || canonicalJson(store.toTimeline()) === sent;
-      useSavedEdit.setState(savedFields(state, windowRef.current));
-      if (unchanged) store.adoptTimeline(state.timeline);
+  /** This clip's cached edit becomes the server's answer (words kept when it has none). */
+  const cacheAnswer = useCallback(
+    (state: ClipEditState) =>
       queryClient.setQueryData(
         ["clip-edit", clipId],
         (old: ClipEditState | null | undefined) => ({
           ...state,
           words: state.words ?? old?.words,
         }),
-      );
-    },
+      ),
     [clipId, queryClient],
+  );
+
+  /**
+   * A save answered. The version and the saved snapshot always move on. When
+   * the edit is still what was sent, the server's copy replaces it (no
+   * history step), so it reads as saved; edits made while the save was in
+   * flight are kept and stay dirty. The mutation's callbacks outlive the
+   * editor: an answer arriving once the singleton stores hold another clip
+   * (or none) only updates this clip's cache.
+   */
+  const adopt = useCallback(
+    (state: ClipEditState) => {
+      const sent = sentRef.current;
+      sentRef.current = null;
+      cacheAnswer(state);
+      if (useSavedEdit.getState().clipId !== clipId) return;
+      const store = useTimelineStore.getState();
+      const unchanged =
+        sent === null || canonicalJson(store.toTimeline()) === sent;
+      useSavedEdit.setState(savedFields(state, windowRef.current));
+      if (unchanged) store.adoptTimeline(state.timeline);
+    },
+    [clipId, cacheAnswer],
   );
 
   const saveMutation = useMutation({
@@ -266,17 +280,14 @@ export function useClipEdit(
 
   const applyServerState = useCallback(
     (state: ClipEditState) => {
+      cacheAnswer(state);
+      // Another clip's editor (or none) holds the stores now: leave them be.
+      if (useSavedEdit.getState().clipId !== clipId) return false;
       useTimelineStore.getState().replaceFromTimeline(state.timeline);
       useSavedEdit.setState(savedFields(state, windowRef.current));
-      queryClient.setQueryData(
-        ["clip-edit", clipId],
-        (old: ClipEditState | null | undefined) => ({
-          ...state,
-          words: state.words ?? old?.words,
-        }),
-      );
+      return true;
     },
-    [clipId, queryClient],
+    [clipId, cacheAnswer],
   );
 
   const setTimeline = useCallback(

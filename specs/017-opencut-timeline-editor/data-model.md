@@ -85,6 +85,7 @@ VoiceoverElement = MediaElement & { origin: v2 audio item }      # role 'voiceov
 | `isSaving`, `saveError` | `useMutation` state |
 | `save()` | `PUT /clips/{id}/edit {timeline: prepareForSave(sent, window), version: version \|\| undefined}`; on success adopt: version and snapshot always move on; the store adopts the server's copy only if it still equals what was sent (edits made in flight are kept, still dirty) |
 | `applyServerState(state)` | a voice-over's returned edit: one undoable step, saved |
+| answers after the editor moved on | a save or voice-over answering once the singleton stores hold another clip (or none) only updates its own clip's cached edit: no store change, no toast; the route remounts per clip (`remountDeps`), so no route state carries over |
 | `words`, `loadedTimeline` | as in 016 |
 
 ### Rendered cut (`web/src/editor/renderedCut.ts`, moved verbatim from the route)

@@ -47,6 +47,10 @@ export const clipEditRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/clips/$clipId/edit",
   component: ClipEditorPage,
+  // Another clip is another editor: the page remounts (TanStack Router keeps a
+  // component across a param change), so no route state (the event cut, the
+  // re-render lock, the video version, the view, a pending mutation) carries over.
+  remountDeps: ({ params }) => params,
 });
 
 type ToolId = "captions" | "text" | "voiceover" | "trim";
@@ -374,7 +378,9 @@ export function ClipEditorPage() {
   // (no replay: the job's old events are not for this page).
   useEffect(() => {
     if (!clipJobId || typeof EventSource === "undefined") return;
-    const source = new EventSource(`/api/jobs/${clipJobId}/events?live=true`);
+    const source = new EventSource(
+      `/api/jobs/${encodeURIComponent(clipJobId)}/events?live=true`,
+    );
     const payloadOf = (e: Event): Record<string, unknown> | null => {
       try {
         const parsed = JSON.parse((e as MessageEvent).data as string) as {
@@ -497,7 +503,9 @@ export function ClipEditorPage() {
       return api.createVoiceover(clipId, body);
     },
     onSuccess: (res) => {
-      editor.applyServerState(res.edit);
+      // The answer can come after this editor closed (Piper takes up to
+      // 120 s): it is then this clip's saved edit, not news for the next page.
+      if (!editor.applyServerState(res.edit)) return;
       if (res.provider === "stub") toast.warning(STUB_VOICEOVER_WARNING);
       else toast.success("Voice-over added");
     },
