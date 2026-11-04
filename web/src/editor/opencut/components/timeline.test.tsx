@@ -10,7 +10,7 @@
  * their inline geometry.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import type { TimelinePayload } from "@/api/client";
 import { segmentsOf } from "@/lib/timelineEdit";
 import { multiSegment } from "@/editor/__fixtures__/timelines";
@@ -313,6 +313,104 @@ describe("timeline elements and tracks", () => {
     expect(playhead).toHaveAttribute("aria-valuemax", "24.95");
     fireEvent.keyDown(playhead, { key: "ArrowRight" });
     expect(onKeyDown).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("the playhead on a scrolled timeline (PR #97 review, blocker C)", () => {
+  /** A 60 s reel: 3000 px of content at zoom 1. */
+  const SIXTY: TimelinePayload = {
+    schema_version: 2,
+    tracks: [
+      {
+        kind: "video",
+        items: [
+          { start: 0, end: 30 },
+          { start: 40, end: 70 },
+        ],
+      },
+    ],
+  };
+  const playhead = () => screen.getByRole("slider", { name: "Playhead" });
+
+  it("draws the line at its time minus the scroll offset, after the labels", () => {
+    render(
+      <TimelinePlayhead
+        position={30}
+        duration={60}
+        zoomLevel={1}
+        trackLabelsWidth={192}
+        scrollLeft={1096}
+        viewportWidth={808}
+        onMouseDown={() => {}}
+        onKeyDown={() => {}}
+      />,
+    );
+    // 192 px of labels + 30 s x 50 px/s - 1096 px scrolled.
+    expect(playhead().style.left).toBe("596px");
+  });
+
+  it("hides the line while it is scrolled out of the tracks' view", () => {
+    const { rerender } = render(
+      <TimelinePlayhead
+        position={30}
+        duration={60}
+        zoomLevel={1}
+        trackLabelsWidth={192}
+        scrollLeft={0}
+        viewportWidth={808}
+        onMouseDown={() => {}}
+        onKeyDown={() => {}}
+      />,
+    );
+    // 1500 px into the content, the view shows 0-808 px: past its right edge.
+    expect(screen.queryByRole("slider", { name: "Playhead" })).toBeNull();
+    rerender(
+      <TimelinePlayhead
+        position={2}
+        duration={60}
+        zoomLevel={1}
+        trackLabelsWidth={192}
+        scrollLeft={500}
+        viewportWidth={808}
+        onMouseDown={() => {}}
+        onKeyDown={() => {}}
+      />,
+    );
+    // 100 px into the content, the view starts at 500 px: left of it, not over the labels.
+    expect(screen.queryByRole("slider", { name: "Playhead" })).toBeNull();
+  });
+
+  it("follows the tracks' scroll: a seek to 30 s on a 1000 px timeline draws it on screen (596 px, not 1692 px)", () => {
+    load(SIXTY);
+    const { container } = render(<Timeline />);
+    const viewports = Array.from(
+      container.querySelectorAll<HTMLElement>(
+        '[data-slot="scroll-area-viewport"]',
+      ),
+    );
+    const tracks = container.querySelector(
+      '[data-tracks-area] [data-slot="scroll-area-viewport"]',
+    ) as HTMLElement;
+    // jsdom has no layout: the ruler and the tracks show 808 px of 3000 px.
+    for (const viewport of viewports) {
+      Object.defineProperty(viewport, "clientWidth", {
+        configurable: true,
+        value: 808,
+      });
+      Object.defineProperty(viewport, "scrollWidth", {
+        configurable: true,
+        value: 3000,
+      });
+    }
+
+    act(() => usePlaybackStore.getState().seek(30));
+    // The auto-scroll centred the playhead (1500 - 808 / 2); the browser then fires scroll.
+    expect(tracks.scrollLeft).toBe(1096);
+    act(() => {
+      tracks.dispatchEvent(new Event("scroll"));
+    });
+
+    expect(playhead().style.left).toBe("596px");
   });
 });
 

@@ -11,7 +11,8 @@
 // at least the viewport); one playhead hook for the ruler and the
 // playhead; track labels name the track (Video / Captions / Text / Voice-over) and the Video track
 // has the mute-source toggle (upstream's track context menu, whose only applicable item it was);
-// Base UI scroll viewports; a read-only edit shows why. Licence: ../../LICENSE-OpenCut.
+// Base UI scroll viewports; the playhead is drawn at the tracks' scroll offset (upstream ignored it);
+// a read-only edit shows why. Licence: ../../LICENSE-OpenCut.
 import type React from "react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
@@ -208,6 +209,8 @@ export function Timeline({
   const trackLabelsViewportRef = useRef<HTMLDivElement>(null);
   const playheadRef = useRef<HTMLDivElement>(null);
   const isUpdatingRef = useRef(false);
+  // The tracks' horizontal scroll and visible width: where the playhead line is drawn.
+  const [tracksView, setTracksView] = useState({ scrollLeft: 0, width: 0 });
   const lastRulerSync = useRef(0);
   const lastTracksSync = useRef(0);
   const lastVerticalSync = useRef(0);
@@ -353,19 +356,34 @@ export function Timeline({
       isUpdatingRef.current = false;
     };
 
+    // The playhead sits outside the scrolling content: it follows the tracks' offset.
+    const handleTracksView = () =>
+      setTracksView({
+        scrollLeft: tracksViewport.scrollLeft,
+        width: tracksViewport.clientWidth,
+      });
+    const resizeObserver =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(handleTracksView);
+
     rulerViewport.addEventListener("scroll", handleRulerScroll);
     tracksViewport.addEventListener("scroll", handleTracksScroll);
     tracksViewport.addEventListener("scroll", handleTracksVerticalScroll);
+    tracksViewport.addEventListener("scroll", handleTracksView);
     trackLabelsViewport?.addEventListener("scroll", handleTrackLabelsScroll);
+    resizeObserver?.observe(tracksViewport);
 
     return () => {
       rulerViewport.removeEventListener("scroll", handleRulerScroll);
       tracksViewport.removeEventListener("scroll", handleTracksScroll);
       tracksViewport.removeEventListener("scroll", handleTracksVerticalScroll);
+      tracksViewport.removeEventListener("scroll", handleTracksView);
       trackLabelsViewport?.removeEventListener(
         "scroll",
         handleTrackLabelsScroll,
       );
+      resizeObserver?.disconnect();
     };
   }, []);
 
@@ -502,6 +520,8 @@ export function Timeline({
           duration={duration}
           zoomLevel={zoomLevel}
           trackLabelsWidth={tracks.length > 0 ? TRACK_LABELS_PX : 0}
+          scrollLeft={tracksView.scrollLeft}
+          viewportWidth={tracksView.width}
           playheadRef={playheadRef}
           onMouseDown={handlePlayheadMouseDown}
           onKeyDown={handlePlayheadKeyDown}

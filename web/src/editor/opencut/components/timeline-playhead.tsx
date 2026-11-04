@@ -4,7 +4,9 @@
 // gone) and passes the position and handlers in; no refs read during render (React 19 / compiler
 // lint): the line spans the container by CSS and the labels' width is a prop instead of
 // offsetHeight/offsetWidth; keyboard operable as a slider (arrow keys a frame, Shift a second,
-// Home/End); Tailwind 4 renames (shadow-xs, z-100). Licence: ../../LICENSE-OpenCut.
+// Home/End); Tailwind 4 renames (shadow-xs, z-100); the line is drawn at its time minus the tracks'
+// horizontal scroll and hidden while scrolled out of their view (upstream ignored the scroll, so the
+// line ran off screen and auto-scroll pushed it further). Licence: ../../LICENSE-OpenCut.
 import type React from "react";
 import type { RefObject } from "react";
 import { TIMELINE_CONSTANTS } from "@/editor/opencut/constants/timeline-constants";
@@ -16,6 +18,10 @@ interface TimelinePlayheadProps {
   zoomLevel: number;
   /** Pixels between the timeline's left edge and the reel's 0 s (the track labels). */
   trackLabelsWidth: number;
+  /** How far the tracks are scrolled horizontally, px. */
+  scrollLeft?: number;
+  /** The tracks' visible width, px; 0 while unknown (nothing is hidden on the right). */
+  viewportWidth?: number;
   playheadRef?: RefObject<HTMLDivElement | null>;
   onMouseDown: (e: React.MouseEvent) => void;
   onKeyDown: (e: React.KeyboardEvent) => void;
@@ -28,13 +34,19 @@ export function TimelinePlayhead({
   duration,
   zoomLevel,
   trackLabelsWidth,
+  scrollLeft = 0,
+  viewportWidth = 0,
   playheadRef,
   onMouseDown,
   onKeyDown,
 }: TimelinePlayheadProps) {
-  const leftPosition =
-    trackLabelsWidth +
-    position * TIMELINE_CONSTANTS.PIXELS_PER_SECOND * zoomLevel;
+  // Where the line is in the tracks' view: the scrolled-off content is not on screen.
+  const x =
+    position * TIMELINE_CONSTANTS.PIXELS_PER_SECOND * zoomLevel - scrollLeft;
+  const leftPosition = trackLabelsWidth + x;
+  // Out of view it is hidden, not drawn over the labels or past the timeline (where focusing
+  // it would scroll the clipped container); a seek scrolls it back into view.
+  const outOfView = x < 0 || (viewportWidth > 0 && x > viewportWidth);
 
   return (
     <div
@@ -50,6 +62,7 @@ export function TimelinePlayhead({
       style={{
         left: `${leftPosition}px`,
         width: "2px", // Slightly wider for better click target
+        visibility: outOfView ? "hidden" : undefined,
       }}
       onMouseDown={onMouseDown}
       onKeyDown={onKeyDown}
