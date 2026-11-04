@@ -4,6 +4,7 @@ import { Ban, Check, Trash2, Video } from 'lucide-react'
 import { toast } from 'sonner'
 import type { JobState, JobStatus } from '@/api/client'
 import { api } from '@/api/client'
+import { jobDisplayTitle } from '@/lib/jobTitle'
 import {
   CANCEL_REFRESH_MS,
   forgetJob,
@@ -35,7 +36,7 @@ export function ProjectCard({ job, selectable = false, selected = false, onToggl
   const queryClient = useQueryClient()
   const clipCount = job.output_paths?.length ?? 0
   const active = isActiveJob(job)
-  const label = job.title ?? job.url
+  const label = jobDisplayTitle(job)
 
   const refresh = () => void queryClient.invalidateQueries({ queryKey: ['jobs'] })
   const cancelMutation = useMutation({

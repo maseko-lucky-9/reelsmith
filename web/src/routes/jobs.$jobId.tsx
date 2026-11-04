@@ -15,6 +15,7 @@ import { PlatformChip } from '@/components/platform-chip'
 import { RepromptForm } from '@/components/reprompt-form'
 import { sceneIndexLabel, sceneIndexProgress, type PipelineEvent } from '@/lib/pipelineStages'
 import { isConflict } from '@/lib/jobStatus'
+import { jobDisplayTitle, jobStatusLabel } from '@/lib/jobTitle'
 
 export const jobDetailRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -151,30 +152,28 @@ function JobDetailPage() {
   return (
     <div className="space-y-4">
       {/* Header: title + platform chip + duration (visible during processing & after) */}
-      {(job.source || job.title || canCancel) && (
-        <div className="flex items-center gap-2 flex-wrap">
-          {job.source && <PlatformChip platform={job.source} />}
-          <span className="text-sm font-medium text-white truncate max-w-md">
-            {job.title ?? 'Loading title…'}
+      <div className="flex items-center gap-2 flex-wrap">
+        {job.source && <PlatformChip platform={job.source} />}
+        <span className="text-sm font-medium text-white truncate max-w-md">
+          {jobDisplayTitle(job)}
+        </span>
+        {job.duration != null && (
+          <span className="text-xs text-zinc-500 tabular-nums">
+            {formatDuration(job.duration)}
           </span>
-          {job.duration != null && (
-            <span className="text-xs text-zinc-500 tabular-nums">
-              {formatDuration(job.duration)}
-            </span>
-          )}
-          {canCancel && (
-            <button
-              type="button"
-              onClick={onCancel}
-              disabled={cancelMutation.isPending}
-              className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/15 text-xs text-zinc-200 hover:text-white hover:border-red-400/60 disabled:opacity-50 transition-colors"
-            >
-              <Ban className="w-3.5 h-3.5" />
-              {cancelMutation.isPending ? 'Cancelling…' : 'Cancel'}
-            </button>
-          )}
-        </div>
-      )}
+        )}
+        {canCancel && (
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={cancelMutation.isPending}
+            className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/15 text-xs text-zinc-200 hover:text-white hover:border-red-400/60 disabled:opacity-50 transition-colors"
+          >
+            <Ban className="w-3.5 h-3.5" />
+            {cancelMutation.isPending ? 'Cancelling…' : 'Cancel'}
+          </button>
+        )}
+      </div>
 
       {job.status === 'cancelled' && (
         <p className="text-sm text-amber-400" role="status">
@@ -209,9 +208,9 @@ function JobDetailPage() {
           </button>
         </div>
 
-        {/* Job title */}
-        <p className="text-sm font-medium text-white truncate max-w-[200px]">
-          {job.title ?? 'Processing…'}
+        {/* Job status */}
+        <p data-testid="job-status" className="text-sm font-medium text-white truncate max-w-[200px]">
+          {jobStatusLabel(job.status)}
         </p>
 
         {/* Search */}
