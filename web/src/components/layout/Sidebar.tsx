@@ -5,6 +5,7 @@ import {
   Sparkles,
   LayoutTemplate,
   FolderOpen,
+  Search,
   Share2,
   ChevronLeft,
   ChevronRight,
@@ -23,6 +24,7 @@ interface NavItem {
 const CREATE_ITEMS: NavItem[] = [
   { label: 'Home', icon: Home, to: '/' },
   { label: 'Generate', icon: Sparkles, to: '/generate/new' },
+  { label: 'Search YouTube', icon: Search, to: '/sources/youtube' },
   { label: 'Brand template', icon: LayoutTemplate, to: '/settings/brand' },
   { label: 'Asset library', icon: FolderOpen, to: '/', placeholder: true },
 ]

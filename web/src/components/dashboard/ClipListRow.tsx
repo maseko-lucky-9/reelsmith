@@ -6,6 +6,7 @@ import type { ClipRecord } from '@/api/client'
 import { api } from '@/api/client'
 import { scoreToGrade, formatTime, formatTimestamp } from '@/lib/scoreToGrade'
 import { BrollCredits } from '@/components/broll-credits'
+import { SceneMatch } from './SceneMatch'
 
 interface ClipListRowProps {
   clip: ClipRecord
@@ -117,6 +118,7 @@ export function ClipListRow({ clip, rank, jobId }: ClipListRowProps) {
           {clip.summary && (
             <p className="text-sm text-zinc-300 line-clamp-2">{clip.summary}</p>
           )}
+          <SceneMatch clip={clip} />
           {transcriptText && (
             <p className="text-xs text-zinc-500 line-clamp-3">{transcriptText}</p>
           )}

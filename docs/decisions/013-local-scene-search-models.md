@@ -73,6 +73,14 @@ Recreate the sidecar: `scripts/setup_scene_venv.sh` (needs `/opt/homebrew/bin/py
 - `mlx_embedder.py` depends on mlx-vlm internals; `requirements-scene.txt` holds mlx-vlm at 0.7.11 (`<0.9`). Upgrading means re-running the opt-in integration test (`tests/integration/test_scene_index_cli.py`, cosine between different chunks < 0.99) before anything else.
 - `--skip-still` is available but off by default: it leaves a zero row for a near-static chunk, which would also hide a slide with a voice-over.
 
+## Amendment (2026-10-29, spec 014)
+
+Phase 2 shipped this stack with three changes found by measuring it end to end (`specs/014-ai-scene-search/plan.md`):
+
+- The judge looks at the 1-3 chunks that matched (`focus`), not the whole clip window: 4 frames spread over a 25-55 s window missed the shot in all three test prompts.
+- A moment found by what is said is judged on its transcript, text only, by the same model; the vision prompt rejected it (frames of a talking head cannot show what is described). The vision prompt keeps the measured instruction text; only the query moved into a delimited `<query>` block (precision re-run open: spec 014 T110).
+- Speech is matched by embedding transcript sentences with `embed-texts` (the prompt and sentences compare text to text); each side is calibrated on its own because text-to-text cosines run about 0.3 above text-to-video ones.
+
 ## Caveats (read before trusting the numbers)
 
 - 34 prompts from one labeller, labelled from frames sampled every 4 s plus a transcript. Spans have 1-3 s boundary error, and several spans are wide (a whole 40 s shot). Recall is optimistic for the wide ones; judge precision is pessimistic where the judge found a true match the labels missed (three of gemma4's 18 false positives and at least two of qwen2.5vl's 7 were such cases).

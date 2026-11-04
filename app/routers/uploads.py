@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 
 from app.domain.ids import new_job_id
@@ -23,7 +23,14 @@ _UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 
 @router.post("")
-async def upload_video(request: Request, file: UploadFile = File(...)) -> JSONResponse:
+async def upload_video(
+    request: Request,
+    file: UploadFile = File(...),
+    prompt: str | None = Form(default=None, max_length=2000),
+) -> JSONResponse:
+    """Store the upload and queue a job for it; ``prompt`` (optional) is what
+    to find in it, as on ``POST /jobs`` (spec 014)."""
+    prompt = prompt.strip() if prompt and prompt.strip() else None
     content_type = file.content_type or ""
     if content_type not in _ALLOWED_MIME:
         raise HTTPException(
@@ -55,6 +62,7 @@ async def upload_video(request: Request, file: UploadFile = File(...)) -> JSONRe
         job_id=job_id,
         url=f"upload://{dest}",
         download_path=str(_UPLOAD_DIR),
+        prompt=prompt,
     )
     await request.app.state.job_store.create(state)
 
@@ -67,6 +75,7 @@ async def upload_video(request: Request, file: UploadFile = File(...)) -> JSONRe
                 "caption_format": "srt",
                 "target_aspect_ratio": 9 / 16,
                 "upload_path": str(dest),
+                "prompt": prompt,
             },
         ))
 

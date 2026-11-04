@@ -3,6 +3,7 @@
 
     scene_index.py index [--chunk 8] [--overlap 0] [--model HF_ID] -- <video> <out_dir>
     scene_index.py query [--model HF_ID] -- <text>
+    scene_index.py embed-texts [--model HF_ID] -- <texts.json> <out.npy>
 
 Callers MUST put ``--`` before the positionals. Without it, argparse reads a query such as
 ``--help`` as a flag (prints usage, exit 0) and ``-dog`` as an unknown option (exit 2); a
@@ -27,6 +28,13 @@ than 6 hours.
 Progress goes to stdout as one JSON object per line (``{"done": i, "total": n}``)
 so a parent process can stream it; logs and a final ``stats`` line go to stderr.
 ``query`` prints one JSON line: the 768-float normalised text vector.
+
+``embed-texts`` reads a JSON list of non-empty strings from ``<texts.json>`` and writes
+their vectors (float32, n x 768, L2-normalised, in input order) to ``<out.npy>`` via a
+temp file + rename, so a reader never sees a partial file. Every text is embedded with
+the query instruction, so a prompt and transcript sentences embedded this way compare
+text to text (spec 014 matches speech this way: the model does not hear). Progress goes
+to stdout as ``{"done": i, "total": n}`` lines, as for ``index``.
 
 The model is ``--model``, else ``$YTVIDEO_SCENE_MODEL``, else ``DEFAULT_MODEL``.
 Exit status: 0 ok, 1 failure (message on stderr), 2 bad arguments.
@@ -255,6 +263,52 @@ def embed_queries(texts: list[str], model: str) -> list[list[float]]:
         return [embedder.embed_query(text) for text in texts]
 
 
+def read_texts(path: Path) -> list[str]:
+    """The texts to embed: a JSON list of non-empty strings, else SceneIndexError."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SceneIndexError(f"cannot read texts from {path}: {exc}") from exc
+    if not isinstance(data, list) or not data:
+        raise SceneIndexError(f"{path} must hold a non-empty JSON list of strings")
+    if not all(isinstance(t, str) and t.strip() for t in data):
+        raise SceneIndexError(f"{path}: every entry must be a non-empty string")
+    return data
+
+
+def write_vectors(out: Path, rows) -> None:
+    """Write *rows* to *out* (``.npy``) via a temp file + rename."""
+    import numpy as np
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_name(out.name + ".tmp")
+    try:
+        with tmp.open("wb") as handle:
+            np.save(handle, np.asarray(rows, dtype=np.float32))
+        os.replace(tmp, out)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def embed_texts_to_file(
+    texts_path: Path, out: Path, model: str, *, emit: Callable[[dict], None]
+) -> dict:
+    """Embed every text of *texts_path* into *out*; returns a stats dict."""
+    import numpy as np
+
+    texts = read_texts(texts_path)
+    started = time.perf_counter()
+    embedder = load_embedder(model)
+    rows = np.zeros((len(texts), EMBED_DIMS), dtype=np.float32)
+    emit({"done": 0, "total": len(texts)})
+    with _stdout_to_stderr():
+        for i, text in enumerate(texts):
+            rows[i] = embedder.embed_query(text)
+            emit({"done": i + 1, "total": len(texts)})
+    write_vectors(out, rows)
+    return {"model": model, "texts": len(texts), "seconds": round(time.perf_counter() - started, 2)}
+
+
 def _emit_json_line(payload: dict) -> None:
     sys.stdout.write(json.dumps(payload) + "\n")
     sys.stdout.flush()
@@ -280,6 +334,11 @@ def _build_parser() -> argparse.ArgumentParser:
     qry = sub.add_parser("query", help="print the vector for a text query")
     qry.add_argument("text")
     qry.add_argument("--model", default=None)
+
+    txt = sub.add_parser("embed-texts", help="embed a JSON list of texts into an .npy file")
+    txt.add_argument("texts", type=Path, help="JSON file holding a list of strings")
+    txt.add_argument("out", type=Path, help="output .npy (n x 768, float32)")
+    txt.add_argument("--model", default=None)
     return parser
 
 
@@ -300,6 +359,9 @@ def main(argv: list[str] | None = None) -> int:
                 skip_still=args.skip_still,
                 emit=_emit_json_line,
             )
+            print("stats " + json.dumps(stats), file=sys.stderr)
+        elif args.command == "embed-texts":
+            stats = embed_texts_to_file(args.texts, args.out, model, emit=_emit_json_line)
             print("stats " + json.dumps(stats), file=sys.stderr)
         else:
             _emit_json_line_vector(embed_query(args.text, model))
