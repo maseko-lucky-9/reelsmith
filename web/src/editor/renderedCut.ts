@@ -56,3 +56,48 @@ export function renderedCut(
   }
   return window ? [window] : null;
 }
+
+/** Which clock the playhead runs on: the clean source through the edit, or the rendered file. */
+export type PreviewView = "source" | "result";
+
+/** Whether split at the playhead is offered, and why not (the caller shows the reason). */
+export type SplitGate = { ok: true } | { ok: false; reason: string };
+
+/** 016's reason (TrimPanel): the rendered file does not play the edit's segments. */
+export const STALE_PLAYHEAD_REASON =
+  "Re-render first: the preview does not play these segments, so the playhead does not match them. Split is unavailable until the clip is re-rendered with them.";
+
+/** A re-render is replacing the file the playhead runs on (the server records its cut as unknown meanwhile). */
+export const RERENDER_IN_FLIGHT_REASON =
+  "A re-render is replacing the clip: Split at the playhead waits until it finishes, or switch to the source view.";
+
+/**
+ * Split at the playhead (and keep left / keep right) is offered only while
+ * the playhead is a time on the edited reel (spec 017 FR-017, data-model §2
+ * `playheadOnEditClock`). The clean-source view plays the edit itself, so it
+ * is always open. On the rendered file's clock (the rendered-clip view, and
+ * the fallback when the source cannot play) the edit's cut must be the cut
+ * that file was rendered from (`baseline`: the rendered cut, else the loaded
+ * edit's cut): an unknown cut never matches, and while a re-render is in
+ * flight the file is being replaced, so it waits too. No baseline (no window
+ * known) leaves it open, as in 016.
+ */
+export function splitGate({
+  view,
+  edit,
+  baseline,
+  rerenderInFlight = false,
+}: {
+  view: PreviewView;
+  edit: Cut;
+  baseline: Cut | "unknown" | null;
+  rerenderInFlight?: boolean;
+}): SplitGate {
+  if (view === "source") return { ok: true };
+  if (rerenderInFlight) return { ok: false, reason: RERENDER_IN_FLIGHT_REASON };
+  if (baseline === null) return { ok: true };
+  if (baseline === "unknown" || !sameCut(edit, baseline)) {
+    return { ok: false, reason: STALE_PLAYHEAD_REASON };
+  }
+  return { ok: true };
+}

@@ -5,7 +5,15 @@
  */
 import { describe, expect, it } from "vitest";
 import type { TimelinePayload } from "@/api/client";
-import { CUT_TOLERANCE, cutOf, renderedCut, sameCut } from "./renderedCut";
+import {
+  CUT_TOLERANCE,
+  RERENDER_IN_FLIGHT_REASON,
+  STALE_PLAYHEAD_REASON,
+  cutOf,
+  renderedCut,
+  sameCut,
+  splitGate,
+} from "./renderedCut";
 
 const WINDOW = { start: 100, end: 110 };
 
@@ -114,5 +122,67 @@ describe("cutOf", () => {
       tracks: [{ kind: "video", items: [{ start: 0, end: 10, src: "main" }] }],
     };
     expect(cutOf(v1, null)).toEqual([]);
+  });
+});
+
+describe("splitGate", () => {
+  const trimmed = [{ start: 101.5, end: 110 }];
+  const open = { ok: true };
+  const stale = { ok: false, reason: STALE_PLAYHEAD_REASON };
+
+  it("is always open in the clean-source view (the playhead is the edit's clock)", () => {
+    expect(
+      splitGate({ view: "source", edit: trimmed, baseline: [WINDOW] }),
+    ).toEqual(open);
+    expect(
+      splitGate({ view: "source", edit: trimmed, baseline: "unknown" }),
+    ).toEqual(open);
+    expect(
+      splitGate({
+        view: "source",
+        edit: trimmed,
+        baseline: "unknown",
+        rerenderInFlight: true,
+      }),
+    ).toEqual(open);
+  });
+
+  it("in the rendered-clip view, opens only on the cut the file was rendered from", () => {
+    expect(
+      splitGate({ view: "result", edit: [WINDOW], baseline: [WINDOW] }),
+    ).toEqual(open);
+    expect(
+      splitGate({ view: "result", edit: trimmed, baseline: [WINDOW] }),
+    ).toEqual(stale);
+    expect(
+      splitGate({
+        view: "result",
+        edit: [{ start: 100.001, end: 110 }],
+        baseline: [WINDOW],
+      }),
+    ).toEqual(open);
+  });
+
+  it("never opens on an unknown rendered cut ([]: a render is replacing the file)", () => {
+    expect(
+      splitGate({ view: "result", edit: [WINDOW], baseline: "unknown" }),
+    ).toEqual(stale);
+  });
+
+  it("is open when there is no cut to compare (no window, nothing recorded)", () => {
+    expect(splitGate({ view: "result", edit: trimmed, baseline: null })).toEqual(
+      open,
+    );
+  });
+
+  it("waits for a re-render in flight in the rendered-clip view, even on the same cut", () => {
+    expect(
+      splitGate({
+        view: "result",
+        edit: [WINDOW],
+        baseline: [WINDOW],
+        rerenderInFlight: true,
+      }),
+    ).toEqual({ ok: false, reason: RERENDER_IN_FLIGHT_REASON });
   });
 });
