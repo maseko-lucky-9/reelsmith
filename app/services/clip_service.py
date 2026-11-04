@@ -52,6 +52,12 @@ class ReelGeometry:
 # a 1920x3413 canvas).
 MAX_CANVAS_WIDTH = 1080
 
+# A blur band under the inset shorter than 1/10 of the canvas cannot hold a
+# caption; the anchor then falls back to 85% of the canvas height (the 16:9
+# convention puts it at ~83%).
+MIN_BAND_DIVISOR = 10
+FILLED_CANVAS_ANCHOR = 0.85
+
 
 def reel_geometry(
     source_w: int, source_h: int, target_aspect_ratio: float = 9 / 16
@@ -60,7 +66,8 @@ def reel_geometry(
 
     The canvas is the source width, capped at ``MAX_CANVAS_WIDTH``, and
     ``int(w / ratio)`` tall; captions are anchored in the middle of the blur
-    band below the vertically centred inset.
+    band below the vertically centred inset (or, when the inset fills the canvas,
+    at ``FILLED_CANVAS_ANCHOR`` of its height).
     """
     canvas_w = min(source_w, MAX_CANVAS_WIDTH)
     canvas_h = int(canvas_w / target_aspect_ratio)
@@ -68,7 +75,14 @@ def reel_geometry(
     inset_height = 2 * ((source_h * canvas_w + source_w) // (2 * source_w))
     inner_top = (canvas_h - inset_height) // 2
     inner_bottom = inner_top + inset_height
-    band_anchor_y = inner_bottom + (canvas_h - inner_bottom) // 2
+    band = canvas_h - inner_bottom
+    if band < canvas_h // MIN_BAND_DIVISOR:
+        # A source that already fills the reel has no blur band to centre on
+        # (the middle of a 0 px band is the canvas' bottom edge, which crops the
+        # caption to a sliver); put the captions over the picture's lower part.
+        band_anchor_y = int(canvas_h * FILLED_CANVAS_ANCHOR)
+    else:
+        band_anchor_y = inner_bottom + band // 2
     return ReelGeometry(
         source_size=(source_w, source_h),
         canvas_size=(canvas_w, canvas_h),

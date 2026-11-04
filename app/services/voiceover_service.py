@@ -101,10 +101,13 @@ def _coqui_argv(text: str, out_path: str, *, model: str, voice: str | None) -> t
 
 
 def _piper_argv(out_path: str, *, model: str) -> tuple[str, ...]:
-    """Build the argv for the ``piper`` TTS CLI.
+    """Build the argv for the legacy ``synthesize(provider="piper")`` path.
 
-    Text is fed via stdin; the binary reads stdin and writes a WAV to
-    ``--output_file``.  Model path comes from ``YTVIDEO_PIPER_MODEL``.
+    This is the old bare ``piper`` binary form (text on stdin, ``--output_file``)
+    and is NOT what the pinned ``piper-tts`` 1.8.0 CLI accepts: that one takes
+    ``--model``, ``--config``, ``--input-file`` and ``--output-file``. The
+    current path is ``synthesize_voiceover`` (see ``piper_command`` and its
+    argv below). Model path comes from ``YTVIDEO_PIPER_MODEL``.
     """
     return ("piper", "--model", model, "--output_file", out_path)
 

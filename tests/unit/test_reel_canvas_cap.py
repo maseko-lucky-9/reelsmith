@@ -154,3 +154,13 @@ def test_download_prefers_h264_even_when_av1_has_more_pixels():
 def test_download_falls_back_to_av1_when_no_h264_exists():
     formats = [_video("av1-2160", "av01.0.12M.08", 2160, 8000)]
     assert _pick(formats) == ["av1-2160", "audio"]
+
+
+@pytest.mark.parametrize("source", [(576, 1024), (1080, 1920), (720, 1280), (1080, 1900)])
+def test_a_source_already_the_reel_shape_keeps_its_captions_on_the_canvas(source):
+    """With no blur band the anchor used to be the canvas bottom (1024 on 576x1024):
+    the caption was cropped to a 16 px sliver. It sits in the lower part instead."""
+    geometry = clip_service.reel_geometry(*source)
+    canvas_h = geometry.canvas_size[1]
+    # Room for the default 96 px caption (+ stroke/shadow) below and above the anchor.
+    assert 0.6 * canvas_h < geometry.band_anchor_y <= canvas_h - 96
