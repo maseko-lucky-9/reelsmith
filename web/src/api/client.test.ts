@@ -35,6 +35,27 @@ describe('api.listJobs', () => {
   })
 })
 
+describe('api.uploadVideo (spec 014)', () => {
+  it('posts the file and the prompt as multipart form fields', async () => {
+    fetchMock.mockResolvedValue({ ok: true, json: async () => ({ job_id: 'j1', upload_path: '/u', status: 'queued' }) })
+    const file = new File([new Uint8Array(4)], 'talk.mp4', { type: 'video/mp4' })
+
+    await api.uploadVideo(file, 'a red car')
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(String(url)).toBe('/api/uploads')
+    const form = init.body as FormData
+    expect(form.get('prompt')).toBe('a red car')
+    expect((form.get('file') as File).name).toBe('talk.mp4')
+  })
+
+  it('sends no prompt field without a prompt', async () => {
+    fetchMock.mockResolvedValue({ ok: true, json: async () => ({ job_id: 'j1', upload_path: '/u', status: 'queued' }) })
+    await api.uploadVideo(new File([new Uint8Array(4)], 'talk.mp4'))
+    expect((fetchMock.mock.calls[0][1].body as FormData).has('prompt')).toBe(false)
+  })
+})
+
 describe('api.cancelJob / api.deleteJob (spec 013)', () => {
   it('cancels with a POST to the job cancel route', async () => {
     fetchMock.mockResolvedValue({ ok: true, status: 202, json: async () => ({ job_id: 'j1', status: 'cancelling' }) })

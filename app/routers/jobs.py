@@ -52,7 +52,10 @@ class CreateJobRequest(BaseModel):
     )
     segment_mode: Literal["auto", "chapter"] = "auto"
     language: str = "en-US"
-    prompt: str | None = None
+    # What to find (spec 014): with scene search set up it picks the clips by
+    # what is seen and said, over the source's chapters; else it ranks the
+    # discovered clips by their transcript.
+    prompt: str | None = Field(default=None, max_length=2000)
     auto_hook: bool = True
     brand_template_id: str | None = None
     pipeline_options: PipelineOptions = Field(default_factory=PipelineOptions)
@@ -120,6 +123,11 @@ async def preview_thumbnail(url: str) -> Response:
     )
 
 
+def _prompt_key(prompt: str | None) -> str:
+    """A prompt for comparison: whitespace collapsed, case folded; "" for none."""
+    return " ".join((prompt or "").split()).casefold()
+
+
 @router.post("", response_model=CreateJobResponse, status_code=202)
 async def create_job(req: CreateJobRequest, request: Request) -> CreateJobResponse:
     source = detect_platform_id(req.url)
@@ -136,9 +144,15 @@ async def create_job(req: CreateJobRequest, request: Request) -> CreateJobRespon
         )
 
     # Return the existing job if the same URL was already processed or is
-    # queued/running (exact URL match, newest first, any age).
+    # queued/running (exact URL match, newest first, any age). A prompt is a
+    # different request (spec 014): only a job of that URL with the same
+    # prompt (any of them, newest first) is a duplicate; otherwise the prompt
+    # gets its own job. Without a prompt the newest job is returned, as before.
+    asked = _prompt_key(req.prompt)
     existing = await request.app.state.job_store.find_job_by_url(
-        req.url, _DEDUP_STATUSES
+        req.url,
+        _DEDUP_STATUSES,
+        where=(lambda job: _prompt_key(job.prompt) == asked) if asked else None,
     )
     if existing is not None:
         return CreateJobResponse(job_id=existing.job_id, status=existing.status)

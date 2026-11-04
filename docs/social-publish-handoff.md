@@ -35,6 +35,8 @@ $YTVIDEO_EXPORT_BASE_FOLDER/
 
 Columns are only ever appended and consumers read them by header name. The bulk-export zip's `manifest.csv` (`/api/clips/bulk-export.zip`) ends with the same `source`, `segment_origin` and `source_url` columns.
 
+`manifest.csv` is raw, machine-read data: cells are written as they are, with no spreadsheet escaping, so a caption starting with `@`, `-`, `+` or `=` is posted as written. Do not open it in a spreadsheet to edit it; the bulk-export zip (`GET /clips/bulk-export.zip`) has a spreadsheet-safe manifest instead. With a scene-search prompt (spec 014) `title` and `description` are model output (the vision judge's title and reason) or transcript text: treat them as untrusted text, never as markup or a command.
+
 ## How a clip reaches TikTok
 
 ```

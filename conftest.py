@@ -21,6 +21,10 @@ os.environ.setdefault("YTVIDEO_SEGMENT_PROVIDER", "chapter")
 # The LLM re-rank of discovered clips stays off (a developer's .env may turn
 # it on); tests that need it set it on settings and stub the model.
 os.environ.setdefault("YTVIDEO_SEGMENT_RERANK_PROVIDER", "none")
+# AI scene search (spec 014) stays off whatever the machine has: the default
+# "auto" would start the real MLX sidecar wherever .venv-mlx exists. Tests
+# that need it set the provider on settings and fake the sidecar.
+os.environ.setdefault("YTVIDEO_SCENE_SEARCH_PROVIDER", "off")
 os.environ.setdefault("YTVIDEO_JOB_STORE", "memory")
 # Never load a real Whisper model in the default run: the stub provider for
 # every test, and no lifespan warm-up. Real-model coverage lives in
