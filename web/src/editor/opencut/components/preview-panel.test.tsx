@@ -387,6 +387,23 @@ describe("overlay layer", () => {
     expect(overlay.style.fontFamily).toContain("Reelsmith Caption");
   });
 
+  it("keeps an overlay inside the frame like the render: centred on its point, moved in at an edge", () => {
+    mount();
+    const overlay = screen.getByTestId("preview-overlay");
+    // The layer is the frame-sized container the cqw / cqh units measure.
+    expect(
+      (overlay.parentElement as HTMLElement).style.getPropertyValue(
+        "container-type",
+      ),
+    ).toBe("size");
+    // x 0.1, y 0.3: at most 10% of the frame to its left, 90% to its right, 30% above, 70% below.
+    expect(overlay.style.width).toBe("max-content");
+    expect(overlay).toHaveClass("max-w-full");
+    expect(overlay.style.transform).toBe(
+      "translate(clamp(-10cqw, -50%, calc(90cqw - 100%)), clamp(-30cqh, -50%, calc(70cqh - 100%)))",
+    );
+  });
+
   it("renders caption and overlay markup literally, never as HTML", () => {
     load(
       edit({

@@ -4,7 +4,8 @@
 // one player per media element (reel time to source time via previewClock, a seek at each segment
 // boundary, OpenCut's 0.5 s drift correction measured on the reel clock); the reel's 9:16 frame laid out
 // as the render's reel_geometry (previewLayout); captions in the render's font and caption looks
-// (caption-looks.json) with the render's active word; overlays at their x/y fractions; a result view of
+// (caption-looks.json) with the render's active word; overlays at their x/y fractions, kept inside the
+// frame as the render keeps them; a result view of
 // the rendered clip on its own clock, reporting its length (onResultDuration) when its metadata loads;
 // no media, editor or project store, blur background, aspect-ratio
 // menu, audio player, rotation, opacity or font classes. Licence: ../../LICENSE-OpenCut.
@@ -73,6 +74,21 @@ const rgba = ([r, g, b, a]: Rgba) => `rgba(${r}, ${g}, ${b}, ${a / 255})`;
 const pct = (fraction: number) => `${Math.round(fraction * 1e6) / 1e4}%`;
 const px = (n: number) => `${Math.round(n * 100) / 100}px`;
 const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
+
+/**
+ * An overlay's offset from its x/y point, kept inside the frame as the render keeps its image
+ * inside the canvas (render_service.write_overlay_images): centred on the point, moved in where
+ * it would cross an edge, at the left/top edge when wider/taller than the frame. The text layer
+ * is a size container, so `cqw` / `cqh` are the frame's width and height.
+ */
+function insideFrame(fx: number, fy: number): string {
+  const axis = (f: number, unit: "cqw" | "cqh") => {
+    const before = Math.round(f * 1e6) / 1e4;
+    const after = Math.round((1 - f) * 1e6) / 1e4;
+    return `clamp(${-before}${unit}, -50%, calc(${after}${unit} - 100%))`;
+  };
+  return `translate(${axis(fx, "cqw")}, ${axis(fy, "cqh")})`;
+}
 const reelEnd = (el: EditorElement) =>
   el.startTime + el.duration - el.trimStart - el.trimEnd;
 const isActiveAt = (el: EditorElement, t: number) =>
@@ -367,19 +383,27 @@ function TextLayers({
 
   return (
     // Text is React text nodes only: caption and overlay text never becomes markup (FR-014, threat T4).
-    <div className="pointer-events-none absolute inset-0 text-white">
+    <div
+      className="pointer-events-none absolute inset-0 text-white"
+      style={{ containerType: "size" }}
+    >
       {active("overlays").map((el) => {
         if (el.type !== "text") return null;
         const stroke = Math.max(1, Math.floor(el.fontSize / 24));
+        const fx = clamp01(el.x / OVERLAY_CANVAS.width + 0.5);
+        const fy = clamp01(el.y / OVERLAY_CANVAS.height + 0.5);
         return (
           <div
             key={el.id}
             data-testid="preview-overlay"
             className="absolute max-w-full whitespace-pre-wrap leading-tight"
             style={{
-              left: pct(clamp01(el.x / OVERLAY_CANVAS.width + 0.5)),
-              top: pct(clamp01(el.y / OVERLAY_CANVAS.height + 0.5)),
-              transform: "translate(-50%, -50%)",
+              left: pct(fx),
+              top: pct(fy),
+              // Its own width up to the frame's (the render wraps to the canvas), not what is
+              // left of the frame right of `left` (a point near the edge wrapped every word).
+              width: "max-content",
+              transform: insideFrame(fx, fy),
               fontFamily: CAPTION_FONT,
               fontSize: px(el.fontSize * scale),
               color: el.color,
