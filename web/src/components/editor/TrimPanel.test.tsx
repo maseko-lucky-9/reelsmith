@@ -4,16 +4,23 @@
  * `setSegments` rounds them to the millisecond, so the panel checks the
  * values as written, and the store refuses an edit's new segments that break
  * the editor's 51 ms minimum or the server's segment rules. The server's
- * rule is ported here on its own (raw floats, `_segments` in
- * app/services/timeline_render_service.py), with its source range.
+ * rules are ported on their own (`__fixtures__/serverRules.ts`: raw floats,
+ * the source range clamp, the reel's end from the clamped segments).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from "@testing-library/react";
 import type { TimelinePayload } from "@/api/client";
 import { segmentsOf } from "@/lib/timelineEdit";
 import { useTimelineStore } from "@/editor/opencut/stores/timeline-store";
 import { toastRefusal } from "@/editor/opencut/hooks/use-playback-controls";
-import { TrimPanel } from "@/components/editor/EditorToolPanels";
+import { TextPanel, TrimPanel } from "@/components/editor/EditorToolPanels";
+import { serverRefusal } from "@/editor/__fixtures__/serverRules";
 
 vi.mock("sonner", () => ({
   toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), warning: vi.fn() },
@@ -21,39 +28,6 @@ vi.mock("sonner", () => ({
 import { toast } from "sonner";
 
 const store = () => useTimelineStore.getState();
-
-/** The server's v2 segment rules on raw floats, inside the source `[0, source]`. */
-function serverRefusal(
-  timeline: TimelinePayload,
-  source: number | null,
-): string | null {
-  const items = timeline.tracks
-    .filter((t) => t.kind === "video")
-    .flatMap((t) => t.items);
-  if (items.length > 100) return "too many video items";
-  let total = 0;
-  let prevEnd: number | null = null;
-  for (const [i, it] of items.entries()) {
-    let start = Number(it.start);
-    let end = Number(it.end);
-    if (start < 0 || end < 0) return `video[${i}]: negative`;
-    if (!(end > start)) return `video[${i}]: end must be > start`;
-    if (source !== null) {
-      if (start < -1e-3 || end > source + 1e-3)
-        return `video[${i}]: outside the source`;
-      start = Math.max(start, 0);
-      end = Math.min(end, source);
-    }
-    if (end - start < 0.05) return `video[${i}]: shorter than 0.05s`;
-    if (prevEnd !== null && start < prevEnd - 1e-3)
-      return `video[${i}]: overlap`;
-    if (prevEnd !== null) start = Math.max(start, prevEnd);
-    total += end - start;
-    if (total > 1200) return "the edited reel is longer than 1200s";
-    prevEnd = end;
-  }
-  return null;
-}
 
 function mulberry32(seed: number) {
   let a = seed;
@@ -294,4 +268,134 @@ describe("the store refuses an edit's new segments the server would refuse (repl
       { start: 20, end: 30 },
     ]);
   });
+});
+
+/** The panel on the store, re-rendered with every change (as the route does). */
+function LiveTrimPanel({ sourceDuration }: { sourceDuration: number | null }) {
+  useTimelineStore((s) => s._tracks);
+  return (
+    <TrimPanel
+      timeline={store().toTimeline()}
+      onChange={(next) => toastRefusal(store().replaceFromTimeline(next))}
+      playhead={0}
+      sourceWindow={null}
+      sourceDuration={sourceDuration}
+    />
+  );
+}
+
+function mountLive(segments: Array<[number, number]>, sourceDuration: number) {
+  cleanup();
+  store().clearTimeline();
+  expect(
+    store().load(timelineOf(segments), { sourceWindow: null, sourceDuration })
+      .ok,
+  ).toBe(true);
+  return render(<LiveTrimPanel sourceDuration={sourceDuration} />);
+}
+
+describe("Trim panel: an end never past the source (PR #97 final review)", () => {
+  it("repro A: source 124 s, [3.734, 124]: end 124.001 is refused, so start 123.95 leaves a segment the server takes", () => {
+    mountLive([[3.734, 124]], 124);
+    type(1, "end", "124.001");
+    expect(alertText()).toMatch(/source video is 124\.00 s long/);
+    expect(cut()).toEqual([{ start: 3.734, end: 124 }]);
+
+    type(1, "start", "123.95");
+    expect(cut()).toEqual([{ start: 3.734, end: 124 }]);
+    expect(alertText()).toMatch(/at least 0\.051 s/);
+    type(1, "start", "123.949");
+    expect(alertText()).toBeNull();
+    expect(cut()).toEqual([{ start: 123.949, end: 124 }]);
+    expect(serverRefusal(store().toTimeline(), 124)).toBeNull();
+  });
+
+  it("repro B: source 95 s, [94.236, 95]: end 95.001 is refused, so the Text panel's overlay ends on the server's reel", () => {
+    mountLive([[94.236, 95]], 95);
+    type(1, "end", "95.001");
+    expect(alertText()).not.toBeNull();
+    expect(cut()).toEqual([{ start: 94.236, end: 95 }]);
+
+    cleanup();
+    render(
+      <TextPanel
+        timeline={store().toTimeline()}
+        onChange={(next) => toastRefusal(store().replaceFromTimeline(next))}
+        playhead={0}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText("Text", { selector: "input" }), {
+      target: { value: "hi" },
+    });
+    fireEvent.change(screen.getByLabelText("Length (s)"), {
+      target: { value: "3" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add text" }));
+
+    const overlays = store()
+      .toTimeline()
+      .tracks.filter((t) => t.kind === "text-overlay")
+      .flatMap((t) => t.items);
+    expect(overlays.map((o) => [o.start, o.end])).toEqual([[0, 0.764]]);
+    expect(serverRefusal(store().toTimeline(), 95)).toBeNull();
+  });
+
+  it.each([
+    ["an ms source", 124],
+    ["a source off the ms grid", 123.9996],
+  ])(
+    "%s: the last segment within 51 ms of the end, its end typed 1 ms and 0.5 ms past, then its start pulled to 51 ms: every state passes the server",
+    (_label, source) => {
+      for (const past of [0.001, 0.0005]) {
+        const last = Math.floor(source * 1000) / 1000;
+        // Ends 30 ms before the source's end.
+        mountLive([[ms(last - 3), ms(last - 0.03)]], source);
+        const steps: Array<() => ["start" | "end", string]> = [
+          () => ["end", String(source + past)],
+          () => ["end", String(ms(source + past))],
+          () => ["start", String(ms(cut()[0].end - 0.051))],
+          () => ["start", String(ms(cut()[0].end - 0.0505))],
+          () => ["end", String(source)],
+          () => ["start", String(ms(cut()[0].end - 0.051))],
+        ];
+        for (const step of steps) {
+          const [field, value] = step();
+          act(() => type(1, field, value));
+          expect(
+            serverRefusal(store().toTimeline(), source),
+            `${source} + ${past}: ${field} ${value} -> ${JSON.stringify(cut())}`,
+          ).toBeNull();
+        }
+      }
+    },
+  );
+
+  it("takes a start edit on a segment whose end the timeline's trim rounded 0.4 ms past a source off the ms grid", () => {
+    mountLive([[200, 211]], 211.9836);
+    const id = store()._tracks.find((t) => t.role === "segments")!.elements[0]
+      .id;
+    act(() => {
+      expect(store().trimSegment(id, { end: 500 }).ok).toBe(true);
+    });
+    expect(cut()).toEqual([{ start: 200, end: 211.984 }]);
+
+    type(1, "start", "211.933");
+    expect(alertText()).toBeNull();
+    expect(cut()).toEqual([{ start: 211.933, end: 211.984 }]);
+    expect(serverRefusal(store().toTimeline(), 211.9836)).toBeNull();
+  });
+});
+
+describe("Trim panel: an emptied or unreadable field", () => {
+  it.each(["", "   "])(
+    "does not move the start to 0 s for %j: it says so and puts the time back",
+    (value) => {
+      mountLive([[100, 110]], 600);
+      type(1, "start", value);
+      expect(cut()).toEqual([{ start: 100, end: 110 }]);
+      expect(store().history).toEqual([]);
+      expect(alertText()).toMatch(/enter a time/i);
+      expect(screen.getByLabelText("Segment 1 start")).toHaveValue(100);
+    },
+  );
 });
