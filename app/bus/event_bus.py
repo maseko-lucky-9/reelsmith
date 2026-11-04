@@ -68,6 +68,8 @@ class AsyncEventBus:
         self,
         types: Iterable[EventType] | None = None,
         job_id: str | None = None,
+        *,
+        replay: bool = True,
     ) -> AsyncIterator[Event]:
         type_tuple: tuple[EventType, ...] | None = tuple(types) if types else None
         queue: asyncio.Queue[Event | None] = asyncio.Queue()
@@ -78,7 +80,7 @@ class AsyncEventBus:
             # Holding the lock here prevents publish() from adding new events
             # to _subscriptions (and thus this sub's queue) while we replay,
             # which guarantees no events are double-delivered or lost.
-            for past_event in self._history:
+            for past_event in self._history if replay else ():
                 if sub.matches(past_event):
                     queue.put_nowait(past_event)
         try:

@@ -72,3 +72,14 @@ async def db_store(monkeypatch):
     await _eng.dispose_engine()
     _eng._engine = None
     _ses._factory = None
+
+
+@pytest.fixture(autouse=True)
+def _no_leaked_rerender_claims():
+    """A test that queues a re-render without running it must not leave the
+    clip claimed for the next test (``POST /clips/{id}/rerender`` answers 409)."""
+    from app.workers import orchestrator
+
+    orchestrator._rerender_claims.clear()
+    yield
+    orchestrator._rerender_claims.clear()

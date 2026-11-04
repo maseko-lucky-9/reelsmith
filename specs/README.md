@@ -23,6 +23,7 @@ Spec numbers and ADR numbers (`docs/decisions/NNN-*.md`) are separate sequences.
 | 013 cancel-and-delete-jobs | Implemented (T084-T088, T090-T092 review rounds; T089 end-to-end check open) | [spec](013-cancel-and-delete-jobs/spec.md) · [plan](013-cancel-and-delete-jobs/plan.md) · [tasks](013-cancel-and-delete-jobs/tasks.md) |
 | 014 ai-scene-search | Implemented (T093-T106; T107 owner-stack check, T108-T110 follow-ups open) | [spec](014-ai-scene-search/spec.md) · [plan](014-ai-scene-search/plan.md) · [tasks](014-ai-scene-search/tasks.md) |
 | 015 youtube-source-search | Implemented, not verified live (T111-T121, T123, T124; T122 and T125 open: YouTube refused the stream request from the build machine every time) | [spec](015-youtube-source-search/spec.md) · [plan](015-youtube-source-search/plan.md) · [tasks](015-youtube-source-search/tasks.md) |
+| 016 editor-render | Implemented (T126-T132); T133 real render check, T134 editor flow in dark and light, T135 live Piper voice check open | [spec](016-editor-render/spec.md) · [plan](016-editor-render/plan.md) · [tasks](016-editor-render/tasks.md) |
 
 ## Roadmap stubs
 

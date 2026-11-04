@@ -69,6 +69,34 @@ describe('MultiTrackTimeline', () => {
     expect(overlay.style.width).toBe('300px')
   })
 
+  it('keeps a v2 timeline\'s voice-over track and top-level keys; its segments are locked', () => {
+    const v2: TimelinePayload = {
+      schema_version: 2,
+      caption_style: 'hormozi',
+      mute_source: false,
+      tracks: [
+        { kind: 'video', items: [{ start: 100, end: 104, src: 'main' }, { start: 108, end: 110, src: 'main' }] },
+        { kind: 'caption', items: [{ start: 0, end: 2, text: 'hi' }] },
+        { kind: 'text-overlay', items: [] },
+        { kind: 'audio', items: [{ start: 0, end: 2, src: 'voiceover_1.wav', gain: 1 }] },
+      ],
+    }
+    const onChange = vi.fn()
+    render(<MultiTrackTimeline timeline={v2} duration={6} onChange={onChange} pixelsPerSecond={10} />)
+
+    // Segments are drawn back to back on the reel's clock.
+    expect((screen.getByTestId('item-video-1') as HTMLElement).style.left).toBe('40px')
+    fireEvent.click(screen.getByTestId('item-video-0'))
+    expect(onChange).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByTestId('item-caption-0'))
+    const next = onChange.mock.calls[0][0] as TimelinePayload
+    expect(next).toMatchObject({ schema_version: 2, caption_style: 'hormozi', mute_source: false })
+    expect(next.tracks.find((t) => t.kind === 'audio')!.items).toHaveLength(1)
+    expect(next.tracks.find((t) => t.kind === 'video')!.items).toHaveLength(2)
+    expect(next.tracks.find((t) => t.kind === 'caption')!.items).toHaveLength(0)
+  })
+
   it('respects an empty timeline', () => {
     render(
       <MultiTrackTimeline
