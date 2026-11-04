@@ -33,6 +33,7 @@ from app.routers import (
     renders,
     reprompt,
     social_publish,
+    sources,
     subtitle_images,
     transcriptions,
     uploads,
@@ -232,6 +233,7 @@ def create_app() -> FastAPI:
     app.include_router(enhance_speech.router)
     app.include_router(reprompt.router)
     app.include_router(bulk_export.router)
+    app.include_router(sources.router)
 
     # Serve the built React app in production (YTVIDEO_SERVE_FRONTEND=true).
     if settings.serve_frontend:
