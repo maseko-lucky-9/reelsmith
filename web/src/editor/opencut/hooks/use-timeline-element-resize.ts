@@ -4,7 +4,8 @@
 // seconds: they stop at the source's bounds and the neighbours' source windows, keep 51 ms
 // (MIN_EDIT_SEGMENT_SECONDS: never under the server's 0.05 s on raw floats), and commit through
 // trimSegment (016 setSegments: reel items follow). A text overlay's left edge moves its start
-// and keeps its end, its right edge its end, inside the reel; both in one undo step. The click the
+// and keeps its end, its right edge its end, inside the reel; both in one undo step; an overlay's
+// edge onto another overlay of its track is refused, as a move is. The click the
 // release makes on the row is swallowed (suppressClick), so it neither deselects nor seeks.
 // Captions (their timing is the speech) and voice-overs (their length is the audio) get no
 // handles. Licence: ../../LICENSE-OpenCut.
@@ -52,6 +53,9 @@ export interface ResizePreview {
 }
 
 const visible = (el: EditorElement) => el.duration - el.trimStart - el.trimEnd;
+
+const OVERLAP =
+  "Cannot resize it there: it would overlap another item on that track.";
 
 function canResize(element: EditorElement, readOnly: boolean): boolean {
   return (
@@ -121,6 +125,20 @@ function commit(element: EditorElement, trackId: string, drag: ResizeDrag) {
         drag.side === "left" ? { start: edges.start } : { end: edges.end },
       ),
     );
+    return;
+  }
+  // An overlay may not cover another one on its track (the move's rule, timeline-track.tsx).
+  const others =
+    store._tracks
+      .find((t) => t.id === trackId)
+      ?.elements.filter((el) => el.id !== element.id) ?? [];
+  if (
+    others.some(
+      (el) =>
+        edges.start < el.startTime + visible(el) && edges.end > el.startTime,
+    )
+  ) {
+    toastRefusal({ ok: false, reason: OVERLAP });
     return;
   }
   const trims = element.trimStart + element.trimEnd;

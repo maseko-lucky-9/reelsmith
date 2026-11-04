@@ -1,5 +1,7 @@
 // Copied from OpenCut (MIT) apps/web/src/stores/playback-store.ts @ 3037a7e
-// Local changes: the types import points at web/src/editor/opencut/. Licence: ../../LICENSE-OpenCut.
+// Local changes: the types import points at web/src/editor/opencut/; play at the end restarts
+// from 0 and play with nothing to play (no length) does nothing (upstream showed Pause and ran
+// an idle frame loop). Licence: ../../LICENSE-OpenCut.
 import { create } from "zustand";
 import type {
   PlaybackState,
@@ -65,6 +67,10 @@ export const usePlaybackStore = create<PlaybackStore>((set, get) => ({
   speed: 1.0,
 
   play: () => {
+    const { currentTime, duration } = get();
+    if (!(duration > 0)) return;
+    // At the end, play starts over (the frame loop would not advance past it).
+    if (currentTime >= duration) get().seek(0);
     set({ isPlaying: true });
     startTimer(get);
   },

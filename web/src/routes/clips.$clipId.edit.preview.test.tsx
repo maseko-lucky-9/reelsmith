@@ -305,6 +305,27 @@ describe("fallback to the rendered clip", () => {
     expect(toolbarButton("Split").title).toBe(STALE_PLAYHEAD_REASON);
   });
 
+  it("offers to try the source again after it failed to load, and plays it in the edit preview again", async () => {
+    await renderPage();
+    const failed = sourceVideo() as HTMLVideoElement;
+    Object.defineProperty(failed, "error", {
+      configurable: true,
+      value: { code: 2 },
+    });
+    fireEvent.error(failed);
+    expect(sourceVideo()).toBeNull();
+
+    fireEvent.click(button("Try the source again"));
+
+    const again = sourceVideo();
+    expect(again).not.toBeNull();
+    expect(again).not.toBe(failed);
+    expect(again?.getAttribute("src")).toBe("/api/jobs/job-1/source");
+    expect(screen.queryByRole("note")).toBeNull();
+    expect(button("Edit preview").disabled).toBe(false);
+    expect(button("Edit preview").getAttribute("aria-pressed")).toBe("true");
+  });
+
   it("opens on the rendered clip when the job no longer keeps its source", async () => {
     await renderPage({ video_path: null });
 
@@ -313,6 +334,10 @@ describe("fallback to the rendered clip", () => {
     expect(screen.getByRole("note").textContent).toBe(
       "Showing the rendered clip. The source video is no longer kept on the server.",
     );
+    // Nothing to try again: the server no longer has it.
+    expect(
+      screen.queryByRole("button", { name: "Try the source again" }),
+    ).toBeNull();
   });
 });
 
@@ -388,7 +413,9 @@ describe("properties of the selection", () => {
     fireEvent.click(button("Text"));
     expect(screen.getByRole("region", { name: "Text" })).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Caption: hello there" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Caption: hello there" }),
+    );
 
     const properties = screen.getByRole("region", { name: "Properties" });
     expect(screen.queryByRole("region", { name: "Text" })).toBeNull();

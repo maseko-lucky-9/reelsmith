@@ -425,9 +425,10 @@ export function ClipEditorPage() {
 
   // The clean-source view needs the job's source; without it the preview
   // falls back to the rendered clip and says why (FR-013).
+  const sourceFailed =
+    sourceError?.clipId === clipId ? sourceError.reason : null;
   const sourceUnavailable =
-    (sourceError?.clipId === clipId ? sourceError.reason : null) ??
-    (job && !job.video_path ? SOURCE_NOT_KEPT : null);
+    sourceFailed ?? (job && !job.video_path ? SOURCE_NOT_KEPT : null);
   const previewView: PreviewView = sourceUnavailable ? "result" : view;
 
   // Split at the playhead (toolbar, S key, context menu, Trim panel) and the
@@ -719,6 +720,22 @@ export function ClipEditorPage() {
               className="mx-3 mt-2 rounded border border-amber-500/40 bg-amber-950/80 px-2 py-1 text-xs text-amber-100"
             >
               Showing the rendered clip. {sourceUnavailable}
+              {sourceFailed && !(job && !job.video_path) ? (
+                <>
+                  {" "}
+                  {/* A failed load (network, a refused request) may pass on a second try. */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSourceError(null);
+                      setView("source");
+                    }}
+                    className="underline underline-offset-2 hover:text-white"
+                  >
+                    Try the source again
+                  </button>
+                </>
+              ) : null}
             </p>
           ) : null}
           <div className="relative min-h-0 flex-1">

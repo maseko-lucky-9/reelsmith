@@ -151,6 +151,51 @@ describe("useTimelineElementResize", () => {
     expect(result.current.preview).toBeNull();
   });
 
+  it("refuses an overlay edge drag onto another overlay of its track, like a move, with a toast", () => {
+    store().clearTimeline();
+    store().load(
+      {
+        ...TWO,
+        tracks: [
+          TWO.tracks[0],
+          {
+            kind: "text-overlay",
+            items: [
+              { start: 2, end: 4, text: "hook", x: 0.5, y: 0.2 },
+              { start: 5, end: 7, text: "cta", x: 0.5, y: 0.8 },
+            ],
+          },
+        ],
+      },
+      { sourceWindow: null, sourceDuration: 200 },
+    );
+    const track = trackOf("overlays");
+    const element = track.elements[0];
+    const before = store().toTimeline();
+    const { result } = renderHook(() =>
+      useTimelineElementResize({ element, track, zoomLevel: 1 }),
+    );
+
+    // The right edge +100 px (+2 s): 2-6 s runs into cta at 5-7 s.
+    act(() => result.current.handleResizeStart(mouse(0), element.id, "right"));
+    act(() => {
+      fireEvent.mouseUp(document, { clientX: 100 });
+    });
+
+    expect(toast.error).toHaveBeenCalledWith(
+      expect.stringMatching(/overlap another item/),
+    );
+    expect(store().toTimeline()).toStrictEqual(before);
+    expect(store().history).toHaveLength(0);
+
+    // +25 px (+0.5 s), 2-4.5 s, is clear of it.
+    act(() => result.current.handleResizeStart(mouse(0), element.id, "right"));
+    act(() => {
+      fireEvent.mouseUp(document, { clientX: 25 });
+    });
+    expect(trackOf("overlays").elements[0].duration).toBe(2.5);
+  });
+
   it("draws no handles for captions", () => {
     const track = trackOf("captions");
     const { result } = renderHook(() =>

@@ -73,6 +73,41 @@ describe("track layout helpers", () => {
   });
 });
 
+describe("usePlaybackStore.play at the reel's end (PR #97 review)", () => {
+  afterEach(() => {
+    usePlaybackStore.getState().pause();
+    usePlaybackStore.setState({ currentTime: 0, duration: 0 });
+    vi.restoreAllMocks();
+  });
+
+  it("restarts from the start instead of showing Pause on an idle frame loop", () => {
+    const raf = vi.spyOn(window, "requestAnimationFrame").mockReturnValue(1);
+    vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => {});
+    const seen: number[] = [];
+    const onSeek = (e: Event) =>
+      seen.push((e as CustomEvent<{ time: number }>).detail.time);
+    window.addEventListener("playback-seek", onSeek);
+    try {
+      usePlaybackStore.setState({ duration: 10, currentTime: 10 });
+      usePlaybackStore.getState().play();
+    } finally {
+      window.removeEventListener("playback-seek", onSeek);
+    }
+    expect(usePlaybackStore.getState().currentTime).toBe(0);
+    expect(usePlaybackStore.getState().isPlaying).toBe(true);
+    expect(seen).toEqual([0]);
+    expect(raf).toHaveBeenCalled();
+  });
+
+  it("does not play a reel with nothing to play (no length)", () => {
+    const raf = vi.spyOn(window, "requestAnimationFrame").mockReturnValue(1);
+    usePlaybackStore.setState({ duration: 0, currentTime: 0 });
+    usePlaybackStore.getState().play();
+    expect(usePlaybackStore.getState().isPlaying).toBe(false);
+    expect(raf).not.toHaveBeenCalled();
+  });
+});
+
 describe("usePlaybackStore.seek", () => {
   afterEach(() => {
     usePlaybackStore.setState({
@@ -107,6 +142,7 @@ describe("usePlaybackStore.seek", () => {
       .spyOn(window, "cancelAnimationFrame")
       .mockImplementation(() => {});
     try {
+      usePlaybackStore.getState().setDuration(10);
       usePlaybackStore.getState().toggle();
       expect(usePlaybackStore.getState().isPlaying).toBe(true);
       usePlaybackStore.getState().toggle();
