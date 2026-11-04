@@ -1,7 +1,7 @@
 /**
  * useClipEdit: load, save and adopt on the timeline store (spec 017 T145;
- * FR-005, FR-012, FR-019, FR-020). The first two cases are the 016
- * useTimelineEditor save-in-flight cases, ported.
+ * FR-005, FR-012, FR-019, FR-020). The first two cases are the save-in-flight
+ * cases of spec 016's editor state hook (removed by T156), ported.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, act, waitFor } from "@testing-library/react";
@@ -76,7 +76,7 @@ beforeEach(() => {
   vi.mocked(api.upsertClipEdit).mockReset();
 });
 
-describe("useClipEdit — save in flight (ported from useTimelineEditor)", () => {
+describe("useClipEdit — save in flight (ported from spec 016)", () => {
   it("keeps edits made while the save was in flight, still dirty, on the new version", async () => {
     const pending = controlled<ClipEditState>();
     vi.mocked(api.upsertClipEdit).mockReturnValue(pending.promise);

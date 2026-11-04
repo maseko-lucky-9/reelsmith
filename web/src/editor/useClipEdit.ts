@@ -1,6 +1,7 @@
 /**
  * The clip editor's load / save / adopt hook on the timeline store (spec 017
- * T145; FR-005, FR-012, FR-019, FR-020). Port of the 016 `useTimelineEditor`:
+ * T145; FR-005, FR-012, FR-019, FR-020). Port of spec 016's editor state hook
+ * (`web/src/hooks/`, removed by spec 017 T156):
  * the edit lives in the OpenCut timeline store (`useTimelineStore`), whose
  * history is the undo/redo; this hook loads it once from
  * `GET /clips/{id}/edit`, saves it through `PUT /clips/{id}/edit` with the
