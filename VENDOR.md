@@ -53,3 +53,32 @@
   before upgrading mlx-vlm; the shim can be deleted once upstream forwards
   `pixel_values_videos`.
 - **Setup:** `scripts/setup_scene_venv.sh` recreates `.venv-mlx` from `requirements-scene.txt`.
+
+## maseko-lucky-9/OpenCut (draft: completed by spec 017 T158)
+
+- **Source:** fork `maseko-lucky-9/OpenCut` of https://github.com/OpenCut-app/OpenCut (MIT,
+  "Copyright 2025 OpenCut"), local checkout `~/Repo/experiments/demo/OpenCut`
+- **Commit:** 3037a7ecbf23ac8db4a3a237eecfd72af9068258 (2025-07-12, "fix: handle border")
+- **Vendored:** 2026-11-04
+- **Location:** `web/src/editor/opencut/` (upstream file names kept, relative to
+  `apps/web/src/`); the MIT text is `web/src/editor/LICENSE-OpenCut`. Every file starts with
+  `// Copied from OpenCut (MIT) apps/web/src/<path> @ 3037a7e` (or `Adapted from`) and a line
+  naming its local changes; `web/src/editor/vendor.test.ts` checks the headers.
+- **Why vendored:** OpenCut is a Next.js app, not a package. Reelsmith takes its browser
+  timeline as the clip editor's editing surface over timeline schema v2 (ADR-015, spec 017).
+  New runtime dependency: `zustand` (exact pin in `web/package.json`).
+- **Copied so far (T141):** `types/timeline.ts`, `types/playback.ts`,
+  `constants/timeline-constants.ts`, `lib/time.ts`, `stores/playback-store.ts`,
+  `hooks/use-selection-box.ts`, `hooks/use-timeline-zoom.ts`,
+  `components/editor/selection-box.tsx` (as `components/selection-box.tsx`),
+  `components/editor/properties-panel/property-item.tsx` (as
+  `components/properties-panel/property-item.tsx`).
+- **Local modifications so far:** `types/timeline.ts`: `MediaType` is a local
+  `'image' | 'video' | 'audio'` union and `generateUUID()` is `crypto.randomUUID()`;
+  `use-timeline-zoom.ts`: React 19 `RefObject<HTMLDivElement | null>`; `use-selection-box.ts`:
+  debug `console.log` calls and an unused rectangle removed; `selection-box.tsx`: no
+  `"use client"`, fill via `color-mix()` over the app's oklch `--foreground`; imports re-pointed
+  from `@/` to `@/editor/opencut/`. Files are formatted by Prettier's defaults.
+- **Never taken:** media panel and import, `lib/storage/**` (IndexedDB/OPFS), ffmpeg.wasm
+  (`lib/ffmpeg-utils.ts`, `lib/media-processing.ts`), the waveform (wavesurfer.js), the media,
+  project, editor and panel stores (spec 017 FR-023; research R2 has the full inventory).
