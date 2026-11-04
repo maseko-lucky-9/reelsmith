@@ -23,6 +23,21 @@ import { TimelinePlayhead } from "./timeline-playhead";
 import { TimelineTrackContent } from "./timeline-track";
 import { suppressNextClick } from "@/editor/suppressClick";
 
+/** Renders of the playhead (it has no state: one per render of the timeline). */
+const playheadRenders = vi.hoisted(() => ({ count: 0 }));
+vi.mock("./timeline-playhead", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./timeline-playhead")>();
+  return {
+    ...actual,
+    TimelinePlayhead: (
+      props: Parameters<typeof actual.TimelinePlayhead>[0],
+    ) => {
+      playheadRenders.count++;
+      return actual.TimelinePlayhead(props);
+    },
+  };
+});
+
 vi.mock("sonner", () => ({
   toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), warning: vi.fn() },
 }));
@@ -382,6 +397,27 @@ describe("the playhead on a scrolled timeline (PR #97 review, blocker C)", () =>
     );
     // 100 px into the content, the view starts at 500 px: left of it, not over the labels.
     expect(screen.queryByRole("slider", { name: "Playhead" })).toBeNull();
+  });
+
+  it("does not re-render the timeline for a scroll that leaves the horizontal offset and width as they were (a vertical scroll)", () => {
+    const { container } = render(<Timeline />);
+    const tracks = container.querySelector(
+      '[data-tracks-area] [data-slot="scroll-area-viewport"]',
+    ) as HTMLElement;
+    // The playhead has no state of its own: it renders when the timeline does.
+    playheadRenders.count = 0;
+
+    act(() => {
+      tracks.scrollTop = 40;
+      tracks.dispatchEvent(new Event("scroll"));
+    });
+    expect(playheadRenders.count).toBe(0);
+
+    act(() => {
+      tracks.scrollLeft = 120;
+      tracks.dispatchEvent(new Event("scroll"));
+    });
+    expect(playheadRenders.count).toBeGreaterThan(0);
   });
 
   it("follows the tracks' scroll: a seek to 30 s on a 1000 px timeline draws it on screen (596 px, not 1692 px)", () => {

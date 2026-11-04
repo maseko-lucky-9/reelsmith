@@ -354,11 +354,16 @@ export function Timeline({
     };
 
     // The playhead sits outside the scrolling content: it follows the tracks' offset.
-    const handleTracksView = () =>
-      setTracksView({
-        scrollLeft: tracksViewport.scrollLeft,
-        width: tracksViewport.clientWidth,
-      });
+    // Only when they change: a vertical scroll fires here too.
+    const handleTracksView = () => {
+      const scrollLeft = tracksViewport.scrollLeft;
+      const width = tracksViewport.clientWidth;
+      setTracksView((view) =>
+        view.scrollLeft === scrollLeft && view.width === width
+          ? view
+          : { scrollLeft, width },
+      );
+    };
     const resizeObserver =
       typeof ResizeObserver === "undefined"
         ? null
