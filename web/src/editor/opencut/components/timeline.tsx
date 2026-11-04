@@ -6,8 +6,9 @@
 // Redo, Zoom out and Zoom in (no duplicate, freeze frame, separate audio): split acts on the
 // segment under the playhead and waits on the split gate, whose reason the disabled controls
 // carry; the delete/undo/redo key handlers moved to use-playback-controls (R12 key map, mounted
-// here); the playback duration is the edited reel's length and the content is exactly that wide
-// (no +30 s buffer; CSS keeps it at least the viewport); one playhead hook for the ruler and the
+// here); the playback duration is the edited reel's length (or `playbackDuration`, the rendered
+// clip's in the result view) and the content is exactly that wide (no +30 s buffer; CSS keeps it
+// at least the viewport); one playhead hook for the ruler and the
 // playhead; track labels name the track (Video / Captions / Text / Voice-over) and the Video track
 // has the mute-source toggle (upstream's track context menu, whose only applicable item it was);
 // Base UI scroll viewports; a read-only edit shows why. Licence: ../../LICENSE-OpenCut.
@@ -80,6 +81,11 @@ interface TimelineProps {
   splitGate?: SplitGate;
   /** Listen to the keyboard map (R12); one editor at a time. */
   keyboard?: boolean;
+  /**
+   * The playhead's clock length when it is not the edited reel's: the rendered
+   * clip's in the result view. Absent: the reel's length.
+   */
+  playbackDuration?: number;
   className?: string;
 }
 
@@ -156,6 +162,7 @@ function ToolbarButton({
 export function Timeline({
   splitGate = SPLIT_OPEN,
   keyboard = true,
+  playbackDuration,
   className,
 }: TimelineProps) {
   // Timeline shows the edit's tracks (segments, captions, text, voice-overs) and their elements.
@@ -283,13 +290,15 @@ export function Timeline({
     ],
   );
 
-  // The playhead runs on the edited reel: its duration is the reel's length.
+  // The playhead runs on the edited reel (its duration is the reel's length),
+  // or on the clock the caller names (the rendered clip in the result view).
+  const clockDuration = playbackDuration ?? reelDuration;
   useEffect(() => {
-    setDuration(reelDuration);
-    if (usePlaybackStore.getState().currentTime > reelDuration) {
-      usePlaybackStore.getState().seek(reelDuration);
+    setDuration(clockDuration);
+    if (usePlaybackStore.getState().currentTime > clockDuration) {
+      usePlaybackStore.getState().seek(clockDuration);
     }
-  }, [reelDuration, setDuration]);
+  }, [clockDuration, setDuration]);
 
   // --- Scroll synchronization effect ---
   useEffect(() => {

@@ -5,7 +5,8 @@
 // boundary, OpenCut's 0.5 s drift correction measured on the reel clock); the reel's 9:16 frame laid out
 // as the render's reel_geometry (previewLayout); captions in the render's font and caption looks
 // (caption-looks.json) with the render's active word; overlays at their x/y fractions; a result view of
-// the rendered clip on its own clock; no media, editor or project store, blur background, aspect-ratio
+// the rendered clip on its own clock, reporting its length (onResultDuration) when its metadata loads;
+// no media, editor or project store, blur background, aspect-ratio
 // menu, audio player, rotation, opacity or font classes. Licence: ../../LICENSE-OpenCut.
 import "@/editor/editor.css";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
@@ -42,6 +43,8 @@ export interface PreviewPanelProps {
   videoVersion: number;
   /** The source cannot be played (not kept, refused, fails to load); the reason says why. */
   onUnavailable: (reason: string) => void;
+  /** The rendered clip's length once its metadata loads (the playhead's clock in the result view). */
+  onResultDuration?: (seconds: number) => void;
 }
 
 /** The render's default caption font (editor.css, a copy of app/assets/fonts/Anton-Regular.ttf). */
@@ -136,6 +139,7 @@ export function PreviewPanel({
   clipId,
   videoVersion,
   onUnavailable,
+  onResultDuration,
 }: PreviewPanelProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [sourceSize, setSourceSize] = useState(DEFAULT_SOURCE_SIZE);
@@ -180,7 +184,10 @@ export function PreviewPanel({
             <ResultView
               clipId={clipId}
               videoVersion={videoVersion}
-              onDuration={setResultDuration}
+              onDuration={(seconds) => {
+                setResultDuration(seconds);
+                onResultDuration?.(seconds);
+              }}
             />
           )}
         </div>
@@ -427,6 +434,10 @@ function ResultView({
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const { isPlaying, volume, muted, speed } = usePlaybackStore();
+  const reportDuration = () => {
+    const d = videoRef.current?.duration;
+    if (d !== undefined && Number.isFinite(d) && d > 0) onDuration(d);
+  };
 
   // The rendered file is its own clock: a store seek moves it, and its time moves the playhead.
   useEffect(() => {
@@ -473,10 +484,8 @@ function ResultView({
           usePlaybackStore.getState().setCurrentTime(video.currentTime);
       }}
       onEnded={() => usePlaybackStore.getState().pause()}
-      onDurationChange={() => {
-        const d = videoRef.current?.duration;
-        if (d !== undefined && Number.isFinite(d)) onDuration(d);
-      }}
+      onLoadedMetadata={reportDuration}
+      onDurationChange={reportDuration}
     />
   );
 }

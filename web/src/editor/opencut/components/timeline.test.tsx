@@ -334,14 +334,22 @@ describe("Timeline", () => {
       "segments",
       "voiceovers",
     ]);
-    const labels = container.querySelector("[data-track-labels]") as HTMLElement;
+    const labels = container.querySelector(
+      "[data-track-labels]",
+    ) as HTMLElement;
     for (const name of ["Captions", "Text", "Video", "Voice-over"]) {
       expect(within(labels).getByText(name)).toBeInTheDocument();
     }
-    expect(screen.getAllByRole("button", { name: /^Segment / })).toHaveLength(3);
-    expect(screen.getAllByRole("button", { name: /^Caption: / })).toHaveLength(3);
+    expect(screen.getAllByRole("button", { name: /^Segment / })).toHaveLength(
+      3,
+    );
+    expect(screen.getAllByRole("button", { name: /^Caption: / })).toHaveLength(
+      3,
+    );
     expect(screen.getAllByRole("button", { name: /^Text: / })).toHaveLength(2);
-    expect(screen.getAllByRole("button", { name: /^Voice-over: / })).toHaveLength(1);
+    expect(
+      screen.getAllByRole("button", { name: /^Voice-over: / }),
+    ).toHaveLength(1);
   });
 
   it("runs the playhead on the reel's length and shows it", () => {
@@ -352,6 +360,17 @@ describe("Timeline", () => {
       "aria-valuemax",
       "24.95",
     );
+  });
+
+  it("runs the playhead on another clock's length when given one (the rendered clip), and back on the reel's", () => {
+    usePlaybackStore.setState({ currentTime: 28 });
+    const { rerender } = render(<Timeline playbackDuration={30} />);
+    expect(usePlaybackStore.getState().duration).toBe(30);
+    expect(usePlaybackStore.getState().currentTime).toBe(28);
+
+    rerender(<Timeline />);
+    expect(usePlaybackStore.getState().duration).toBeCloseTo(24.95, 9);
+    expect(usePlaybackStore.getState().currentTime).toBeCloseTo(24.95, 9);
   });
 
   it("doubles the content width on Zoom in and halves it on Zoom out", () => {
@@ -379,7 +398,10 @@ describe("Timeline", () => {
 
     const overlays = trackOf("overlays");
     expect(store().selectedElements).toEqual(
-      overlays.elements.map((el) => ({ trackId: overlays.id, elementId: el.id })),
+      overlays.elements.map((el) => ({
+        trackId: overlays.id,
+        elementId: el.id,
+      })),
     );
   });
 
@@ -472,4 +494,3 @@ describe("Timeline", () => {
     expect(store().toTimeline().mute_source).toBe(true);
   });
 });
-

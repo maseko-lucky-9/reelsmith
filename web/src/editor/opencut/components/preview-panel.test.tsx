@@ -419,6 +419,16 @@ describe("result view", () => {
     act(() => playback().seek(1.6));
     expect(screen.queryByTestId("preview-caption")).toBeNull();
   });
+
+  it("reports the rendered clip's length when its metadata loads", () => {
+    const onResultDuration = vi.fn();
+    const { video } = mount({ view: "result", onResultDuration });
+    loadMetadata(video, 1080, 1920, 12.5);
+    expect(onResultDuration).toHaveBeenLastCalledWith(12.5);
+    expect(
+      screen.getByText("00:00:12:15", { exact: false }),
+    ).toBeInTheDocument();
+  });
 });
 
 describe("toolbar", () => {

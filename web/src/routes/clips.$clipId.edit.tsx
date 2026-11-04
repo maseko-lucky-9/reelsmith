@@ -75,6 +75,8 @@ const STUB_VOICEOVER_WARNING =
   "Voice-over added as a silent placeholder: no Piper voice is installed on the server. " +
   "Run `python -m scripts.fetch_piper_voice` there, then generate it again.";
 
+/** The job records no source path: retention removed it (spec 001 FR-013), so GET /jobs/{id}/source is a 404. */
+const SOURCE_NOT_KEPT = "The source video is no longer kept on the server.";
 
 /** A voice-over request's failure as shown in its panel. */
 function voiceoverErrorMessage(err: unknown): string {
@@ -308,6 +310,13 @@ export function ClipEditorPage() {
   // The preview's clock: the clean source played through the edit (the
   // playhead is a time on the edited reel), or the rendered clip.
   const [view, setView] = useState<PreviewView>("source");
+  // Why this clip's source cannot be played (the preview failed to load it).
+  const [sourceError, setSourceError] = useState<{
+    clipId: string;
+    reason: string;
+  } | null>(null);
+  // The rendered clip's length: the playhead's clock in the result view.
+  const [resultDuration, setResultDuration] = useState<number | null>(null);
 
   const clipsQuery = useQuery({
     queryKey: ["clips"],
@@ -317,7 +326,7 @@ export function ClipEditorPage() {
   const clipJobId = clip?.job_id;
 
   // The job's recorded duration bounds a segment extension until the
-  // source's metadata loads.
+  // source's metadata loads; no recorded source path means it is gone.
   const jobQuery = useQuery({
     queryKey: ["job", clipJobId],
     queryFn: () => api.getJob(clipJobId ?? ""),
@@ -408,7 +417,12 @@ export function ClipEditorPage() {
     return () => source.close();
   }, [clipJobId, clipId]);
 
-  const previewView: PreviewView = view;
+  // The clean-source view needs the job's source; without it the preview
+  // falls back to the rendered clip and says why (FR-013).
+  const sourceUnavailable =
+    (sourceError?.clipId === clipId ? sourceError.reason : null) ??
+    (job && !job.video_path ? SOURCE_NOT_KEPT : null);
+  const previewView: PreviewView = sourceUnavailable ? "result" : view;
 
   // Split at the playhead (toolbar, S key, context menu, Trim panel) and the
   // transcript highlight wait while the playhead is the rendered file's clock
@@ -672,7 +686,12 @@ export function ClipEditorPage() {
             >
               <ViewButton
                 pressed={previewView === "source"}
-                title="The source played through the edit, captions and text drawn on top"
+                disabled={sourceUnavailable !== null}
+                title={
+                  sourceUnavailable
+                    ? sourceUnavailable
+                    : "The source played through the edit, captions and text drawn on top"
+                }
                 onClick={() => setView("source")}
               >
                 Edit preview
@@ -686,6 +705,14 @@ export function ClipEditorPage() {
               </ViewButton>
             </div>
           </div>
+          {sourceUnavailable ? (
+            <p
+              role="note"
+              className="mx-3 mt-2 rounded border border-amber-500/40 bg-amber-950/80 px-2 py-1 text-xs text-amber-100"
+            >
+              Showing the rendered clip. {sourceUnavailable}
+            </p>
+          ) : null}
           <div className="relative min-h-0 flex-1">
             {previewView === "result" && !clip.output_path ? (
               <div className="flex h-full items-center justify-center">
@@ -697,7 +724,8 @@ export function ClipEditorPage() {
                 jobId={clip.job_id}
                 clipId={clip.clip_id}
                 videoVersion={videoVersion}
-                onUnavailable={() => {}}
+                onUnavailable={(reason) => setSourceError({ clipId, reason })}
+                onResultDuration={setResultDuration}
               />
             )}
             {rerenderError ? (
@@ -817,6 +845,11 @@ export function ClipEditorPage() {
         <Timeline
           splitGate={gate}
           keyboard
+          playbackDuration={
+            previewView === "result" && resultDuration !== null
+              ? resultDuration
+              : undefined
+          }
         />
       </div>
     </div>
