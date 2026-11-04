@@ -155,7 +155,7 @@ function isActivatable(target: EventTarget | null): boolean {
   return (
     target instanceof Element &&
     target.closest(
-      'button, a[href], summary, [role="button"], [role="menuitem"], [role="checkbox"], [role="switch"], [role="tab"], [role="slider"]',
+      'button, a[href], summary, [role="button"], [role="menuitem"], [role="checkbox"], [role="switch"], [role="tab"]',
     ) !== null
   );
 }
