@@ -72,9 +72,24 @@ const STUB_VOICEOVER_WARNING =
   'Voice-over added as a silent placeholder: no Piper voice is installed on the server. ' +
   'Run `python -m scripts.fetch_piper_voice` there, then generate it again.'
 
-/** The source segments a timeline plays, as a comparable key (v1 read through the clip's window). */
+/** A source cut as a comparable key; the same rounding for a timeline's and the server's segments. */
+function cutKey(segments: ReadonlyArray<{ start: number; end: number }>): string {
+  const r = (n: number) => Math.round(n * 1000) / 1000
+  return JSON.stringify(segments.map((s) => [r(s.start), r(s.end)]))
+}
+
+/** The source cut a timeline plays (v1 read through the clip's window). */
 function segmentsKey(timeline: TimelinePayload, window: SourceWindow | null): string {
-  return JSON.stringify(segmentsOf(upgradeTimeline(timeline, window) ?? timeline))
+  return cutKey(segmentsOf(upgradeTimeline(timeline, window) ?? timeline))
+}
+
+/** The server's `[[start, end], ...]` rendered cut as a key; null/absent = the clip's own window. */
+function renderedCutKey(
+  rendered: ReadonlyArray<readonly [number, number]> | null | undefined,
+  window: SourceWindow | null,
+): string | null {
+  if (Array.isArray(rendered) && rendered.length > 0) return cutKey(rendered.map(([start, end]) => ({ start, end })))
+  return window ? cutKey([window]) : null
 }
 
 /** A voice-over request's failure as shown in its panel. */
@@ -171,18 +186,22 @@ export function ClipEditorPage() {
   const editor = useTimelineEditor(clipId, { sourceWindow })
 
   // The video plays the rendered file, so its clock (the playhead) only matches
-  // the edit while the edit's segments are the ones that file was rendered
-  // from: those loaded with the editor, then those of the last queued re-render.
-  const [renderedKey, setRenderedKey] = useState<string | null>(null)
+  // the edit while the edit's segments are the cut that file was rendered from.
+  // That cut is the server's (`clip.rendered_segments`; the clip's own window
+  // when none), replaced by the one a ClipRendered event of this clip carries.
+  const [eventCut, setEventCut] = useState<{ segments: ReadonlyArray<readonly [number, number]> | null } | null>(null)
   const loadedTimeline = editor.loadedTimeline ?? null
+  const renderedKey = eventCut
+    ? renderedCutKey(eventCut.segments, sourceWindow)
+    : clip
+      ? renderedCutKey(clip.rendered_segments, sourceWindow)
+      : null
   const baselineKey = renderedKey ?? (loadedTimeline ? segmentsKey(loadedTimeline, sourceWindow) : null)
-  const segmentsUnrendered = baselineKey !== null && segmentsKey(editor.timeline, sourceWindow) !== baselineKey
-  // The segments key of the re-render the server accepted (set on its 202 only).
-  const queuedKeyRef = useRef<string | null>(null)
-  // True from a 202 until this clip's ClipRendered / ClipRerenderFailed: the
-  // preview plays the old file meanwhile, and a second re-render is refused.
+  const previewStale = baselineKey !== null && segmentsKey(editor.timeline, sourceWindow) !== baselineKey
+  // UX only (correctness is the cut comparison above): true from a 202 until
+  // this clip's ClipRendered / ClipRerenderFailed; the controls that would
+  // save or queue another change wait.
   const [rerenderInFlight, setRerenderInFlight] = useState(false)
-  const previewStale = segmentsUnrendered || rerenderInFlight
   // Bumped when the clip's file is re-rendered: busts the preview's cache.
   const [videoVersion, setVideoVersion] = useState(0)
   const [rerenderError, setRerenderError] = useState<string | null>(null)
@@ -202,9 +221,10 @@ export function ClipEditorPage() {
       }
     }
     const onRendered = (e: Event) => {
-      if (!payloadOf(e)) return
-      if (queuedKeyRef.current !== null) setRenderedKey(queuedKeyRef.current)
-      queuedKeyRef.current = null
+      const payload = payloadOf(e)
+      if (!payload) return
+      const segs = payload.segments
+      setEventCut({ segments: Array.isArray(segs) ? (segs as Array<[number, number]>) : null })
       setRerenderInFlight(false)
       setRerenderError(null)
       setVideoVersion((v) => v + 1)
@@ -213,7 +233,6 @@ export function ClipEditorPage() {
     const onFailed = (e: Event) => {
       const payload = payloadOf(e)
       if (!payload) return
-      queuedKeyRef.current = null
       setRerenderInFlight(false)
       const error = typeof payload.error === 'string' && payload.error ? payload.error : 'unknown error'
       setRerenderError(`Re-render failed: ${error}`)
@@ -225,12 +244,11 @@ export function ClipEditorPage() {
   }, [clipJobId, clipId])
 
   const rerenderMutation = useMutation({
-    mutationFn: (_queuedKey: string) =>
+    mutationFn: () =>
       api.rerenderClip(clipId, { reframe_provider: 'letterbox', regenerate_copy: regenerateCopy }),
     // 202 only means queued: the preview keeps playing the old cut until this
     // clip's ClipRendered event arrives (below), so renderedKey is not advanced here.
-    onSuccess: (_res, queuedKey) => {
-      queuedKeyRef.current = queuedKey
+    onSuccess: () => {
       setRerenderInFlight(true)
       setRerenderError(null)
       toast.success('Re-render queued')
@@ -243,7 +261,6 @@ export function ClipEditorPage() {
 
   // The render reads the saved edit, so pending changes are saved first.
   const rerender = useCallback(async () => {
-    const queuedKey = segmentsKey(editor.timeline, sourceWindow)
     if (editor.isDirty) {
       try {
         await editor.save()
@@ -252,7 +269,7 @@ export function ClipEditorPage() {
         return
       }
     }
-    rerenderMutation.mutate(queuedKey)
+    rerenderMutation.mutate()
   }, [editor, rerenderMutation, sourceWindow])
 
   const voiceoverMutation = useMutation({
@@ -328,8 +345,7 @@ export function ClipEditorPage() {
   // A voice-over saves first and the server appends to the saved edit: a save
   // or re-render meanwhile would race it.
   const voiceoverPending = voiceoverMutation.isPending
-  const busy = editor.isSaving || rerenderMutation.isPending || voiceoverPending
-  const rerenderDisabled = busy || rerenderInFlight
+  const busy = editor.isSaving || rerenderMutation.isPending || voiceoverPending || rerenderInFlight
 
   return (
     <div className="flex flex-col h-full -mx-6 -my-6 overflow-hidden" style={{ height: 'calc(100vh - 48px - 32px)' }}>
@@ -374,8 +390,14 @@ export function ClipEditorPage() {
 
         <button
           type="button"
-          disabled={!editor.isDirty || editor.isSaving || voiceoverPending}
-          title={voiceoverPending ? 'Wait for the voice-over to finish' : undefined}
+          disabled={!editor.isDirty || editor.isSaving || voiceoverPending || rerenderInFlight}
+          title={
+            voiceoverPending
+              ? 'Wait for the voice-over to finish'
+              : rerenderInFlight
+                ? 'Wait for the re-render to finish'
+                : undefined
+          }
           onClick={() =>
             editor.save().then(
               () => toast.success('Saved'),
@@ -393,7 +415,7 @@ export function ClipEditorPage() {
 
         <button
           type="button"
-          disabled={rerenderDisabled}
+          disabled={busy}
           onClick={() => void rerender()}
           title="Save the edit and render the clip with it"
           className="px-3 py-1.5 rounded-lg border border-white/20 text-sm text-zinc-300 hover:text-white hover:border-white/40 transition-colors disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-1.5"
@@ -543,6 +565,7 @@ export function ClipEditorPage() {
                 playhead={currentTime}
                 defaultText={clip.ai_hook_text ?? ''}
                 pending={voiceoverMutation.isPending}
+                locked={rerenderInFlight}
                 error={voiceoverMutation.error ? voiceoverErrorMessage(voiceoverMutation.error) : null}
                 onGenerate={(req) => voiceoverMutation.mutate(req)}
               />

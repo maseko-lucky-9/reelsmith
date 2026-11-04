@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 
 from app.domain.models import JobState, PipelineOptions
 from app.main import create_app
+from app.workers import orchestrator
 
 JOB_URL = "https://www.youtube.com/watch?v=rerender001"
 
@@ -27,6 +28,14 @@ def client() -> Iterator[TestClient]:
         # Nothing consumes this queue, so nothing runs; the test inspects it.
         test_client.app.state.job_queue = asyncio.Queue()
         yield test_client
+
+
+@pytest.fixture(autouse=True)
+def _no_leaked_claims() -> Iterator[None]:
+    # Nothing consumes the queue here, so a 202's claims are never released.
+    yield
+    orchestrator._rerender_claims.clear()
+    orchestrator._work_in_flight.clear()
 
 
 @pytest.fixture
@@ -159,3 +168,32 @@ def test_rerender_payload_carries_regenerate_copy(client, source_video, body, ex
     assert response.status_code == 202
     _, payload = _queue(client).get_nowait()
     assert payload["regenerate_copy"] is expected
+
+
+def test_a_second_rerender_of_the_same_clip_is_refused_until_the_first_ends(client, source_video):
+    _seed(client, video_path=str(source_video))
+
+    assert client.post("/clips/c1/rerender", json={}).status_code == 202
+    second = client.post("/clips/c1/rerender", json={})
+
+    assert second.status_code == 409
+    assert "already in progress" in second.json()["detail"]
+    assert _queue(client).qsize() == 1
+
+    orchestrator.release_rerender("c1")
+    assert client.post("/clips/c1/rerender", json={}).status_code == 202
+
+
+def test_a_rerender_that_cannot_be_queued_releases_its_claim(client, source_video):
+    _seed(client, video_path=str(source_video))
+    client.app.state.job_queue = asyncio.Queue(maxsize=1)
+    client.app.state.job_queue.put_nowait(("x", {}))
+
+    async def _boom(item):
+        raise RuntimeError("queue broke")
+
+    client.app.state.job_queue.put = _boom  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        client.post("/clips/c1/rerender", json={})
+
+    assert orchestrator.claim_rerender("c1") is True

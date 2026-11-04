@@ -142,6 +142,8 @@ async def rerender_clip(
     # Claimed with no await since the deleting check above, and released when
     # the re-render's task ends (or here, if it is never queued): a delete
     # in between answers 409, and a delete first makes this one 409.
+    if not orchestrator.claim_rerender(clip_id):
+        raise HTTPException(status_code=409, detail="a re-render of this clip is already in progress")
     orchestrator.claim_work(job.job_id)
     try:
         if hasattr(request.app.state, "job_queue"):
@@ -152,5 +154,6 @@ async def rerender_clip(
             )
     except BaseException:
         orchestrator.release_work(job.job_id)
+        orchestrator.release_rerender(clip_id)
         raise
     return {"status": "queued", "clip_id": clip_id}

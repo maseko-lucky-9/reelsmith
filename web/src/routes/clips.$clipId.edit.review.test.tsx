@@ -249,7 +249,7 @@ describe('playhead while the segments are not rendered', () => {
     act(() => FakeEventSource.last().emit('ClipRendered', { clip_id: 'other' }))
     expect(button('Split at playhead').disabled).toBe(true)
 
-    act(() => FakeEventSource.last().emit('ClipRendered', { clip_id: 'clip-1' }))
+    act(() => FakeEventSource.last().emit('ClipRendered', { clip_id: 'clip-1', segments: [[101.5, 110]] }))
     await waitFor(() => expect(button('Split at playhead').disabled).toBe(false))
     const newSrc = (document.querySelector('video') as HTMLVideoElement).getAttribute('src')
     expect(newSrc).not.toBe(oldSrc)
@@ -281,17 +281,68 @@ describe('playhead while the segments are not rendered', () => {
     expect(screen.queryByRole('status')).toBeNull()
   })
 
-  it('keeps Split disabled while a re-render is in flight even when the cut is unchanged', async () => {
+  it('disables + Regenerate captions and Save while a re-render is in flight', async () => {
     await renderWithPlayhead(4)
-    editCaption(1, 'new words')
-    expect(button('Split at playhead').disabled).toBe(false)
+    trimStart('101.5')
+    expect(button('Save changes').disabled).toBe(false)
+    expect(button(/regenerate captions/i).disabled).toBe(false)
     fireEvent.click(button('Re-render'))
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Re-render queued'))
 
+    expect(button(/regenerate captions/i).disabled).toBe(true)
+    trimStart('102')
+    expect(button('Save changes').disabled).toBe(true)
+    fireEvent.click(button(/regenerate captions/i))
+    expect(api.rerenderClip).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(button('Voice-over'))
+    expect(button('Generate voice-over').disabled).toBe(true)
+    expect(button('Generate voice-over').title).toMatch(/re-render/)
+  })
+
+  it('the cut in the ClipRendered event decides Split, not the edit at click time', async () => {
+    await renderWithPlayhead(4)
+    trimStart('101.5') // cut A
+    fireEvent.click(button('Re-render'))
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Re-render queued'))
+    trimStart('102') // the edit moves on to cut B meanwhile
+
+    // The render that finished is cut A: the file is A, the edit is B.
+    act(() => FakeEventSource.last().emit('ClipRendered', { clip_id: 'clip-1', segments: [[101.5, 110]] }))
+    await waitFor(() => expect(button('Re-render').disabled).toBe(false))
     expect(button('Split at playhead').disabled).toBe(true)
 
-    act(() => FakeEventSource.last().emit('ClipRendered', { clip_id: 'clip-1' }))
+    fireEvent.click(button('Undo')) // back to cut A, the file's
     await waitFor(() => expect(button('Split at playhead').disabled).toBe(false))
+  })
+
+  describe('reopening the editor', () => {
+    async function reopen(rendered: unknown) {
+      // The saved edit is trimmed to 101.5; the clip's file may or may not be.
+      const trimmed = structuredClone(SAVED)
+      trimmed.tracks[0].items[0] = { start: 101.5, end: 110, src: 'main' }
+      vi.mocked(api.getClipEdit).mockResolvedValue(edit(trimmed, 2))
+      const view = await renderPage({ output_path: '/data/clip-1.mp4', rendered_segments: rendered })
+      const video = view.container.querySelector('video') as HTMLVideoElement
+      Object.defineProperty(video, 'currentTime', { configurable: true, value: 4, writable: true })
+      fireEvent(video, new Event('timeupdate'))
+      fireEvent.click(screen.getByRole('button', { name: 'Trim' }))
+    }
+
+    it('keeps Split disabled when the saved cut was never rendered (a re-render still queued)', async () => {
+      await reopen(null)
+      expect(button('Split at playhead').disabled).toBe(true)
+    })
+
+    it('enables Split when the clip says its file was rendered from the saved cut', async () => {
+      await reopen([[101.5, 110]])
+      expect(button('Split at playhead').disabled).toBe(false)
+    })
+
+    it('compares cuts with the same rounding on both sides', async () => {
+      await reopen([[101.5000004, 109.9999996]])
+      expect(button('Split at playhead').disabled).toBe(false)
+    })
   })
 
   it('unlocks Re-render after a failed re-render, keeping Split disabled', async () => {

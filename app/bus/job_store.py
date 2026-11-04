@@ -515,6 +515,7 @@ class SqlJobStore:
                 r.caption_style = c.get("caption_style") or "static"
                 r.captions_burnt_path = c.get("captions_burnt_path")
                 r.segment_origin = c.get("segment_origin")
+                r.rendered_segments = c.get("rendered_segments")
 
             if record is None:
                 record = ClipRecord(id=clip_id, job_id=job_id)
@@ -838,4 +839,5 @@ def _clip_record_to_dict(record: Any) -> dict[str, Any]:
         "caption_style": record.caption_style,
         "captions_burnt_path": record.captions_burnt_path,
         "segment_origin": record.segment_origin,
+        "rendered_segments": record.rendered_segments,
     }

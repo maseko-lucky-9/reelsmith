@@ -70,6 +70,8 @@ export interface ClipRecord {
   broll_assets?: BrollAsset[] | null
   /** The clip's generated AI hook line; the editor's default voice-over script. */
   ai_hook_text?: string | null
+  /** The source cut the clip's file was rendered from, `[[start, end], ...]`; null = its own window. */
+  rendered_segments?: Array<[number, number]> | null
 }
 
 /**

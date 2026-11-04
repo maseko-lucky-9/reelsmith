@@ -163,6 +163,25 @@ def release_work(job_id: str) -> None:
         _work_in_flight.pop(job_id, None)
 
 
+# Clips with a re-render queued or running: a second one is refused (409), so
+# the editor's file only ever changes once per request it made.
+_rerender_claims: set[str] = set()
+
+
+def claim_rerender(clip_id: str) -> bool:
+    """Mark ``clip_id`` as being re-rendered; False if it already is.
+    Taken in the route with no await since its checks; ``release_rerender``
+    when the re-render ends (or is never queued)."""
+    if clip_id in _rerender_claims:
+        return False
+    _rerender_claims.add(clip_id)
+    return True
+
+
+def release_rerender(clip_id: str) -> None:
+    _rerender_claims.discard(clip_id)
+
+
 def claim_delete(job_id: str) -> bool:
     """Mark ``job_id`` as being deleted; False if a delete of it already is.
     ``DELETE /jobs/{id}`` claims before its checks and releases at the end."""
@@ -304,6 +323,7 @@ async def _cancel_before_start(trigger: Event, bus: AsyncEventBus, store: JobSto
     if trigger.payload.get("rerender_clip_id"):
         log.info("[%s] Re-render cancelled before it started", job_id)
         release_work(job_id)
+        release_rerender(trigger.payload["rerender_clip_id"])
         await _emit(
             bus,
             EventType.CLIP_RERENDER_FAILED,
@@ -1129,6 +1149,8 @@ class _EditRender:
     end: float
     reel_seconds: float
     words: list[transcription_service.WordTiming]
+    # The source windows the plan plays, in order: the cut the file is made from.
+    segments: list[tuple[float, float]]
 
 
 def _plan_saved_edit(
@@ -1178,6 +1200,7 @@ def _plan_saved_edit(
         end=windows[-1].end,
         reel_seconds=sum(w.length for w in windows),
         words=words,
+        segments=[(w.start, w.end) for w in windows],
     )
 
 
@@ -1222,10 +1245,12 @@ async def _rerender_clip(trigger: Event, bus: AsyncEventBus, store: JobStore) ->
         clip = await store.get_clip(clip_id)
         if clip is None or clip.get("job_id") != job_id:
             log.error("[%s] Re-render skipped: clip %s not found", job_id, clip_id)
+            await _report_rerender_failed(bus, job_id, clip_id, "refused", "the clip no longer exists")
             return
         output_path = clip.get("output_path")
         if not output_path:
             log.error("[%s] Re-render skipped: clip %s was never rendered", job_id, clip_id)
+            await _report_rerender_failed(bus, job_id, clip_id, "refused", "the clip was never rendered")
             return
         if not job.video_path or not Path(job.video_path).is_file():
             log.error(
@@ -1233,6 +1258,7 @@ async def _rerender_clip(trigger: Event, bus: AsyncEventBus, store: JobStore) ->
                 job_id,
                 job.video_path,
             )
+            await _report_rerender_failed(bus, job_id, clip_id, "refused", "the source video is not retained")
             return
 
         chapter = _chapter_for_clip(clip)
@@ -1354,17 +1380,26 @@ async def _rerender_clip(trigger: Event, bus: AsyncEventBus, store: JobStore) ->
             clip_id,
             time.perf_counter() - t0,
         )
-        if chapter is not None:
-            await _restore_chapter_status(store, job_id, int(chapter["index"]), prior_chapter_status)
-        with contextlib.suppress(Exception):
-            await _emit(
-                bus, EventType.CLIP_RERENDER_FAILED, job_id, clip_id=clip_id, reason="failed", error=str(exc)[:500]
-            )
+
+        async def _restore_and_report_failure() -> None:
+            if chapter is not None:
+                await _restore_chapter_status(store, job_id, int(chapter["index"]), prior_chapter_status)
+            await _report_rerender_failed(bus, job_id, clip_id, "failed", str(exc)[:500])
+
+        # A cancel landing meanwhile must not skip the report: the editor waits for it.
+        await _finish_then_honour_cancel(_restore_and_report_failure())
     finally:
         if cleanup_root is not None:
             shutil.rmtree(cleanup_root, ignore_errors=True)
-        # The route's claim (``claim_work``), however the re-render ended.
+        # The route's claims (``claim_work``, ``claim_rerender``), however the re-render ended.
         release_work(job_id)
+        release_rerender(clip_id)
+
+
+async def _report_rerender_failed(bus: AsyncEventBus, job_id: str, clip_id: str, reason: str, error: str) -> None:
+    """ClipRerenderFailed for ``clip_id`` (the editor waits for it or ClipRendered)."""
+    with contextlib.suppress(Exception):
+        await _emit(bus, EventType.CLIP_RERENDER_FAILED, job_id, clip_id=clip_id, reason=reason, error=error)
 
 
 async def _restore_chapter_status(store: JobStore, job_id: str, index: int, status: str) -> None:
@@ -2309,6 +2344,11 @@ async def _process_chapter(
         plan_kwargs["plan"] = edit.plan
         await store.upsert_chapter(job_id, lambda c: setattr(c, "transcript", text), index)
 
+    # The source cut this render plays, [[start, end], ...] (None: the clip's own window).
+    rendered_segments: list[list[float]] | None = (
+        [[round(s, 3), round(e, 3)] for s, e in edit.segments] if edit is not None else None
+    )
+
     # ── Render final clip (gated on render) ──────────────────────────────────
     output_path: str | None = None
     safe_title = _sanitize(title)
@@ -2383,6 +2423,8 @@ async def _process_chapter(
             # Set only by a re-render of an existing clip (a reprompt makes new
             # clip ids): the editor waits for its own clip's file to change.
             **({"clip_id": clip_id} if clip_id else {}),
+            # The cut the file was made from (None: the clip's own window).
+            segments=rendered_segments,
         )
     else:
         log.info("[%s] Chapter %d  skipping render (render=False)", job_id, index)
@@ -2434,6 +2476,7 @@ async def _process_chapter(
                 "thumbnail_path": thumbnail_path,
                 "transcript": text,
                 "broll_assets": broll_assets,
+                **({"rendered_segments": rendered_segments} if opts.render else {}),
             }
         )
         if regenerate_copy:

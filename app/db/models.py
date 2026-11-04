@@ -138,6 +138,9 @@ class ClipRecord(Base):
     ai_hook_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     ai_hook_audio_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     broll_assets: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # The source cut the clip's file was last rendered from: [[start, end], ...]
+    # in source seconds. NULL = the clip's own window (never edited).
+    rendered_segments: Mapped[list | None] = mapped_column(JSON, nullable=True)
     caption_style: Mapped[str] = mapped_column(
         String(32), nullable=False, default="static"
     )

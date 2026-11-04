@@ -260,7 +260,11 @@ async def test_rerender_of_unknown_clip_is_a_logged_no_op(store, layout, render_
 
     assert render_calls == []
     assert _job_view(await store.get(JOB_ID)) == _job_view(before)
-    assert recorder.events == []
+    # Nothing changed, but the editor (locked while it waits) is told.
+    (failed,) = recorder.events
+    assert failed.type is EventType.CLIP_RERENDER_FAILED
+    assert failed.payload["clip_id"] == "nope"
+    assert failed.payload["reason"] == "refused"
 
 
 async def test_rerender_cancellation_propagates(
@@ -625,10 +629,125 @@ async def test_a_cancel_before_the_rerender_starts_reports_it_for_the_clip(layou
     recorder = _Recorder(bus)
     bus.publish = recorder  # type: ignore[method-assign]
     orch.claim_work(JOB_ID)
+    assert orch.claim_rerender(CLIP_ID)
 
     await orch._cancel_before_start(_trigger(), bus, store)
 
     assert not orch.job_has_work(JOB_ID)
+    assert orch.claim_rerender(CLIP_ID)  # released
+    orch.release_rerender(CLIP_ID)
     (failed,) = [e for e in recorder.events if e.type is EventType.CLIP_RERENDER_FAILED]
     assert failed.payload["clip_id"] == CLIP_ID
     assert failed.payload["reason"] == "cancelled"
+
+
+async def test_a_retired_clips_rerender_reports_failure_for_the_clip(layout, render_calls):
+    store = InMemoryJobStore()
+    await _seed(store, layout)
+    await store.retire_clips(JOB_ID, [CLIP_ID])
+    bus = AsyncEventBus()
+    recorder = _Recorder(bus)
+    bus.publish = recorder  # type: ignore[method-assign]
+    orch.claim_work(JOB_ID)
+
+    await orch._run_job(_trigger(), bus, store)
+
+    (failed,) = [e for e in recorder.events if e.type is EventType.CLIP_RERENDER_FAILED]
+    assert failed.payload["clip_id"] == CLIP_ID
+    assert EventType.CLIP_RENDERED not in recorder.types()
+    assert not orch.job_has_work(JOB_ID)
+
+
+async def test_a_cancel_during_the_failure_handler_still_reports_failure(layout, render_calls, monkeypatch):
+    store = InMemoryJobStore()
+    await _seed(store, layout)
+
+    def _boom(*a, **k):
+        raise RuntimeError("ffmpeg exploded")
+
+    monkeypatch.setattr(orch.render_service, "render_clip", _boom)
+    entered = asyncio.Event()
+    real_restore = orch._restore_chapter_status
+
+    async def _slow_restore(*a, **k):
+        entered.set()
+        await asyncio.sleep(0.2)
+        await real_restore(*a, **k)
+
+    monkeypatch.setattr(orch, "_restore_chapter_status", _slow_restore)
+    orch._user_cancelled.discard(JOB_ID)
+    bus = AsyncEventBus()
+    recorder = _Recorder(bus)
+    bus.publish = recorder  # type: ignore[method-assign]
+    orch.claim_work(JOB_ID)
+    task = asyncio.create_task(orch._run_job(_trigger(), bus, store))
+    orch._job_tasks.setdefault(JOB_ID, set()).add(task)
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        assert orch.cancel_job(JOB_ID) is True
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        orch._job_tasks.pop(JOB_ID, None)
+        orch._user_cancelled.discard(JOB_ID)
+        orch._user_cancelled_tasks.discard(task)
+
+    (failed,) = [e for e in recorder.events if e.type is EventType.CLIP_RERENDER_FAILED]
+    assert failed.payload["clip_id"] == CLIP_ID
+    assert not orch.job_has_work(JOB_ID)
+
+
+async def test_rerender_claim_is_exclusive_and_released_when_the_rerender_ends(layout, render_calls):
+    assert orch.claim_rerender(CLIP_ID) is True
+    assert orch.claim_rerender(CLIP_ID) is False
+    store = InMemoryJobStore()
+    await _seed(store, layout)
+    orch.claim_work(JOB_ID)
+
+    await orch._run_job(_trigger(), AsyncEventBus(), store)
+
+    assert orch.claim_rerender(CLIP_ID) is True
+    orch.release_rerender(CLIP_ID)
+
+
+async def test_a_plain_rerender_records_the_clips_own_window_as_rendered(store, layout, render_calls):
+    """No saved edit: the file is the clip's own window, so no cut is stored."""
+    await _seed(store, layout)
+    bus = AsyncEventBus()
+    recorder = _Recorder(bus)
+    bus.publish = recorder  # type: ignore[method-assign]
+
+    await orch._run_job(_trigger(), bus, store)
+
+    (rendered,) = [e for e in recorder.events if e.type is EventType.CLIP_RENDERED]
+    assert rendered.payload["segments"] is None
+    assert (await store.get_clip(CLIP_ID))["rendered_segments"] is None
+
+
+async def test_an_edited_rerender_records_and_announces_the_cut_it_rendered(store, layout, plan_renders):
+    await _seed(store, layout)
+    (layout["clips"] / "vo.wav").write_bytes(b"RIFF")
+    await _save_edit(store, _v2_edit())
+    bus = AsyncEventBus()
+    recorder = _Recorder(bus)
+    bus.publish = recorder  # type: ignore[method-assign]
+
+    await orch._run_job(_trigger(), bus, store)
+
+    (rendered,) = [e for e in recorder.events if e.type is EventType.CLIP_RENDERED]
+    assert rendered.payload["segments"] == [[7.0, 9.0], [10.0, 13.0]]
+    assert (await store.get_clip(CLIP_ID))["rendered_segments"] == [[7.0, 9.0], [10.0, 13.0]]
+
+
+async def test_a_rerender_without_its_source_video_reports_failure_for_the_clip(store, layout, render_calls):
+    await _seed(store, layout)
+    layout["source"].unlink()
+    bus = AsyncEventBus()
+    recorder = _Recorder(bus)
+    bus.publish = recorder  # type: ignore[method-assign]
+
+    await orch._run_job(_trigger(), bus, store)
+
+    (failed,) = [e for e in recorder.events if e.type is EventType.CLIP_RERENDER_FAILED]
+    assert failed.payload["clip_id"] == CLIP_ID
+    assert render_calls == []

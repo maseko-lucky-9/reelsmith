@@ -187,6 +187,8 @@ interface VoiceoverPanelProps extends TimelineProps {
   /** The clip's AI hook: the default script. */
   defaultText: string
   pending: boolean
+  /** Another change is being rendered: generating waits (the button says why). */
+  locked?: boolean
   error: string | null
   onGenerate: (request: { text: string; start: number }) => void
 }
@@ -197,6 +199,7 @@ export function VoiceoverPanel({
   playhead,
   defaultText,
   pending,
+  locked = false,
   error,
   onGenerate,
 }: VoiceoverPanelProps) {
@@ -232,7 +235,8 @@ export function VoiceoverPanel({
       <button
         type="button"
         className={buttonClass}
-        disabled={pending || text.trim().length === 0 || !(start >= 0)}
+        disabled={pending || locked || text.trim().length === 0 || !(start >= 0)}
+        title={locked ? 'Wait for the re-render to finish' : undefined}
         onClick={() => onGenerate({ text: text.trim(), start })}
       >
         {pending ? 'Generating…' : 'Generate voice-over'}
