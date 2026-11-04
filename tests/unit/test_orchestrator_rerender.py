@@ -751,3 +751,127 @@ async def test_a_rerender_without_its_source_video_reports_failure_for_the_clip(
     (failed,) = [e for e in recorder.events if e.type is EventType.CLIP_RERENDER_FAILED]
     assert failed.payload["clip_id"] == CLIP_ID
     assert render_calls == []
+
+
+async def test_the_cut_is_unknown_while_the_file_is_replaced_and_recorded_before_clip_rendered(
+    layout, plan_renders, monkeypatch
+):
+    store = InMemoryJobStore()
+    await _seed(store, layout)
+    (layout["clips"] / "vo.wav").write_bytes(b"RIFF")
+    await _save_edit(store, _v2_edit())
+    await store.upsert_clip(JOB_ID, CLIP_ID, lambda c: c.update({"rendered_segments": [[6.0, 12.0]]}))
+    seen: dict[str, Any] = {}
+    real_render = orch.render_service.render_clip
+
+    def _spy_render(*args, **kwargs):
+        seen["during_render"] = asyncio.run_coroutine_threadsafe(store.get_clip(CLIP_ID), loop).result(5)[
+            "rendered_segments"
+        ]
+        return real_render(*args, **kwargs)
+
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(orch.render_service, "render_clip", _spy_render)
+    bus = AsyncEventBus()
+    real_publish = bus.publish
+
+    async def _publish(event):
+        if event.type is EventType.CLIP_RENDERED:
+            seen["at_event"] = (await store.get_clip(CLIP_ID))["rendered_segments"]
+        await real_publish(event)
+
+    bus.publish = _publish  # type: ignore[method-assign]
+
+    await orch._run_job(_trigger(), bus, store)
+
+    assert seen["during_render"] == []
+    assert seen["at_event"] == [[7.0, 9.0], [10.0, 13.0]]
+
+
+async def test_a_render_that_fails_before_replacing_the_file_restores_the_recorded_cut(layout, render_calls, monkeypatch):
+    store = InMemoryJobStore()
+    await _seed(store, layout)
+    await store.upsert_clip(JOB_ID, CLIP_ID, lambda c: c.update({"rendered_segments": [[6.0, 9.0]]}))
+
+    def _boom(*a, **k):
+        raise RuntimeError("ffmpeg exploded")
+
+    monkeypatch.setattr(orch.render_service, "render_clip", _boom)
+
+    await orch._run_job(_trigger(), AsyncEventBus(), store)
+
+    assert (await store.get_clip(CLIP_ID))["rendered_segments"] == [[6.0, 9.0]]
+
+
+async def test_a_cancel_after_the_render_keeps_the_new_cut_recorded(layout, plan_renders, monkeypatch):
+    """The file is replaced; a cancel in the thumbnail step must not leave the old cut against it."""
+    store = InMemoryJobStore()
+    await _seed(store, layout)
+    (layout["clips"] / "vo.wav").write_bytes(b"RIFF")
+    await _save_edit(store, _v2_edit())
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+
+    def _slow_thumb(clip_path, out):
+        import time
+
+        loop.call_soon_threadsafe(entered.set)
+        time.sleep(0.3)
+        return out
+
+    monkeypatch.setattr(orch.thumbnail_service, "generate_thumbnail", _slow_thumb)
+    orch.claim_work(JOB_ID)
+    task = asyncio.create_task(orch._run_job(_trigger(), AsyncEventBus(), store))
+    orch._job_tasks.setdefault(JOB_ID, set()).add(task)
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        assert orch.cancel_job(JOB_ID)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        orch._job_tasks.pop(JOB_ID, None)
+        orch._user_cancelled.discard(JOB_ID)
+        orch._user_cancelled_tasks.discard(task)
+
+    assert (await store.get_clip(CLIP_ID))["rendered_segments"] == [[7.0, 9.0], [10.0, 13.0]]
+
+
+async def test_the_rerender_claim_is_free_after_clip_rendered_and_not_released_twice(layout, plan_renders, monkeypatch):
+    """The slow copy steps after the file is written must not hold off the
+    next re-render; and the end of the task must not release the claim that
+    next request took."""
+    store = InMemoryJobStore()
+    await _seed(store, layout)
+    (layout["clips"] / "vo.wav").write_bytes(b"RIFF")
+    await _save_edit(store, _v2_edit())
+    assert orch.claim_rerender(CLIP_ID)
+    orch.claim_work(JOB_ID)
+    seen: dict[str, bool] = {}
+
+    def _thumb(clip_path, out):
+        seen["claimable_in_copy_step"] = asyncio.run_coroutine_threadsafe(_claim(), loop).result(5)
+        return out
+
+    async def _claim() -> bool:
+        return orch.claim_rerender(CLIP_ID)
+
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(orch.thumbnail_service, "generate_thumbnail", _thumb)
+
+    await orch._run_job(_trigger(), AsyncEventBus(), store)
+
+    assert seen["claimable_in_copy_step"] is True
+    assert orch.claim_rerender(CLIP_ID) is False  # the next request's claim survived the task's end
+    orch.release_rerender(CLIP_ID)
+
+
+async def test_the_recorded_cut_is_not_rounded(store, layout, plan_renders):
+    """The client compares boundary by boundary within 1 ms; rounding here as well would disagree with it."""
+    await _seed(store, layout)
+    await _save_edit(
+        store, {"schema_version": 2, "tracks": [{"kind": "video", "items": [{"start": 7.0005, "end": 11.0045}]}]}
+    )
+
+    await orch._run_job(_trigger(), AsyncEventBus(), store)
+
+    assert (await store.get_clip(CLIP_ID))["rendered_segments"] == [[7.0005, 11.0045]]

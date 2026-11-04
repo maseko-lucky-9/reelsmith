@@ -316,11 +316,23 @@ describe('playhead while the segments are not rendered', () => {
     await waitFor(() => expect(button('Split at playhead').disabled).toBe(false))
   })
 
+  it('an unknown cut ([]) in a ClipRendered event never enables Split', async () => {
+    await renderWithPlayhead(4)
+    trimStart('101.5')
+    fireEvent.click(button('Re-render'))
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Re-render queued'))
+
+    act(() => FakeEventSource.last().emit('ClipRendered', { clip_id: 'clip-1', segments: [] }))
+
+    await waitFor(() => expect(button('Re-render').disabled).toBe(false))
+    expect(button('Split at playhead').disabled).toBe(true)
+  })
+
   describe('reopening the editor', () => {
-    async function reopen(rendered: unknown) {
+    async function reopen(rendered: unknown, trimmedStart = 101.5) {
       // The saved edit is trimmed to 101.5; the clip's file may or may not be.
       const trimmed = structuredClone(SAVED)
-      trimmed.tracks[0].items[0] = { start: 101.5, end: 110, src: 'main' }
+      trimmed.tracks[0].items[0] = { start: trimmedStart, end: 110, src: 'main' }
       vi.mocked(api.getClipEdit).mockResolvedValue(edit(trimmed, 2))
       const view = await renderPage({ output_path: '/data/clip-1.mp4', rendered_segments: rendered })
       const video = view.container.querySelector('video') as HTMLVideoElement
@@ -339,9 +351,35 @@ describe('playhead while the segments are not rendered', () => {
       expect(button('Split at playhead').disabled).toBe(false)
     })
 
-    it('compares cuts with the same rounding on both sides', async () => {
+    it('treats boundaries within 1 ms as the same cut', async () => {
       await reopen([[101.5000004, 109.9999996]])
       expect(button('Split at playhead').disabled).toBe(false)
+    })
+
+    it('matches a raw float boundary and the server nudging it by 1 ms', async () => {
+      await reopen([[101.0045, 110]], 101.0045)
+      expect(button('Split at playhead').disabled).toBe(false)
+    })
+
+    it('matches a boundary the server nudged by 1 ms', async () => {
+      await reopen([[101.0055, 110]], 101.0045)
+      expect(button('Split at playhead').disabled).toBe(false)
+    })
+
+    it('does not match boundaries more than 1 ms apart', async () => {
+      await reopen([[101.0075, 110]], 101.0045)
+      expect(button('Split at playhead').disabled).toBe(true)
+    })
+
+    it('does not match a different number of segments', async () => {
+      await reopen([[101.5, 110], [120, 130]])
+      expect(button('Split at playhead').disabled).toBe(true)
+    })
+
+    it('never enables Split while the rendered cut is unknown ([]: a render is replacing the file)', async () => {
+      // Even for an edit equal to the clip's own window.
+      await reopen([], 100)
+      expect(button('Split at playhead').disabled).toBe(true)
     })
   })
 
@@ -357,7 +395,7 @@ describe('playhead while the segments are not rendered', () => {
     expect(button('Split at playhead').disabled).toBe(true)
   })
 
-  it('a rejected re-render (409) leaves no queued render: a later ClipRendered does not enable Split', async () => {
+  it('after a rejected re-render (409), a ClipRendered of the clip\'s own window leaves Split disabled for a trimmed edit', async () => {
     vi.mocked(api.rerenderClip).mockRejectedValue(new Error('409 {"detail":"job is running"}'))
     await renderWithPlayhead(4)
     trimStart('101.5')
@@ -371,7 +409,7 @@ describe('playhead while the segments are not rendered', () => {
     expect(button('Split at playhead').disabled).toBe(true)
   })
 
-  it('a failed save before the re-render queues nothing and a later ClipRendered does not enable Split', async () => {
+  it('after a failed save (nothing queued), a ClipRendered of the clip\'s own window leaves Split disabled for a trimmed edit', async () => {
     vi.mocked(api.upsertClipEdit).mockRejectedValue(new Error('boom'))
     await renderWithPlayhead(4)
     trimStart('101.5')

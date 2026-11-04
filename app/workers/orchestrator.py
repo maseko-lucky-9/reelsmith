@@ -1239,6 +1239,17 @@ async def _rerender_clip(trigger: Event, bus: AsyncEventBus, store: JobStore) ->
     t0 = time.perf_counter()
     cleanup_root: Path | None = None
     chapter: dict[str, Any] | None = None
+    claim_released = False
+
+    def _release_claim_once() -> None:
+        # Once the file and its record are written the editor may queue the next
+        # re-render; the slow copy steps after must not hold it off (nor, at the
+        # end, release a claim that request took).
+        nonlocal claim_released
+        if not claim_released:
+            claim_released = True
+            release_rerender(clip_id)
+
     prior_chapter_status = "completed"
     try:
         job = await store.get(job_id)
@@ -1344,6 +1355,7 @@ async def _rerender_clip(trigger: Event, bus: AsyncEventBus, store: JobStore) ->
             source_words=source_words,
             render_to=output_path,
             edit=edit,
+            on_rendered=_release_claim_once,
         )
         log.info(
             "[%s] Re-render of clip %s done in %.2fs",
@@ -1393,7 +1405,25 @@ async def _rerender_clip(trigger: Event, bus: AsyncEventBus, store: JobStore) ->
             shutil.rmtree(cleanup_root, ignore_errors=True)
         # The route's claims (``claim_work``, ``claim_rerender``), however the re-render ended.
         release_work(job_id)
-        release_rerender(clip_id)
+        _release_claim_once()
+
+
+_NO_CUT: Any = object()
+
+
+async def _set_rendered_segments(
+    store: JobStore, job_id: str, clip_id: str, segments: list[list[float]] | None
+) -> None:
+    """``clips.rendered_segments``: the source cut the clip's file was made
+    from; ``[]`` = unknown (a render is replacing it), None = the clip's own window."""
+
+    def _set(c: dict[str, Any]) -> None:
+        if segments is _NO_CUT:  # the record had no such key (a store that omits it)
+            c.pop("rendered_segments", None)
+        else:
+            c["rendered_segments"] = segments
+
+    await store.upsert_clip(job_id, clip_id, _set)
 
 
 async def _report_rerender_failed(bus: AsyncEventBus, job_id: str, clip_id: str, reason: str, error: str) -> None:
@@ -2010,6 +2040,7 @@ async def _process_chapter(
     source_words: Sequence[Any] | None = None,
     render_to: str | None = None,
     edit: _EditRender | None = None,
+    on_rendered: Callable[[], None] | None = None,
 ) -> str | None:
     """Process one chapter into a clip; ``clip_id`` updates an existing clip
     in place (re-render) instead of creating a new one.
@@ -2346,7 +2377,7 @@ async def _process_chapter(
 
     # The source cut this render plays, [[start, end], ...] (None: the clip's own window).
     rendered_segments: list[list[float]] | None = (
-        [[round(s, 3), round(e, 3)] for s, e in edit.segments] if edit is not None else None
+        [[s, e] for s, e in edit.segments] if edit is not None else None
     )
 
     # ── Render final clip (gated on render) ──────────────────────────────────
@@ -2369,25 +2400,42 @@ async def _process_chapter(
             opts=opts,
             bus=bus,
         )
+        # An existing clip's file is replaced in place: until the new cut is
+        # recorded below, which cut the file holds is unknown (``[]``, which the
+        # editor never matches), so a cancel or crash in between cannot leave
+        # the old cut recorded against the new file.
+        prior_clip = await store.get_clip(clip_id, include_retired=True) if clip_id else None
+        if prior_clip is not None:
+            prior_cut = prior_clip.get("rendered_segments", _NO_CUT)
+            await _set_rendered_segments(store, job_id, clip_id, [])
         # Reads the SOURCE and trims [start, end) itself — one ffmpeg pass.
         # Cancellation (e.g. this wait_for timing out) kills that ffmpeg.
-        await asyncio.wait_for(
-            ffmpeg_tools.to_thread_cancellable(
-                render_service.render_clip,
-                video_path,
-                output_path,
-                render_start,
-                render_end,
-                captions_path,
-                target_aspect_ratio,
-                word_timings=words,
-                broll=broll_inserts,
-                caption_words_per_segment=settings.caption_words_per_segment,
-                crop_track=crop_track,
-                **plan_kwargs,
-            ),
-            timeout=settings.render_timeout_seconds,
-        )
+        try:
+            await asyncio.wait_for(
+                ffmpeg_tools.to_thread_cancellable(
+                    render_service.render_clip,
+                    video_path,
+                    output_path,
+                    render_start,
+                    render_end,
+                    captions_path,
+                    target_aspect_ratio,
+                    word_timings=words,
+                    broll=broll_inserts,
+                    caption_words_per_segment=settings.caption_words_per_segment,
+                    crop_track=crop_track,
+                    **plan_kwargs,
+                ),
+                timeout=settings.render_timeout_seconds,
+            )
+        except BaseException:
+            # render_clip replaces the file atomically: a failed render left the old one.
+            if prior_clip is not None:
+                await _finish_then_honour_cancel(_set_rendered_segments(store, job_id, clip_id, prior_cut))
+            raise
+        if prior_clip is not None:
+            # The file is the new cut from here on; record it before anything else can fail.
+            await _finish_then_honour_cancel(_set_rendered_segments(store, job_id, clip_id, rendered_segments))
         log.info(
             "[%s] Chapter %d  render done (%.2fs)  output=%s", job_id, index, time.perf_counter() - step_t0, output_path
         )
@@ -2426,6 +2474,8 @@ async def _process_chapter(
             # The cut the file was made from (None: the clip's own window).
             segments=rendered_segments,
         )
+        if on_rendered is not None:
+            on_rendered()
     else:
         log.info("[%s] Chapter %d  skipping render (render=False)", job_id, index)
         await _emit(bus, EventType.STAGE_SKIPPED, job_id, stage_id="render", chapter_index=index)

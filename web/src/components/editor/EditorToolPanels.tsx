@@ -269,7 +269,7 @@ interface TrimPanelProps extends TimelineProps {
 }
 
 const STALE_PLAYHEAD_TITLE =
-  'Re-render first: the preview still plays the last rendered cut, so the playhead does not match the edited segments.'
+  'Re-render first: the preview does not play these segments, so the playhead does not match them. Split is unavailable until the clip is re-rendered with them.'
 
 export function TrimPanel({ timeline, onChange, playhead, sourceWindow, playheadStale = false }: TrimPanelProps) {
   const [error, setError] = useState<string | null>(null)

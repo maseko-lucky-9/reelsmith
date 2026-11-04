@@ -72,24 +72,38 @@ const STUB_VOICEOVER_WARNING =
   'Voice-over added as a silent placeholder: no Piper voice is installed on the server. ' +
   'Run `python -m scripts.fetch_piper_voice` there, then generate it again.'
 
-/** A source cut as a comparable key; the same rounding for a timeline's and the server's segments. */
-function cutKey(segments: ReadonlyArray<{ start: number; end: number }>): string {
-  const r = (n: number) => Math.round(n * 1000) / 1000
-  return JSON.stringify(segments.map((s) => [r(s.start), r(s.end)]))
+type Cut = ReadonlyArray<{ start: number; end: number }>
+
+/** The most two boundaries may differ and still be the same cut (the server may nudge by 1 ms). */
+const CUT_TOLERANCE = 1e-3 + 1e-9
+
+function sameCut(a: Cut, b: Cut): boolean {
+  return (
+    a.length === b.length &&
+    a.every((s, i) => Math.abs(s.start - b[i].start) <= CUT_TOLERANCE && Math.abs(s.end - b[i].end) <= CUT_TOLERANCE)
+  )
 }
 
 /** The source cut a timeline plays (v1 read through the clip's window). */
-function segmentsKey(timeline: TimelinePayload, window: SourceWindow | null): string {
-  return cutKey(segmentsOf(upgradeTimeline(timeline, window) ?? timeline))
+function cutOf(timeline: TimelinePayload, window: SourceWindow | null): Cut {
+  return segmentsOf(upgradeTimeline(timeline, window) ?? timeline)
 }
 
-/** The server's `[[start, end], ...]` rendered cut as a key; null/absent = the clip's own window. */
-function renderedCutKey(
+/**
+ * The cut the clip's file was rendered from, from the server's
+ * `[[start, end], ...]`: null/absent is the clip's own window (never edited,
+ * or rendered before this was recorded: Split then waits for a re-render),
+ * `[]` is "unknown, a render is replacing it" and matches nothing. Null when
+ * there is no window to fall back to.
+ */
+function renderedCut(
   rendered: ReadonlyArray<readonly [number, number]> | null | undefined,
   window: SourceWindow | null,
-): string | null {
-  if (Array.isArray(rendered) && rendered.length > 0) return cutKey(rendered.map(([start, end]) => ({ start, end })))
-  return window ? cutKey([window]) : null
+): Cut | 'unknown' | null {
+  if (Array.isArray(rendered)) {
+    return rendered.length > 0 ? rendered.map(([start, end]) => ({ start, end })) : 'unknown'
+  }
+  return window ? [window] : null
 }
 
 /** A voice-over request's failure as shown in its panel. */
@@ -191,13 +205,14 @@ export function ClipEditorPage() {
   // when none), replaced by the one a ClipRendered event of this clip carries.
   const [eventCut, setEventCut] = useState<{ segments: ReadonlyArray<readonly [number, number]> | null } | null>(null)
   const loadedTimeline = editor.loadedTimeline ?? null
-  const renderedKey = eventCut
-    ? renderedCutKey(eventCut.segments, sourceWindow)
+  const rendered = eventCut
+    ? renderedCut(eventCut.segments, sourceWindow)
     : clip
-      ? renderedCutKey(clip.rendered_segments, sourceWindow)
+      ? renderedCut(clip.rendered_segments, sourceWindow)
       : null
-  const baselineKey = renderedKey ?? (loadedTimeline ? segmentsKey(loadedTimeline, sourceWindow) : null)
-  const previewStale = baselineKey !== null && segmentsKey(editor.timeline, sourceWindow) !== baselineKey
+  const baseline = rendered ?? (loadedTimeline ? cutOf(loadedTimeline, sourceWindow) : null)
+  const previewStale =
+    baseline !== null && (baseline === 'unknown' || !sameCut(cutOf(editor.timeline, sourceWindow), baseline))
   // UX only (correctness is the cut comparison above): true from a 202 until
   // this clip's ClipRendered / ClipRerenderFailed; the controls that would
   // save or queue another change wait.
@@ -270,7 +285,7 @@ export function ClipEditorPage() {
       }
     }
     rerenderMutation.mutate()
-  }, [editor, rerenderMutation, sourceWindow])
+  }, [editor, rerenderMutation])
 
   const voiceoverMutation = useMutation({
     mutationFn: async (body: VoiceoverRequest) => {
