@@ -95,7 +95,7 @@ async def test_export_dir_namespaced_when_base_folder_set(tmp_path, monkeypatch)
     )
     monkeypatch.setattr(
         orch.manifest_service, "write_manifest",
-        lambda clips_data, export_dir, source=None: str(Path(export_dir) / "manifest.csv"),
+        lambda clips_data, export_dir, source=None, source_url=None: str(Path(export_dir) / "manifest.csv"),
     )
 
     job_id = "job-namespaced"
@@ -117,7 +117,7 @@ async def test_export_dir_uses_clips_parent_when_base_folder_unset(tmp_path, mon
     )
     monkeypatch.setattr(
         orch.manifest_service, "write_manifest",
-        lambda clips_data, export_dir, source=None: str(Path(export_dir) / "manifest.csv"),
+        lambda clips_data, export_dir, source=None, source_url=None: str(Path(export_dir) / "manifest.csv"),
     )
 
     job_id = "job-default"
@@ -138,7 +138,7 @@ async def test_manifest_is_written_with_the_jobs_source(tmp_path, monkeypatch, s
 
     sources: list[str | None] = []
 
-    def _fake_write_manifest(clips_data, export_dir, source=None):
+    def _fake_write_manifest(clips_data, export_dir, source=None, source_url=None):
         sources.append(source)
         return str(Path(export_dir) / "manifest.csv")
 

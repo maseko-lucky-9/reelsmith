@@ -142,6 +142,9 @@ class ClipRecord(Base):
         String(32), nullable=False, default="static"
     )
     captions_burnt_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # chapters | discovered | full_video; NULL = unknown (a clip stored before
+    # the column existed, a reprompt over an explicit time range). Never guessed.
+    segment_origin: Mapped[str | None] = mapped_column(String(16), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_now
     )

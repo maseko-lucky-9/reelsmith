@@ -11,6 +11,7 @@ chapter.
 from __future__ import annotations
 
 import asyncio
+import csv
 import json
 import logging
 import re
@@ -241,10 +242,16 @@ class _Harness:
         store: Any,
         *,
         options: PipelineOptions | None = None,
+        job_source: str | None = None,
         **payload_overrides: Any,
     ) -> _Recorder:
         await store.create(
-            JobState(job_id=JOB_ID, url=URL, download_path=str(self.tmp_path))
+            JobState(
+                job_id=JOB_ID,
+                url=URL,
+                source=job_source,
+                download_path=str(self.tmp_path),
+            )
         )
         payload: dict[str, Any] = {
             "url": URL,
@@ -273,6 +280,12 @@ class _Harness:
 @pytest.fixture
 def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Harness:
     return _Harness(tmp_path, monkeypatch)
+
+
+def _manifest(harness: _Harness) -> list[dict[str, str]]:
+    path = harness.tmp_path / "exp" / JOB_ID / "manifest.csv"
+    with path.open(encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle))
 
 
 def _chapters(recorder: _Recorder) -> list[tuple[str, float, float]]:
@@ -914,3 +927,142 @@ async def test_rerender_overwrites_the_clip_file_after_a_title_edit(harness, sto
         "01_Beta.mp4",
         "01_Beta_thumb.jpg",
     ]
+
+
+# ── manifest: how each clip's segment was produced ────────────────────────────
+
+REAL_CHAPTERS = [
+    {"title": "Intro", "start": 0.0, "end": 60.0},
+    {"title": "Outro", "start": 60.0, "end": 120.0},
+]
+
+
+async def test_manifest_marks_the_sources_own_chapters(harness, store):
+    harness.adapter = _FakeAdapter(REAL_CHAPTERS)
+
+    await harness.run(store, job_source="youtube")
+
+    rows = _manifest(harness)
+    assert [r["filename"] for r in rows] == ["00_Intro.mp4", "01_Outro.mp4"]
+    assert [r["segment_origin"] for r in rows] == ["chapters", "chapters"]
+    assert {r["source"] for r in rows} == {"youtube"}
+    assert {r["source_url"] for r in rows} == {URL}
+
+
+async def test_manifest_marks_discovered_clips(harness, store):
+    await harness.run(store, job_source="youtube")
+
+    rows = _manifest(harness)
+    assert [r["filename"] for r in rows] == ["00_Alpha.mp4", "01_Beta.mp4"]
+    assert [r["segment_origin"] for r in rows] == ["discovered", "discovered"]
+    assert {r["source_url"] for r in rows} == {URL}
+
+
+async def test_chapters_of_a_non_youtube_source_still_say_chapters(harness, store):
+    harness.adapter = _FakeAdapter(REAL_CHAPTERS)
+
+    await harness.run(store, job_source="tiktok")
+
+    rows = _manifest(harness)
+    assert {r["segment_origin"] for r in rows} == {"chapters"}
+    assert {r["source"] for r in rows} == {"tiktok"}
+
+
+def _proposer_off(harness: _Harness) -> dict[str, Any]:
+    return {"options": PipelineOptions(audio_enhance=False, segment_proposer=False)}
+
+
+def _provider_chapter(harness: _Harness) -> dict[str, Any]:
+    harness.monkeypatch.setattr(orch.settings, "segment_provider", "chapter")
+    return {}
+
+
+def _segment_mode_chapter(harness: _Harness) -> dict[str, Any]:
+    return {"segment_mode": "chapter"}
+
+
+def _transcription_off(harness: _Harness) -> dict[str, Any]:
+    return {"options": PipelineOptions(audio_enhance=False, transcription=False)}
+
+
+def _short_source(harness: _Harness) -> dict[str, Any]:
+    harness.safe_end = 12.0
+    return {}
+
+
+def _proposer_fails(harness: _Harness) -> dict[str, Any]:
+    harness.proposer = _FakeProposer(RuntimeError("scorer exploded"))
+    return {}
+
+
+def _nothing_kept(harness: _Harness) -> dict[str, Any]:
+    harness.proposer = _FakeProposer([])
+    return {}
+
+
+def _transcription_fails(harness: _Harness) -> dict[str, Any]:
+    harness.transcribe_errors.append(RuntimeError("whisper died"))
+    return {}
+
+
+@pytest.mark.parametrize(
+    "setup",
+    [
+        _proposer_off,
+        _provider_chapter,
+        _segment_mode_chapter,
+        _transcription_off,
+        _short_source,
+        _proposer_fails,
+        _nothing_kept,
+        _transcription_fails,
+    ],
+    ids=lambda f: f.__name__.lstrip("_"),
+)
+async def test_every_full_video_path_is_marked_full_video(harness, store, setup):
+    kwargs = setup(harness)
+
+    await harness.run(store, job_source="youtube", **kwargs)
+
+    (row,) = _manifest(harness)
+    assert row["title"] == "Full Video"
+    assert row["segment_origin"] == "full_video"
+    assert row["source"] == "youtube"
+    assert row["source_url"] == URL
+
+
+async def test_a_rerender_keeps_the_clips_origin(harness, store):
+    await _seed_rendered_clip(store, harness, title="Beta")
+    await store.upsert_clip(JOB_ID, CLIP_ID, lambda c: c.update(segment_origin="chapters"))
+
+    await _rerender(store)
+
+    assert (await store.get_clip(CLIP_ID))["segment_origin"] == "chapters"
+
+
+async def test_a_clip_stored_without_an_origin_stays_unknown(harness, store):
+    await _seed_rendered_clip(store, harness, title="Beta")
+
+    await _rerender(store)
+
+    assert (await store.get_clip(CLIP_ID)).get("segment_origin") is None
+
+
+async def test_an_upload_runs_the_pipeline_and_is_discovered(harness, store):
+    harness.adapter.platform_id = "upload"
+
+    await harness.run(store, job_source="upload")
+
+    rows = _manifest(harness)
+    assert {r["segment_origin"] for r in rows} == {"discovered"}
+    assert {r["source"] for r in rows} == {"upload"}
+
+
+async def test_a_short_upload_is_full_video(harness, store):
+    harness.adapter.platform_id = "upload"
+    harness.safe_end = 12.0
+
+    await harness.run(store, job_source="upload")
+
+    (row,) = _manifest(harness)
+    assert (row["source"], row["segment_origin"]) == ("upload", "full_video")
