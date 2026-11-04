@@ -143,10 +143,16 @@ def test_crlf_in_name_cannot_inject_a_header():
     assert "%0D%0A" in cd
 
 
+needs_dev_fd = pytest.mark.skipif(
+    not os.path.isdir("/dev/fd"), reason="counts open descriptors via /dev/fd"
+)
+
+
 def _open_fds() -> int:
     return len(os.listdir("/dev/fd"))
 
 
+@needs_dev_fd
 def test_file_handle_is_closed_when_the_client_aborts_mid_stream(tmp_path):
     import asyncio
     import gc
@@ -181,6 +187,7 @@ def test_file_handle_is_closed_when_the_client_aborts_mid_stream(tmp_path):
     assert _open_fds() == before  # no gc.collect(): closed deterministically
 
 
+@needs_dev_fd
 def test_unreadable_response_closes_handle_for_416(tmp_path):
     path = tmp_path / "f.bin"
     path.write_bytes(DATA)
@@ -210,3 +217,38 @@ def test_file_vanishing_before_open_is_404_with_the_given_detail(tmp_path):
         )
     assert e.value.status_code == 404
     assert e.value.detail == "source video not retained"
+
+
+@pytest.mark.parametrize("name", ["a\udcffb.mp4", "a\ud800.mp4"])
+def test_lone_surrogate_name_never_raises(name):
+    from app.routers.media import content_disposition
+
+    cd = content_disposition("inline", name)
+    cd.encode("ascii")
+    assert "filename*=utf-8''" in cd
+
+
+@pytest.mark.parametrize("name", ["a%41.mp4", "100%.mp4"])
+def test_percent_in_name_gets_filename_star(name):
+    from app.routers.media import content_disposition
+
+    cd = content_disposition("inline", name)
+    assert "filename*=utf-8''" in cd
+    assert "%25" in cd
+
+
+@needs_dev_fd
+def test_header_failure_closes_the_opened_file(tmp_path, monkeypatch):
+    from app.routers import media
+
+    path = tmp_path / "f.bin"
+    path.write_bytes(DATA)
+    before = _open_fds()
+    opened = []
+    real = os.fdopen
+    monkeypatch.setattr(os, "fdopen", lambda *a, **k: opened.append(real(*a, **k)) or opened[-1])
+    monkeypatch.setattr(media, "content_disposition", lambda *a: 1 / 0)
+    with pytest.raises(ZeroDivisionError):
+        range_response(path, None, media_type="x/y", disposition="inline")
+    assert opened[0].closed
+    assert _open_fds() == before

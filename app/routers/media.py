@@ -43,10 +43,10 @@ def content_disposition(disposition: str, name: str) -> str:
     be broken or injected through a file name.
     """
     fallback = "".join(
-        c if " " <= c < "\x7f" and c not in '"\\' else "_" for c in name
+        c if " " <= c < "\x7f" and c not in '"\\%' else "_" for c in name
     )
     value = f'{disposition}; filename="{fallback}"'
-    return value if fallback == name else f"{value}; filename*=utf-8''{quote(name, safe='')}"
+    return value if fallback == name else f"{value}; filename*=utf-8''{quote(name, safe='', errors='replace')}"
 
 
 class _FileResponse(StreamingResponse):
@@ -120,9 +120,26 @@ def range_response(
         HTTPException: 404 when the file is gone or is not a regular file.
     """
     f, size = _open_regular(path, missing_detail)
+    try:
+        return _respond(f, size, path.name, range_header, media_type, disposition)
+    except BaseException:
+        f.close()
+        raise
+
+
+def _respond(
+    f: BinaryIO,
+    size: int,
+    name: str,
+    range_header: str | None,
+    media_type: str,
+    disposition: str,
+) -> Response:
+    """Build the response for the open file ``f``; the caller closes ``f`` if
+    this raises."""
     headers = {
         "Accept-Ranges": "bytes",
-        "Content-Disposition": content_disposition(disposition, path.name),
+        "Content-Disposition": content_disposition(disposition, name),
     }
     m = _RANGE_RE.fullmatch(range_header.strip()) if range_header else None
     if m is None:
