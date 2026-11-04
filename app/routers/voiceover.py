@@ -21,21 +21,29 @@ open and save it in the editor first.
 Other answers: 404 unknown clip or no clip file; 409 a clip file outside the
 download folder (an export copy), or the clip's job busy or being deleted
 (the synthesis is counted as work on the job, ``orchestrator.claim_work``);
-502 the engine failed. A failed request leaves no wav behind. Deleting the
+502 the engine failed; 503 ``MAX_CONCURRENT_SYNTHESES`` voice-overs are
+already being made ("voice-over busy"). No database connection is held while
+the engine runs: the edit is re-read afterwards and written only if its
+version is still the one read before (409 when a save, or a first edit, won
+meanwhile). The response's ``provider`` is "piper" or "stub" (silence; a
+client should warn). A failed request leaves no wav behind. Deleting the
 audio item later does not delete the wav; deleting the job does (it lives in
 the job's folder).
 """
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import logging
 import math
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ClipEdit
@@ -53,6 +61,10 @@ router = APIRouter(prefix="/clips", tags=["voiceover"])
 
 MAX_START_SECONDS = 3600.0
 
+MAX_CONCURRENT_SYNTHESES = 2
+"""Voice-overs synthesised at once; a request beyond that answers 503."""
+_synth_slots = asyncio.Semaphore(MAX_CONCURRENT_SYNTHESES)
+
 
 class VoiceoverRequest(BaseModel):
     text: str | None = Field(default=None, max_length=4 * voiceover_service.MAX_TEXT_CHARS)
@@ -68,7 +80,7 @@ def _reel_end(timeline: dict[str, Any]) -> float:
             for item in track.get("items") or []:
                 try:
                     total += max(0.0, float(item["end"]) - float(item["start"]))
-                except (KeyError, TypeError, ValueError):
+                except KeyError, TypeError, ValueError:
                     continue
     return total
 
@@ -104,7 +116,26 @@ def _discard(path: Path | None) -> None:
         log.warning("voiceover: could not remove %s: %s", path, exc)
 
 
-@router.post("/{clip_id}/voiceover")
+class VoiceoverItem(BaseModel):
+    start: float
+    end: float
+    src: str
+    gain: float
+
+
+class VoiceoverResponse(BaseModel):
+    edit: dict[str, Any] = Field(description="The clip's saved edit with the voice-over appended.")
+    item: VoiceoverItem = Field(description="The audio item appended to the edit's audio track.")
+    provider: Literal["piper", "stub"] = Field(
+        description=(
+            "The engine that spoke the voice-over. 'stub' is one second of silence "
+            "(YTVIDEO_VOICEOVER_PROVIDER=stub, or 'auto' without Piper or the voice): "
+            "a client should warn that no speech was generated."
+        )
+    )
+
+
+@router.post("/{clip_id}/voiceover", response_model=VoiceoverResponse)
 async def create_voiceover(
     clip_id: str,
     body: VoiceoverRequest | None = None,
@@ -142,8 +173,10 @@ async def create_voiceover(
             status_code=409,
             detail="the clip's saved edit is schema v1; open and save it in the editor first",
         )
+    # The version read here is checked again after synthesis (lost update).
+    read_version: int | None = edit.version if edit is not None else None
     if edit is not None:
-        timeline = edit.timeline
+        timeline = copy.deepcopy(edit.timeline)
     else:
         start, end = float(clip.start or 0.0), float(clip.end or 0.0)
         if not (math.isfinite(start) and math.isfinite(end) and end > start >= 0):
@@ -155,49 +188,81 @@ async def create_voiceover(
     if item_start >= reel_end:
         raise HTTPException(status_code=422, detail=f"start {item_start} is at or past the reel's end ({reel_end:.3f})")
     _, source_range = await _source(session, clip)
-
     job_id = clip.job_id
+    # No connection or transaction is held while the engine runs (up to
+    # SYNTH_TIMEOUT_SECONDS); the edit is re-read after it (``_store``).
+    await session.close()
+
     if orchestrator.deleting(job_id):
         raise HTTPException(status_code=409, detail="the clip's job is being deleted")
     if orchestrator.job_active(job_id):
         raise HTTPException(status_code=409, detail="the clip's job is busy; try again when it is done")
-    orchestrator.claim_work(job_id)
-    out: Path | None = None
-    done = False
-    try:
-        folder = Path(clip_file).parent
-        out = voiceover_service.reserve_output_path(folder)
+    # Checked and taken with no await in between, so never more than
+    # MAX_CONCURRENT_SYNTHESES run; a busy server answers at once.
+    if _synth_slots.locked():
+        raise HTTPException(status_code=503, detail="voice-over busy; try again shortly")
+    async with _synth_slots:
+        orchestrator.claim_work(job_id)
+        out: Path | None = None
+        done = False
         try:
-            seconds = await ffmpeg_tools.to_thread_cancellable(
-                voiceover_service.synthesize_voiceover, script, voice, out, provider=provider
-            )
-        except voiceover_service.VoiceoverInputError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        except voiceover_service.VoiceoverError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+            folder = Path(clip_file).parent
+            out = voiceover_service.reserve_output_path(folder)
+            try:
+                seconds = await ffmpeg_tools.to_thread_cancellable(
+                    voiceover_service.synthesize_voiceover, script, voice, out, provider=provider
+                )
+            except voiceover_service.VoiceoverInputError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            except voiceover_service.VoiceoverError as exc:
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-        item_end = min(item_start + seconds, reel_end)
-        item = {"start": round(item_start, 3), "end": round(item_end, 3), "src": out.name, "gain": 1.0}
-        if item["end"] <= item["start"]:
-            raise HTTPException(status_code=422, detail="the voice-over does not fit before the reel's end")
-        updated = _with_audio(timeline, item)
-        try:
-            validate_timeline(updated, source_range=source_range, clip_folder=folder)
-        except TimelineError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+            item_end = min(item_start + seconds, reel_end)
+            item = {"start": round(item_start, 3), "end": round(item_end, 3), "src": out.name, "gain": 1.0}
+            if item["end"] <= item["start"]:
+                raise HTTPException(status_code=422, detail="the voice-over does not fit before the reel's end")
+            updated = _with_audio(timeline, item)
+            try:
+                validate_timeline(updated, source_range=source_range, clip_folder=folder)
+            except TimelineError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-        if edit is None:
-            edit = ClipEdit(clip_id=clip_id, timeline=updated, version=1)
-            session.add(edit)
-        else:
-            edit.timeline = updated
-            edit.version = edit.version + 1
-        await session.commit()
-        await session.refresh(edit)
-        done = True
-    finally:
-        orchestrator.release_work(job_id)
-        if not done:
-            _discard(out)
+            saved = await _store(session, clip_id, updated, read_version)
+            done = True
+        finally:
+            orchestrator.release_work(job_id)
+            if not done:
+                _discard(out)
     log.info("voiceover: clip %s +%s (%.2fs, %s)", clip_id, item["src"], seconds, provider)
-    return {"edit": _to_dict(edit), "item": item, "provider": provider}
+    return {"edit": _to_dict(saved), "item": item, "provider": provider}
+
+
+_CONFLICT = "the clip's edit changed while the voice-over was being made; reload the edit and try again"
+
+
+async def _store(session: AsyncSession, clip_id: str, timeline: dict[str, Any], read_version: int | None) -> ClipEdit:
+    """Write ``timeline`` as the clip's edit in one short transaction, only
+    if the edit is still the one read before synthesis (``read_version``;
+    ``None``: there was none). 409 otherwise: another save won."""
+    try:
+        if read_version is None:
+            session.add(ClipEdit(clip_id=clip_id, timeline=timeline, version=1))
+            await session.commit()
+        else:
+            result = await session.execute(
+                update(ClipEdit)
+                .where(ClipEdit.clip_id == clip_id, ClipEdit.version == read_version)
+                .values(timeline=timeline, version=read_version + 1)
+            )
+            if result.rowcount != 1:
+                await session.rollback()
+                raise HTTPException(status_code=409, detail=_CONFLICT)
+            await session.commit()
+    except IntegrityError as exc:
+        # An edit for the clip was created meanwhile (uq_clip_edits_clip_id).
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=_CONFLICT) from exc
+    saved = await _load_edit(session, clip_id)
+    if saved is None:  # deleted between the commit and this read
+        raise HTTPException(status_code=409, detail=_CONFLICT)
+    return saved

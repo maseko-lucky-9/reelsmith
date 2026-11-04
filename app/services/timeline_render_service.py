@@ -85,6 +85,13 @@ MAX_OUTPUT_SECONDS = 20 * 60.0
 MIN_SEGMENT_SECONDS = 0.05
 MAX_TEXT_CHARS = 500
 MAX_CAPTION_WORDS = 100
+"""Most words one caption may hold (its ``words`` list and its text's tokens)."""
+MAX_TIMELINE_CAPTION_WORDS = 5000
+"""Most caption words (text tokens) across a whole timeline."""
+MAX_OVERLAY_LINES = 10
+"""Most newlines one text overlay may hold."""
+MAX_TIMELINE_OVERLAY_CHARS = 5000
+"""Most text-overlay characters across a whole timeline."""
 MAX_STYLE_CHARS = 64
 MAX_COLOR_CHARS = 32
 FONT_SIZE_RANGE = (6, 400)
@@ -244,6 +251,8 @@ def _caption_words(text: str, raw: Any, start: float, end: float, *, name: str) 
         we = _f(w.get("end", ws), name=f"{name}.words[{idx}].end")
         timings.append((ws, we))
     tokens = text.split()
+    if len(tokens) > MAX_CAPTION_WORDS:
+        raise TimelineError(f"{name}.text: more than {MAX_CAPTION_WORDS} words")
     if not tokens:
         return ()
     if len(tokens) == len(timings):
@@ -392,10 +401,14 @@ def _parse(
         return start, end
 
     captions: list[CaptionItem] = []
+    caption_words = 0
     for idx, it in enumerate(grouped["caption"]):
         name = f"captions[{idx}]"
         start, end = _placed(it, name)
         text = _text(it.get("text", ""), name=name)
+        caption_words += len(text.split())
+        if caption_words > MAX_TIMELINE_CAPTION_WORDS:
+            raise TimelineError(f"the captions hold more than {MAX_TIMELINE_CAPTION_WORDS} words in all")
         captions.append(
             CaptionItem(
                 start=start,
@@ -407,6 +420,7 @@ def _parse(
         )
 
     overlays: list[TextOverlayItem] = []
+    overlay_chars = 0
     for idx, it in enumerate(grouped["text-overlay"]):
         name = f"overlays[{idx}]"
         start, end = _placed(it, name)
@@ -414,11 +428,17 @@ def _parse(
         lo, hi = FONT_SIZE_RANGE
         if not lo <= font_size <= hi:
             raise TimelineError(f"{name}.font_size must be in [{lo}, {hi}], got {font_size}")
+        overlay_text = _text(it.get("text", ""), name=name)
+        if overlay_text.count("\n") > MAX_OVERLAY_LINES:
+            raise TimelineError(f"{name}: text holds more than {MAX_OVERLAY_LINES} line breaks")
+        overlay_chars += len(overlay_text)
+        if overlay_chars > MAX_TIMELINE_OVERLAY_CHARS:
+            raise TimelineError(f"the text overlays hold more than {MAX_TIMELINE_OVERLAY_CHARS} characters in all")
         overlays.append(
             TextOverlayItem(
                 start=start,
                 end=end,
-                text=_text(it.get("text", ""), name=name),
+                text=overlay_text,
                 x=_f(it.get("x", 0.5), name="overlay.x"),
                 y=_f(it.get("y", 0.1), name="overlay.y"),
                 font_size=font_size,

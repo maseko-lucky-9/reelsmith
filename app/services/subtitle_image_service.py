@@ -49,7 +49,7 @@ def _rgba(color: str | None, default: RGBA) -> RGBA:
         return default
     try:
         rgb = ImageColor.getrgb(color)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return default
     return (*rgb[:3], 255)
 
@@ -110,7 +110,11 @@ def create_subtitle_image(
 ) -> np.ndarray:
     log.info(
         "Create Subtitle Image (%dx%d, font_size=%d, highlight=%s, anchor_y=%s)",
-        videosize[0], videosize[1], font_size, highlight_word_index, text_anchor_y,
+        videosize[0],
+        videosize[1],
+        font_size,
+        highlight_word_index,
+        text_anchor_y,
     )
     text = text.upper()
 
@@ -183,7 +187,8 @@ def render_to_path(
     log.debug("Rendering subtitle image  text=%r  size=%s  path=%s", text[:40], videosize, path)
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     arr = create_subtitle_image(
-        text, videosize,
+        text,
+        videosize,
         font_size=font_size,
         highlight_word_index=highlight_word_index,
         text_anchor_y=text_anchor_y,
@@ -192,28 +197,95 @@ def render_to_path(
     return path
 
 
-def create_text_overlay_image(text: str, font_size: int, color: str | None) -> Image.Image | None:
+_OVERLAY_LINE_SPACING = 4
+_MIN_OVERLAY_FONT_SIZE = 6
+_OVERLAY_FIT_ATTEMPTS = 6
+_OVERLAY_MAX_CANVASES = 4
+"""An overlay block is never drawn larger than this many canvases a side."""
+
+
+def _text_width(draw: ImageDraw.ImageDraw, text: str, font, stroke: int) -> int:
+    left, _top, right, _bottom = draw.textbbox((0, 0), text, font=font, stroke_width=stroke)
+    return right - left
+
+
+def _wrap_overlay(text: str, draw: ImageDraw.ImageDraw, font, stroke: int, max_width: int) -> str:
+    """``text`` with line breaks so no line is wider than ``max_width`` px:
+    words move to the next line, a word wider than the line is cut."""
+    lines: list[str] = []
+    for paragraph in text.split("\n"):
+        current = ""
+        for word in paragraph.split():
+            candidate = f"{current} {word}" if current else word
+            if _text_width(draw, candidate, font, stroke) <= max_width:
+                current = candidate
+                continue
+            if current:
+                lines.append(current)
+            while len(word) > 1 and _text_width(draw, word, font, stroke) > max_width:
+                cut = 1
+                while cut < len(word) - 1 and _text_width(draw, word[: cut + 1], font, stroke) <= max_width:
+                    cut += 1
+                lines.append(word[:cut])
+                word = word[cut:]
+            current = word
+        lines.append(current)
+    return "\n".join(lines)
+
+
+def create_text_overlay_image(
+    text: str,
+    font_size: int,
+    color: str | None,
+    canvas_size: tuple[int, int] | None = None,
+) -> Image.Image | None:
     """A tight RGBA image of ``text`` (a timeline text overlay): ``color``
     (white when missing or not a colour) with a black stroke. ``None`` when
     the text draws nothing. The text is drawn by PIL, never by ffmpeg, so it
-    reaches no filtergraph."""
+    reaches no filtergraph.
+
+    With ``canvas_size`` (the reel's ``(width, height)``) the text is wrapped
+    to the canvas width; when the wrapped block is still taller than the
+    canvas the font shrinks to fit, and an image still larger than the canvas
+    is scaled down into it. So the image (and the memory it takes) is never
+    larger than the canvas, whatever the text and font size.
+    """
     if not text.strip():
         return None
-    font = _load_font(font_size)
-    stroke = max(1, font_size // 24) if isinstance(font, ImageFont.FreeTypeFont) else 0
+    size = font_size
     probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
-    left, top, right, bottom = probe.textbbox((0, 0), text, font=font, stroke_width=stroke)
+    for _attempt in range(_OVERLAY_FIT_ATTEMPTS):
+        font = _load_font(size)
+        stroke = max(1, size // 24) if isinstance(font, ImageFont.FreeTypeFont) else 0
+        drawn = text
+        if canvas_size is not None:
+            drawn = _wrap_overlay(text, probe, font, stroke, max(1, canvas_size[0]))
+        left, top, right, bottom = probe.multiline_textbbox(
+            (0, 0), drawn, font=font, stroke_width=stroke, spacing=_OVERLAY_LINE_SPACING
+        )
+        if canvas_size is None or bottom - top <= canvas_size[1] or size <= _MIN_OVERLAY_FONT_SIZE:
+            break
+        shrink = canvas_size[1] / max(1, bottom - top)
+        size = max(_MIN_OVERLAY_FONT_SIZE, min(size - 1, int(size * shrink**0.5)))
+    if canvas_size is not None:
+        # Memory guard: a block still far larger than the canvas (text no
+        # timeline validation bounded) is cut before it is allocated.
+        right = min(right, left + _OVERLAY_MAX_CANVASES * max(1, canvas_size[0]))
+        bottom = min(bottom, top + _OVERLAY_MAX_CANVASES * max(1, canvas_size[1]))
     if right <= left or bottom <= top:
         return None
     img = Image.new("RGBA", (right - left, bottom - top), (0, 0, 0, 0))
-    ImageDraw.Draw(img).text(
+    ImageDraw.Draw(img).multiline_text(
         (-left, -top),
-        text,
+        drawn,
         font=font,
         fill=_rgba(color, _WHITE),
         stroke_width=stroke,
         stroke_fill=_BLACK if stroke else None,
+        spacing=_OVERLAY_LINE_SPACING,
     )
     if img.getbbox() is None:
         return None
+    if canvas_size is not None and (img.width > canvas_size[0] or img.height > canvas_size[1]):
+        img.thumbnail((max(1, canvas_size[0]), max(1, canvas_size[1])))
     return img

@@ -23,7 +23,12 @@ from app.main import create_app
 
 
 @pytest.fixture
-async def make_client(tmp_path):
+async def make_client(tmp_path, monkeypatch):
+    # The clip file lives in the download folder (voice-over items are
+    # refused beside an export copy).
+    from app.settings import settings
+
+    monkeypatch.setattr(settings, "default_download_path", str(tmp_path))
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

@@ -48,6 +48,18 @@ def broll_credits(assets: list[dict] | None) -> list[dict[str, str]]:
     return credits
 
 
+def _duration(clip: dict) -> float:
+    """The clip's reel length: the one recorded when an edited reel was
+    rendered (``clip_words.read_reel_duration``, it differs from the clip's
+    window), else ``end - start``."""
+    from app.services import clip_words
+
+    recorded = clip_words.read_reel_duration(clip.get("output_path"))
+    if recorded is not None:
+        return recorded
+    return (clip.get("end") or 0) - (clip.get("start") or 0)
+
+
 def write_manifest(
     clips: list[dict],
     export_dir: str,
@@ -81,7 +93,8 @@ def write_manifest(
             row = {
                 "filename": Path(export_path).name if export_path else "",
                 "title": clip.get("title", ""),
-                "duration_seconds": (clip.get("end") or 0) - (clip.get("start") or 0),
+                # An edited reel's recorded length, else its window's.
+                "duration_seconds": _duration(clip),
                 "file_size_mb": size_mb,
                 "description": clip.get("summary", ""),
                 "hashtags": json.dumps(clip.get("hashtags") or []),

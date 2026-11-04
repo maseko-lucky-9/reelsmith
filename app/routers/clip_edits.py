@@ -49,6 +49,7 @@ supplies the bounds: the source video's range (its probed duration, else the
 job's recorded duration, else the clip's own window) and the clip's folder,
 the only place a voice-over ``src`` name may resolve.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -148,14 +149,13 @@ def _clip_file(clip: ClipRecord) -> str | None:
     return raw if Path(raw).is_file() else None
 
 
-async def _clip_words(
-    session: AsyncSession, clip: ClipRecord, clip_file: str
-) -> list[WordTiming]:
+async def _clip_words(session: AsyncSession, clip: ClipRecord, clip_file: str) -> list[WordTiming]:
     """The clip's words: its sidecar, else a backfill (module docstring)."""
-    duration = float(clip.end or 0.0) - float(clip.start or 0.0)
+    duration = await asyncio.to_thread(clip_words.reel_seconds, clip_file, clip.start, clip.end)
     cached = await asyncio.to_thread(clip_words.read_clip_words, clip_file)
     if cached is not None:
-        return cached
+        # Words outside the reel (a stale or hand-edited sidecar) are clipped to it.
+        return clip_words.clip_window_words(cached, duration)
     job_id = clip.job_id
     if not is_managed_file(clip_file):
         log.info("clip %s: no words sidecar; its file is an export copy, not transcribed", clip.id)
@@ -168,12 +168,14 @@ async def _clip_words(
         return []
     job = await session.get(JobRecord, job_id)
     language = job.language if job is not None else None
+    # No connection or transaction is held while the clip is transcribed:
+    # the session is reopened by its next use (its loaded objects stay
+    # readable, detached).
+    await session.close()
     # Counted as work on the job, so a job delete meanwhile answers 409.
     orchestrator.claim_work(job_id)
     try:
-        words = await clip_words.backfill_clip_words(
-            clip_file, duration=duration, language=language
-        )
+        words = await clip_words.backfill_clip_words(clip_file, duration=duration, language=language)
     finally:
         orchestrator.release_work(job_id)
     return words or []
@@ -192,9 +194,7 @@ def _positive(value: Any) -> float | None:
     return number if math.isfinite(number) and number > 0 else None
 
 
-async def _source(
-    session: AsyncSession, clip: ClipRecord
-) -> tuple[str | None, tuple[float, float] | None]:
+async def _source(session: AsyncSession, clip: ClipRecord) -> tuple[str | None, tuple[float, float] | None]:
     """The clip's source video (when on disk) and the source window a v2
     segment must lie in: ``[0, duration]`` of the source (probed, else the
     job's recorded duration), else the clip's own window, else unknown."""
@@ -227,12 +227,11 @@ async def get_clip_edit(clip_id: str, session: AsyncSession = Depends(get_sessio
     words = await _clip_words(session, clip, clip_file) if clip_file else []
     if edit is not None:
         return {**_to_dict(edit), "words": clip_words.words_to_dicts(words)}
-    duration = float(clip.end or 0.0) - float(clip.start or 0.0)
+    # An edited reel's real length (recorded at its render), else its window.
+    duration = await asyncio.to_thread(clip_words.reel_seconds, clip_file, clip.start, clip.end)
     return {
         "clip_id": clip.id,
-        "timeline": clip_words.default_timeline(
-            words, duration, settings.caption_words_per_segment
-        ),
+        "timeline": clip_words.default_timeline(words, duration, settings.caption_words_per_segment),
         "version": 0,
         "created_at": None,
         "updated_at": None,
@@ -261,13 +260,22 @@ async def upsert_clip_edit(
                 status_code=422,
                 detail=f"unknown track kind: {track['kind']!r}",
             )
+    clip_file = _clip_file(clip)
+    has_audio = any(t["kind"] == "audio" and t["items"] for t in timeline_dict["tracks"])
+    # As POST /voiceover: voice-over files resolve only beside a clip file
+    # inside the download folder, never beside an export copy.
+    if has_audio and clip_file is not None and not is_managed_file(clip_file):
+        raise HTTPException(
+            status_code=409,
+            detail="clip file is outside the download folder (an export copy); voice-over items cannot be saved",
+        )
     _, source_range = await _source(session, clip)
     try:
         await asyncio.to_thread(
             validate_timeline,
             timeline_dict,
             source_range=source_range,
-            clip_folder=_clip_folder(clip),
+            clip_folder=Path(clip_file).parent if clip_file else None,
         )
     except TimelineError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -294,9 +302,7 @@ async def upsert_clip_edit(
 
 
 @router.get("/{clip_id}/edit/plan")
-async def get_render_plan(
-    clip_id: str, session: AsyncSession = Depends(get_session)
-):
+async def get_render_plan(clip_id: str, session: AsyncSession = Depends(get_session)):
     """Return the deterministic render plan for the editor preview."""
     clip = await _load_clip(session, clip_id)
     edit = await _load_edit(session, clip_id)
@@ -319,9 +325,7 @@ async def get_render_plan(
 
 
 @router.delete("/{clip_id}/edit", status_code=204)
-async def delete_clip_edit(
-    clip_id: str, session: AsyncSession = Depends(get_session)
-):
+async def delete_clip_edit(clip_id: str, session: AsyncSession = Depends(get_session)):
     await _load_clip(session, clip_id)
     edit = await _load_edit(session, clip_id)
     if edit is None:

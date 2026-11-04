@@ -27,9 +27,10 @@ inside ``YTVIDEO_VOICEOVER_MODEL_DIR``. Piper runs through
 capped in size and must parse as a wav with a positive duration.
 ``resolve_provider`` turns ``YTVIDEO_VOICEOVER_PROVIDER`` into an engine:
 ``auto`` is Piper when the ``piper`` command and the voice files exist, else
-the stub (logged). Voices are fetched by ``scripts/fetch_piper_voice.py``,
+the stub (one WARNING). Voices are fetched by ``scripts/fetch_piper_voice.py``,
 never here.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -83,15 +84,16 @@ def _stub_synth(text: str, out_path: str) -> str:
     return out_path
 
 
-def _coqui_argv(
-    text: str, out_path: str, *, model: str, voice: str | None
-) -> tuple[str, ...]:
+def _coqui_argv(text: str, out_path: str, *, model: str, voice: str | None) -> tuple[str, ...]:
     """Build the argv for the ``tts`` CLI shipped with Coqui XTTS."""
     argv: list[str] = [
         "tts",
-        "--text", text,
-        "--model_name", model,
-        "--out_path", out_path,
+        "--text",
+        text,
+        "--model_name",
+        model,
+        "--out_path",
+        out_path,
     ]
     if voice:
         argv.extend(["--speaker_idx", voice])
@@ -133,7 +135,9 @@ def synthesize(
     if provider == "stub":
         result = _stub_synth(text, out_path)
         emit_from_sync(
-            bus, job_id, EventType.VOICEOVER_GENERATED,
+            bus,
+            job_id,
+            EventType.VOICEOVER_GENERATED,
             {"provider": provider, "output": out_path, "text_len": len(text)},
         )
         return result
@@ -145,28 +149,28 @@ def synthesize(
         if not Path(out_path).is_file():
             raise VoiceoverError("coqui: no output produced")
         emit_from_sync(
-            bus, job_id, EventType.VOICEOVER_GENERATED,
+            bus,
+            job_id,
+            EventType.VOICEOVER_GENERATED,
             {"provider": provider, "output": out_path, "text_len": len(text), "voice": voice},
         )
         return out_path
 
     if provider == "piper":
         if shutil.which("piper") is None:
-            raise VoiceoverError(
-                "piper binary not found on PATH — install piper-tts or add it to PATH"
-            )
+            raise VoiceoverError("piper binary not found on PATH — install piper-tts or add it to PATH")
         piper_model = settings.piper_model.strip()
         if not piper_model:
-            raise VoiceoverError(
-                "YTVIDEO_PIPER_MODEL is not set — provide a path to the .onnx model file"
-            )
+            raise VoiceoverError("YTVIDEO_PIPER_MODEL is not set — provide a path to the .onnx model file")
         argv = _piper_argv(out_path, model=piper_model)
         run = invoker or _invoke
         run(argv, text)
         if not Path(out_path).is_file():
             raise VoiceoverError("piper: no output produced")
         emit_from_sync(
-            bus, job_id, EventType.VOICEOVER_GENERATED,
+            bus,
+            job_id,
+            EventType.VOICEOVER_GENERATED,
             {"provider": provider, "output": out_path, "text_len": len(text)},
         )
         return out_path
@@ -176,13 +180,13 @@ def synthesize(
 
 def _invoke(argv: Sequence[str], stdin_text: str = "") -> None:
     import subprocess
+
     log.info("voiceover: %s", " ".join(argv))
     input_bytes = stdin_text.encode() if stdin_text else None
     proc = subprocess.run(argv, input=input_bytes, capture_output=True)
     if proc.returncode != 0:
         raise VoiceoverError(
-            f"voiceover failed (rc={proc.returncode}): "
-            f"{proc.stderr.decode('utf-8', errors='replace')[-500:]}"
+            f"voiceover failed (rc={proc.returncode}): {proc.stderr.decode('utf-8', errors='replace')[-500:]}"
         )
 
 
@@ -282,12 +286,14 @@ def resolve_provider(
         return name
     model = voice_model_path(voice or settings.voiceover_voice, model_dir)
     if piper_command() is None:
-        log.info("voiceover: auto -> stub (piper is not installed)")
+        log.warning("voiceover: auto -> stub (piper is not installed); the voice-over will be silence")
         return "stub"
     if not (model.is_file() and _config_path(model).is_file()):
-        log.info(
-            "voiceover: auto -> stub (voice %s not in %s; run python -m scripts.fetch_piper_voice)",
-            model.stem, model.parent,
+        log.warning(
+            "voiceover: auto -> stub (voice %s not in %s; run python -m scripts.fetch_piper_voice);"
+            " the voice-over will be silence",
+            model.stem,
+            model.parent,
         )
         return "stub"
     return "piper"
@@ -377,10 +383,14 @@ def synthesize_voiceover(
             text_file.write_text(script + "\n", encoding="utf-8")
             argv = [
                 *command,
-                "--model", str(model),
-                "--config", str(config),
-                "--input-file", str(text_file),
-                "--output-file", str(out),
+                "--model",
+                str(model),
+                "--config",
+                str(config),
+                "--input-file",
+                str(text_file),
+                "--output-file",
+                str(out),
             ]
             log.info("voiceover: piper voice=%s chars=%d -> %s", model.stem, len(script), out.name)
             (runner or _run_killable)(argv, timeout)

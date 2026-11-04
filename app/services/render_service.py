@@ -80,7 +80,7 @@ single pass. The source is read once over the span of its segments, each
 segment is cut out with trim/atrim and the pieces are concatenated::
 
     -ss S0 -t SPAN -i SRC   -i bg.png   [-f concat ... captions]
-    [-i overlay_N.png ...]  [-i voiceover_N ...]
+    [-i overlay_N.png ...]  [-protocol_whitelist file -i voiceover_N ...]
 
     [0:v] split=N [sv0][sv1]...       (N > 1)
     [sv0] trim=start=A:end=B, setpts=PTS-STARTPTS, INSET0   [g0]
@@ -112,9 +112,9 @@ segment is cut out with trim/atrim and the pieces are concatenated::
 import logging
 import math
 import os
-from bisect import bisect_left, bisect_right
 import tempfile
 import uuid
+from bisect import bisect_left, bisect_right
 from collections.abc import Sequence
 from dataclasses import dataclass
 from fractions import Fraction
@@ -251,9 +251,7 @@ def _num(value: float, decimals: int) -> str:
 def _normalise_track(track: CropTrack, max_x: float) -> list[CropKeyframe]:
     """Validate, round and clamp keyframes exactly as they are printed."""
     if not 1 <= len(track) <= MAX_CROP_KEYFRAMES:
-        raise ValueError(
-            f"crop track needs 1..{MAX_CROP_KEYFRAMES} keyframes, got {len(track)}"
-        )
+        raise ValueError(f"crop track needs 1..{MAX_CROP_KEYFRAMES} keyframes, got {len(track)}")
     knots: list[CropKeyframe] = []
     for t, x in track:
         if not (math.isfinite(t) and math.isfinite(x)):
@@ -262,9 +260,7 @@ def _normalise_track(track: CropTrack, max_x: float) -> list[CropKeyframe]:
             raise ValueError(f"crop keyframe time {t} is negative")
         t = round(t, _TIME_DECIMALS)
         if knots and t < knots[-1][0]:
-            raise ValueError(
-                f"crop keyframe times must not decrease ({t} after {knots[-1][0]})"
-            )
+            raise ValueError(f"crop keyframe times must not decrease ({t} after {knots[-1][0]})")
         knots.append((t, round(min(max(x, 0.0), max_x), _X_DECIMALS)))
     return knots
 
@@ -306,10 +302,7 @@ def crop_x_expr(track: CropTrack, src_w: int, crop_w: int) -> str:
             continue  # zero-length segment: a hard cut, never active
         dx = round(xb - xa, _X_DECIMALS)
         sign = "+" if dx >= 0 else "-"
-        terms.append(
-            f"gte(t,{t_(ta)})*lt(t,{t_(tb)})"
-            f"*({x_(xa)}{sign}{x_(abs(dx))}*(t-{t_(ta)})/{t_(tb - ta)})"
-        )
+        terms.append(f"gte(t,{t_(ta)})*lt(t,{t_(tb)})*({x_(xa)}{sign}{x_(abs(dx))}*(t-{t_(ta)})/{t_(tb - ta)})")
     terms.append(f"gte(t,{t_(tn)})*{x_(xn)}")
     return "+".join(terms)
 
@@ -320,10 +313,7 @@ def _pan_chain(geometry: clip_service.ReelGeometry, track: CropTrack) -> str:
     canvas_w, canvas_h = geometry.canvas_size
     window = pan_crop(geometry)
     x = crop_x_expr(track, src_w, window.width)
-    return (
-        f"crop=w={window.width}:h={window.height}:x='{x}':y={window.y},"
-        f"scale={canvas_w}:{canvas_h}"
-    )
+    return f"crop=w={window.width}:h={window.height}:x='{x}':y={window.y},scale={canvas_w}:{canvas_h}"
 
 
 # ── B-roll inserts ────────────────────────────────────────────────────────────
@@ -351,16 +341,12 @@ def _exact(seconds: float) -> Fraction:
     return Fraction(f"{seconds:.{_TIME_DECIMALS}f}")
 
 
-def _normalise_broll(
-    broll: Sequence[BrollInsert] | None, clip_duration: float
-) -> tuple[BrollInsert, ...]:
+def _normalise_broll(broll: Sequence[BrollInsert] | None, clip_duration: float) -> tuple[BrollInsert, ...]:
     """Timing rules only (no file access): rounded inserts sorted by start."""
     if not broll:
         return ()
     if len(broll) > MAX_BROLL_INSERTS:
-        raise ValueError(
-            f"at most {MAX_BROLL_INSERTS} B-roll inserts per clip, got {len(broll)}"
-        )
+        raise ValueError(f"at most {MAX_BROLL_INSERTS} B-roll inserts per clip, got {len(broll)}")
     inserts = []
     for insert in broll:
         if not (math.isfinite(insert.start) and math.isfinite(insert.duration)):
@@ -368,17 +354,12 @@ def _normalise_broll(
         start = round(insert.start, _TIME_DECIMALS)
         duration = round(insert.duration, _TIME_DECIMALS)
         if duration <= 0:
-            raise ValueError(
-                f"B-roll insert {insert.path}: duration must be > 0, got {duration}"
-            )
+            raise ValueError(f"B-roll insert {insert.path}: duration must be > 0, got {duration}")
         if start < 0:
-            raise ValueError(
-                f"B-roll insert {insert.path}: start must be >= 0, got {start}"
-            )
+            raise ValueError(f"B-roll insert {insert.path}: start must be >= 0, got {start}")
         if _exact(start) + _exact(duration) > _exact(clip_duration):
             raise ValueError(
-                f"B-roll insert {insert.path}: ends at {start + duration:g} s, "
-                f"past the clip end ({clip_duration:g} s)"
+                f"B-roll insert {insert.path}: ends at {start + duration:g} s, past the clip end ({clip_duration:g} s)"
             )
         inserts.append(BrollInsert(insert.path, start, duration))
     inserts.sort(key=lambda i: (i.start, i.duration))
@@ -391,9 +372,7 @@ def _normalise_broll(
     return tuple(inserts)
 
 
-def validate_broll(
-    broll: Sequence[BrollInsert] | None, clip_duration: float
-) -> tuple[BrollInsert, ...]:
+def validate_broll(broll: Sequence[BrollInsert] | None, clip_duration: float) -> tuple[BrollInsert, ...]:
     """Check B-roll inserts against a clip of ``clip_duration`` seconds.
 
     Every file must exist; each window needs ``duration > 0``, ``start >= 0``
@@ -445,8 +424,7 @@ def _broll_filters(
         f"[{index}:v]setpts=PTS-STARTPTS+{t_(offset)}/TB,fps={_rate(fps)},"
         f"scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=increase,"
         f"crop={canvas_w}:{canvas_h},setsar=1,format=yuv420p[br{n}]",
-        f"[{under}][br{n}]overlay=x=0:y=0:"
-        f"enable='gte(t,{t_(lo)})*lt(t,{t_(hi)})':eof_action=pass[b{n}]",
+        f"[{under}][br{n}]overlay=x=0:y=0:enable='gte(t,{t_(lo)})*lt(t,{t_(hi)})':eof_action=pass[b{n}]",
     ]
 
 
@@ -534,10 +512,7 @@ def build_reel_argv(
         graph += _broll_filters(insert, index, n, composite, fps, geometry)
         composite = f"b{n}"
     if captions is not None:
-        graph.append(
-            f"[{composite}][2:v]overlay=x={captions.x}:y={captions.y}"
-            ":eof_action=pass[c]"
-        )
+        graph.append(f"[{composite}][2:v]overlay=x={captions.x}:y={captions.y}:eof_action=pass[c]")
         last = "c"
     else:
         last = composite
@@ -553,9 +528,7 @@ def build_reel_argv(
     ]  # fmt: skip
 
 
-def build_trim_argv(
-    src: str, output_path: str, *, start: float, duration: float, fps: Fraction
-) -> list[str]:
+def build_trim_argv(src: str, output_path: str, *, start: float, duration: float, fps: Fraction) -> list[str]:
     """ffmpeg argv for a plain re-encoded trim (no reframe, no captions)."""
     fps = grid_rate(fps)
     return [
@@ -619,14 +592,13 @@ def _same_path(a: str, b: str) -> bool:
     return os.path.realpath(a) == os.path.realpath(b)
 
 
-def plan_segments(
-    plan: "RenderPlan", video_path: str, span: tuple[float, float] | None = None
-) -> list[SourceWindow]:
+def plan_segments(plan: "RenderPlan", video_path: str, span: tuple[float, float] | None = None) -> list[SourceWindow]:
     """The source windows a plan plays, in order, read from ``video_path``.
 
     v2: the plan's segments; a plan whose ``source_path`` is another file is
     refused. v1: each video item reads ``[trim_start, trim_start + length)``
-    of its ``src``, in reel order (placement gaps close up). A v1 ``src`` is
+    of its ``src``, in reel order; a gap between their placements (or before
+    the first) is refused (it would misplace the captions). A v1 ``src`` is
     a client string, so it is never rendered as given: it must be
     ``video_path`` itself (the job's own source), otherwise ``ValueError``.
 
@@ -639,7 +611,16 @@ def plan_segments(
         windows = [SourceWindow(seg.start, seg.end) for seg in plan.segments]
     else:
         windows = []
+        reel_cursor = 0.0
         for item in sorted(plan.video, key=lambda v: v.start):
+            # The pieces are played back to back, so a gap in their placement
+            # would shift every caption and overlay after it: unplannable.
+            if item.start > reel_cursor + _SEGMENT_TOLERANCE:
+                raise ValueError(
+                    f"unplannable edit: the v1 video items leave a gap at {reel_cursor:g}-{item.start:g}s "
+                    "of the reel; close it in the editor and save again"
+                )
+            reel_cursor = max(reel_cursor, item.end)
             if not _same_path(item.src, video_path):
                 raise ValueError(
                     f"video item src {item.src!r:.80} is not this job's source video; refusing to render it"
@@ -653,12 +634,9 @@ def plan_segments(
             raise ValueError(f"segment {idx}: times are not finite")
         if win.start < 0 or win.end <= win.start:
             raise ValueError(f"segment {idx}: invalid window [{win.start}, {win.end})")
-        if span is not None and (
-            win.start < span[0] - _SEGMENT_TOLERANCE or win.end > span[1] + _SEGMENT_TOLERANCE
-        ):
+        if span is not None and (win.start < span[0] - _SEGMENT_TOLERANCE or win.end > span[1] + _SEGMENT_TOLERANCE):
             raise ValueError(
-                f"segment {idx}: [{win.start:g}, {win.end:g}) is outside the render window "
-                f"[{span[0]:g}, {span[1]:g})"
+                f"segment {idx}: [{win.start:g}, {win.end:g}) is outside the render window [{span[0]:g}, {span[1]:g})"
             )
         if out and win.start < out[-1].end - _SEGMENT_TOLERANCE:
             raise ValueError(f"segment {idx}: segments must be in source order and must not overlap")
@@ -669,9 +647,7 @@ def plan_segments(
     return out
 
 
-def plan_caption_entries(
-    captions: Sequence["CaptionItem"], style: CaptionStyle
-) -> list[clip_service.CaptionEntry]:
+def plan_caption_entries(captions: Sequence["CaptionItem"], style: CaptionStyle) -> list[clip_service.CaptionEntry]:
     """Caption schedule for the plan's captions (reel seconds).
 
     Each caption shows its words (the edited spelling); with a highlighting
@@ -710,7 +686,7 @@ def write_overlay_images(
     for k, item in enumerate(overlays):
         if item.end <= item.start:
             continue
-        img = create_text_overlay_image(item.text, item.font_size, item.color)
+        img = create_text_overlay_image(item.text, item.font_size, item.color, (canvas_w, canvas_h))
         if img is None:
             continue
 
@@ -837,9 +813,7 @@ def build_plan_argv(
             graph.append(f"[{audio_in[i]}]atrim=start={t_(a)}:end={t_(b)},asetpts=PTS-STARTPTS[h{i}]")
             pieces.append(f"[h{i}]")
     graph.append(
-        "".join(pieces)
-        + f"concat=n={n}:v=1:a={int(use_source_audio)}[in]"
-        + ("[sa]" if use_source_audio else "")
+        "".join(pieces) + f"concat=n={n}:v=1:a={int(use_source_audio)}[in]" + ("[sa]" if use_source_audio else "")
     )
     graph.append(f"[bg][in]overlay=x=0:y={inset_top}:ts_sync_mode=nearest[b]")
     composite = "b"
@@ -850,9 +824,7 @@ def build_plan_argv(
             "-f", "concat", "-safe", "0",
             "-i", str(Path(captions_dir) / captions.list_name),
         ]  # fmt: skip
-        graph.append(
-            f"[b][{n_inputs}:v]overlay=x={captions.x}:y={captions.y}:eof_action=pass[c]"
-        )
+        graph.append(f"[b][{n_inputs}:v]overlay=x={captions.x}:y={captions.y}:eof_action=pass[c]")
         n_inputs += 1
         composite = "c"
     for k, ov in enumerate(overlays):
@@ -869,7 +841,7 @@ def build_plan_argv(
     if voiceovers:
         labels = []
         for k, vo in enumerate(voiceovers):
-            inputs += ["-i", vo.path]
+            inputs += ["-protocol_whitelist", "file", "-i", vo.path]
             graph.append(
                 f"[{n_inputs}:a]atrim=end={t_(vo.end - vo.start)},asetpts=PTS-STARTPTS,"
                 f"volume={_num(vo.gain, 3)},adelay=delays={round(vo.start * 1000)}:all=1[vo{k}]"
@@ -877,20 +849,12 @@ def build_plan_argv(
             n_inputs += 1
             labels.append(f"[vo{k}]")
         if use_source_audio:
-            speaking = "+".join(
-                f"between(t,{t_(vo.start)},{t_(vo.end)})" for vo in voiceovers if vo.gain > 0
-            )
-            duck = (
-                f",volume=volume='if({speaking},{_num(VOICEOVER_DUCK_VOLUME, 3)},1)':eval=frame"
-                if speaking
-                else ""
-            )
+            speaking = "+".join(f"between(t,{t_(vo.start)},{t_(vo.end)})" for vo in voiceovers if vo.gain > 0)
+            duck = f",volume=volume='if({speaking},{_num(VOICEOVER_DUCK_VOLUME, 3)},1)':eval=frame" if speaking else ""
             graph.append(f"[sa]apad=whole_dur={t_(total)}{duck}[base]")
         else:
             graph.append(f"{_SILENCE},atrim=end={t_(total)}[base]")
-        graph.append(
-            "[base]" + "".join(labels) + f"amix=inputs={1 + len(labels)}:duration=first:normalize=0[a]"
-        )
+        graph.append("[base]" + "".join(labels) + f"amix=inputs={1 + len(labels)}:duration=first:normalize=0[a]")
         audio_out = "[a]"
     elif use_source_audio:
         audio_out = "[sa]"
@@ -930,7 +894,12 @@ def _render_plan(
     entries = plan_caption_entries(plan.captions, style)
     log.info(
         "Plan render  segments=%d  duration=%.3f  captions=%d  overlays=%d  voiceovers=%d  style=%s",
-        len(segments), total, len(entries), len(plan.overlays), len(voiceovers), plan.caption_style,
+        len(segments),
+        total,
+        len(entries),
+        len(plan.overlays),
+        len(voiceovers),
+        plan.caption_style,
     )
     fps = ffmpeg_tools.fps(video_path)
     source_has_audio = ffmpeg_tools.has_audio(video_path)
@@ -939,9 +908,9 @@ def _render_plan(
     with tempfile.TemporaryDirectory(prefix="reelsmith-render-") as work:
         background_png = str(Path(work) / "background.png")
         span_start = segments[0].start
-        background_still(
-            video_path, span_start, segments[-1].end - span_start, geometry, target_aspect_ratio
-        ).save(background_png, compress_level=1)
+        background_still(video_path, span_start, segments[-1].end - span_start, geometry, target_aspect_ratio).save(
+            background_png, compress_level=1
+        )
         track = caption_track.build_caption_track(entries, geometry, total, work, style=style)
         overlays = write_overlay_images(plan.overlays, geometry, work)
         argv = build_plan_argv(
@@ -971,13 +940,9 @@ def _run_atomically(argv: list[str], output_path: str) -> None:
     which replaces ``output_path`` only on success and is removed on failure.
     """
     out = Path(output_path)
-    partial = out.with_name(
-        f".{out.stem}.{os.getpid()}.{uuid.uuid4().hex[:8]}.partial{out.suffix}"
-    )
+    partial = out.with_name(f".{out.stem}.{os.getpid()}.{uuid.uuid4().hex[:8]}.partial{out.suffix}")
     try:
-        ffmpeg_tools.run(
-            [*argv[:-1], str(partial)], timeout=settings.render_timeout_seconds
-        )
+        ffmpeg_tools.run([*argv[:-1], str(partial)], timeout=settings.render_timeout_seconds)
         os.replace(partial, out)
     finally:
         partial.unlink(missing_ok=True)
@@ -1022,17 +987,13 @@ def render_clip(
     ``word_timings`` and ``caption_words_per_segment`` are ignored (the
     plan's captions replace them); ``broll`` is refused.
     """
-    log.info(
-        "Rendering clip %s [%.3f, %.3f] -> %s", video_path, start, end, output_path
-    )
+    log.info("Rendering clip %s [%.3f, %.3f] -> %s", video_path, start, end, output_path)
     if start < 0 or end <= start:
         raise ValueError(f"invalid render window start={start} end={end}")
     if plan is not None:
         if broll:
             raise ValueError("broll is not supported with an edited timeline plan")
-        return _render_plan(
-            video_path, output_path, start, end, plan, target_aspect_ratio, crop_track
-        )
+        return _render_plan(video_path, output_path, start, end, plan, target_aspect_ratio, crop_track)
     duration = end - start
     inserts = validate_broll(broll, duration)
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -1040,17 +1001,11 @@ def render_clip(
 
     if word_timings is None and not captions_path:
         if crop_track is not None:
-            raise ValueError(
-                "crop_track needs a reel render (word_timings or captions_path)"
-            )
+            raise ValueError("crop_track needs a reel render (word_timings or captions_path)")
         if inserts:
-            raise ValueError(
-                "broll needs a reel render (word_timings or captions_path)"
-            )
+            raise ValueError("broll needs a reel render (word_timings or captions_path)")
         log.info("No captions provided; rendering clip without subtitles")
-        argv = build_trim_argv(
-            video_path, output_path, start=start, duration=duration, fps=fps
-        )
+        argv = build_trim_argv(video_path, output_path, start=start, duration=duration, fps=fps)
         _run_atomically(argv, output_path)
         log.info("Render complete  output=%s", output_path)
         return output_path
@@ -1061,22 +1016,18 @@ def render_clip(
             len(word_timings),
             caption_words_per_segment,
         )
-        entries = clip_service.caption_entries(
-            word_timings, None, caption_words_per_segment
-        )
+        entries = clip_service.caption_entries(word_timings, None, caption_words_per_segment)
     else:
         captions = _load_captions(captions_path)
         log.info("Captions loaded  count=%d  path=%s", len(captions), captions_path)
         entries = clip_service.caption_entries(None, captions)
 
-    geometry = clip_service.reel_geometry(
-        *ffmpeg_tools.video_size(video_path), target_aspect_ratio
-    )
+    geometry = clip_service.reel_geometry(*ffmpeg_tools.video_size(video_path), target_aspect_ratio)
     with tempfile.TemporaryDirectory(prefix="reelsmith-render-") as work:
         background_png = str(Path(work) / "background.png")
-        background_still(
-            video_path, start, duration, geometry, target_aspect_ratio
-        ).save(background_png, compress_level=1)
+        background_still(video_path, start, duration, geometry, target_aspect_ratio).save(
+            background_png, compress_level=1
+        )
         track = caption_track.build_caption_track(entries, geometry, duration, work)
         argv = build_reel_argv(
             video_path,

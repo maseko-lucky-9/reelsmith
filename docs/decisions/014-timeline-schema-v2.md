@@ -47,3 +47,10 @@ Rules that cut across the table:
 - A caption whose word count changed loses its speech rhythm (accepted, see the `ponytail:` comment).
 - The wav of a deleted `audio` item stays in the clip folder until the job is deleted.
 - Any later schema change adds `schema_version: 3` to `_KINDS_BY_VERSION`; an unknown version is rejected, never guessed.
+
+## Licensing and operations
+
+- **piper-tts 1.8.0 is GPL-3.0-or-later** (PyPI metadata, project `OHF-voice/piper1-gpl`, checked 2026-11-04). It runs as a separate process (`python -m piper` or the `piper` command, through `ffmpeg_tools.run`), never imported by the app, which keeps Reelsmith's own code out of the GPL's reach for this learning project; re-check before any distribution. Voice models carry their own licences (see each voice's model card).
+- **The Piper CLI flags are unverified** against the real package (`--model`, `--config`, `--input-file`, `--output-file`); the tests use a fake runner. T135 is the live check.
+- **Operations.** At most two voice-overs are synthesised at once (`MAX_CONCURRENT_SYNTHESES`, 503 "voice-over busy" beyond that), and no database connection is held while Piper runs. Voice-over inputs reach ffmpeg with `-protocol_whitelist file`. Text is bounded per timeline as well as per item: 100 words per caption, 5000 caption words and 5000 text-overlay characters per timeline, 10 line breaks per overlay; an overlay image is wrapped to, and never larger than, the canvas.
+- **Deferred:** a pinned Piper voice download (T137), GC of unreferenced voice-over wavs and a lower `MAX_OUTPUT_INDEX` (T138), splitting `render_service.py` and the timeline parser (T136).

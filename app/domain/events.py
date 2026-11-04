@@ -46,6 +46,11 @@ class EventType(str, Enum):
     # job stays completed either way; a failed reprompt keeps the old clips.
     JOB_REPROMPTED = "JobReprompted"
     REPROMPT_FAILED = "RepromptFailed"
+    # A queued clip re-render (POST /clips/{id}/rerender) ended without a new
+    # file: refused (its saved edit cannot be rendered) or failed. Payload
+    # ``clip_id``, ``reason`` ("refused" | "failed"), ``error``. The job stays
+    # completed and the clip unchanged; a successful one emits ClipRendered.
+    CLIP_RERENDER_FAILED = "ClipRerenderFailed"
     # ── Parity Wave (W1-W3) service emits ────────────────────────────────────
     AUDIO_ENHANCED = "AudioEnhanced"
     AI_HOOK_GENERATED = "AiHookGenerated"
@@ -122,7 +127,5 @@ def emit_from_sync(
     except RuntimeError:
         # No loop in this thread — caller (orchestrator) emits instead.
         return False
-    loop.create_task(
-        bus.publish(Event(type=event_type, job_id=job_id, payload=payload or {}))
-    )
+    loop.create_task(bus.publish(Event(type=event_type, job_id=job_id, payload=payload or {})))
     return True

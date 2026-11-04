@@ -22,8 +22,11 @@ once (on the first editor open) and caches it.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import math
 import os
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path, PurePath
 from typing import Any
@@ -65,7 +68,7 @@ def clip_words_path(clip_path: str | None) -> Path | None:
     try:
         # A symlinked words folder or sidecar resolves elsewhere: refused.
         inside = path.resolve().parent == job_folder.resolve() / CLIP_WORDS_DIRNAME
-    except (OSError, RuntimeError, ValueError):
+    except OSError, RuntimeError, ValueError:
         return None
     return path if inside else None
 
@@ -79,12 +82,22 @@ def clip_window_words(words: Sequence[Any], duration: float) -> list[WordTiming]
 
 
 def read_clip_words(clip_path: str) -> list[WordTiming] | None:
-    """The clip's cached words, or ``None`` when there is no readable sidecar."""
+    """The clip's cached words in time order, or ``None`` when there is no
+    readable sidecar. A word with a negative or non-finite time is dropped;
+    one ending before it starts ends at its start."""
     path = clip_words_path(clip_path)
     if path is None:
         return None
     # read_words_sidecar names its file after a video path's stem.
-    return segment_discovery.read_words_sidecar(str(path.parent / Path(clip_path).name))
+    words = segment_discovery.read_words_sidecar(str(path.parent / Path(clip_path).name))
+    if words is None:
+        return None
+    kept = [
+        WordTiming(w.word, w.start, max(w.start, w.end))
+        for w in words
+        if math.isfinite(w.start) and math.isfinite(w.end) and w.start >= 0
+    ]
+    return sorted(kept, key=lambda w: (w.start, w.end))
 
 
 def write_clip_words(clip_path: str, words: Sequence[Any]) -> Path | None:
@@ -104,6 +117,70 @@ def clear_clip_words(clip_path: str) -> None:
     path = clip_words_path(clip_path)
     if path is not None:
         path.unlink(missing_ok=True)
+
+
+REEL_INFO_SUFFIX = ".reel.json"
+"""The reel-info sidecar beside the words sidecar: ``{"duration": seconds}``."""
+
+
+def reel_info_path(clip_path: str | None) -> Path | None:
+    """``<job folder>/.clip_words/<clip stem>.reel.json``, refused exactly
+    when ``clip_words_path`` is (None)."""
+    words_path = clip_words_path(clip_path)
+    if words_path is None:
+        return None
+    return words_path.with_name(Path(str(clip_path)).stem + REEL_INFO_SUFFIX)
+
+
+def write_reel_duration(clip_path: str, seconds: float) -> Path | None:
+    """Record the rendered reel's real length (an edited reel's differs from
+    its clip's ``end - start``); the sidecar's path, or None when refused or
+    ``seconds`` is not a positive finite number (nothing is written)."""
+    path = reel_info_path(clip_path)
+    if path is None or not (isinstance(seconds, (int, float)) and 0 < float(seconds) < float("inf")):
+        return None
+    path.parent.mkdir(exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"duration": float(seconds)}, fh)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    return path
+
+
+def read_reel_duration(clip_path: str | None) -> float | None:
+    """The reel's recorded length (``write_reel_duration``), or None when
+    there is none or it is unreadable: the clip's ``end - start`` then holds."""
+    path = reel_info_path(clip_path)
+    if path is None or not path.is_file():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8")).get("duration")
+    except (OSError, ValueError, AttributeError) as exc:
+        log.warning("Ignoring unreadable reel info %s (%s)", path, exc)
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if 0 < number < float("inf") else None
+
+
+def clear_reel_duration(clip_path: str) -> None:
+    """Forget the reel's recorded length (a render from the clip's window)."""
+    path = reel_info_path(clip_path)
+    if path is not None:
+        path.unlink(missing_ok=True)
+
+
+def reel_seconds(clip_path: str | None, start: float | None, end: float | None) -> float:
+    """The reel's length: its recorded one, else ``end - start``."""
+    recorded = read_reel_duration(clip_path)
+    if recorded is not None:
+        return recorded
+    return float(end or 0.0) - float(start or 0.0)
 
 
 async def backfill_clip_words(clip_path: str, *, duration: float, language: str | None) -> list[WordTiming] | None:
