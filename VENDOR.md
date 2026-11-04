@@ -79,6 +79,12 @@
   debug `console.log` calls and an unused rectangle removed; `selection-box.tsx`: no
   `"use client"`, fill via `color-mix()` over the app's oklch `--foreground`; imports re-pointed
   from `@/` to `@/editor/opencut/`. Files are formatted by Prettier's defaults.
+- **Adapted so far (T144):** `stores/timeline-store.ts`: `storageService`, the media, project
+  and editor stores, `separateAudio`, `replaceElementMedia`, project load/save and auto-save
+  removed; tracks carry Reelsmith roles and schema v2 origins (`web/src/editor/types.ts`);
+  history holds whole snapshots capped at 50 and redo stays undoable; segment split, trim and
+  delete go through `web/src/lib/timelineEdit.ts`; refused edits return a reason; new `load`,
+  `replaceFromTimeline`, `adoptTimeline`, `setSourceDuration`, `toTimeline`, `readOnly`.
 - **Never taken:** media panel and import, `lib/storage/**` (IndexedDB/OPFS), ffmpeg.wasm
   (`lib/ffmpeg-utils.ts`, `lib/media-processing.ts`), the waveform (wavesurfer.js), the media,
   project, editor and panel stores (spec 017 FR-023; research R2 has the full inventory).
