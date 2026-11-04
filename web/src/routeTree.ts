@@ -16,6 +16,7 @@ import { apiSettingsRoute } from './routes/settings.api'
 import { webhooksSettingsRoute } from './routes/settings.webhooks'
 import { shareRoute } from './routes/share.$token'
 import { uploadsNewRoute } from './routes/uploads.new'
+import { youtubeSourcesRoute } from './routes/sources.youtube'
 
 export const routeTree = rootRoute.addChildren([
   indexRoute,
@@ -35,4 +36,5 @@ export const routeTree = rootRoute.addChildren([
   apiSettingsRoute,
   webhooksSettingsRoute,
   shareRoute,
+  youtubeSourcesRoute,
 ])

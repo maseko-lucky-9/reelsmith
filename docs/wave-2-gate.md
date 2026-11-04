@@ -47,6 +47,9 @@ docker compose --profile voiceover up -d
 profile is off, `voiceover_service` falls back to the deterministic
 stub WAV.
 
+> **Note (2026-10-13):** `docker-compose.yml` defines only the `postgres`
+> service; there is no `voiceover` profile today. The stub path is what runs.
+
 ## SSE smoke checklist (operator runs after deploy)
 
 - `FillersRemoved`        (W2.5 stage)

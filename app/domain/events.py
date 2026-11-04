@@ -20,6 +20,10 @@ class EventType(str, Enum):
     FOLDER_CREATED = "FolderCreated"
     VIDEO_DOWNLOADED = "VideoDownloaded"
     CHAPTERS_DETECTED = "ChaptersDetected"
+    # Job progress (T052): a chapter finished every stage (payload
+    # ``chapter_index``), and the source download reached ``percent`` (0-100).
+    CHAPTER_COMPLETED = "ChapterCompleted"
+    DOWNLOAD_PROGRESS = "DownloadProgress"
     CHAPTER_CLIP_EXTRACTED = "ChapterClipExtracted"
     CHAPTER_TRANSCRIBED = "ChapterTranscribed"
     CAPTIONS_GENERATED = "CaptionsGenerated"
@@ -27,6 +31,11 @@ class EventType(str, Enum):
     CLIP_RENDERED = "ClipRendered"
     THUMBNAIL_GENERATED = "ThumbnailGenerated"
     SEGMENTS_PROPOSED = "SegmentsProposed"
+    # AI scene search (spec 014): the source's scene index is being built
+    # (payload ``done``, ``total`` chunks; at most one a second), then is
+    # ready (``chunks``, ``reused``, ``seconds``).
+    SCENE_INDEX_PROGRESS = "SceneIndexProgress"
+    SCENES_INDEXED = "ScenesIndexed"
     SEGMENT_SCORED = "SegmentScored"
     UPLOAD_RECEIVED = "UploadReceived"
     SOCIAL_CONTENT_GENERATED = "SocialContentGenerated"
@@ -35,10 +44,18 @@ class EventType(str, Enum):
     STAGE_SKIPPED = "StageSkipped"
     JOB_COMPLETED = "JobCompleted"
     JOB_FAILED = "JobFailed"
+    # The user cancelled the job (POST /jobs/{id}/cancel); its status is now
+    # "cancelled". A shutdown cancels pipelines without it.
+    JOB_CANCELLED = "JobCancelled"
     # Reprompt (FR-016): the clips of a completed job were re-discovered. The
     # job stays completed either way; a failed reprompt keeps the old clips.
     JOB_REPROMPTED = "JobReprompted"
     REPROMPT_FAILED = "RepromptFailed"
+    # A queued clip re-render (POST /clips/{id}/rerender) ended without a new
+    # file: refused (its saved edit cannot be rendered) or failed. Payload
+    # ``clip_id``, ``reason`` ("refused" | "failed" | "cancelled"), ``error``. The job stays
+    # completed and the clip unchanged; a successful one emits ClipRendered.
+    CLIP_RERENDER_FAILED = "ClipRerenderFailed"
     # ── Parity Wave (W1-W3) service emits ────────────────────────────────────
     AUDIO_ENHANCED = "AudioEnhanced"
     AI_HOOK_GENERATED = "AiHookGenerated"
@@ -115,7 +132,5 @@ def emit_from_sync(
     except RuntimeError:
         # No loop in this thread — caller (orchestrator) emits instead.
         return False
-    loop.create_task(
-        bus.publish(Event(type=event_type, job_id=job_id, payload=payload or {}))
-    )
+    loop.create_task(bus.publish(Event(type=event_type, job_id=job_id, payload=payload or {})))
     return True

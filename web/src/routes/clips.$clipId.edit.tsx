@@ -1,30 +1,44 @@
 import { createRoute, useNavigate } from '@tanstack/react-router'
 import { useQuery, useMutation } from '@tanstack/react-query'
-import { useRef, useState, useEffect, useCallback } from 'react'
+import { useRef, useState, useEffect, useCallback, useMemo } from 'react'
 import {
   ArrowLeft,
   Undo2,
   Redo2,
   Download,
-  Sparkles,
+  RefreshCw,
   Type,
-  Layers,
-  LayoutTemplate,
-  Film,
-  Wand2,
   AlignLeft,
-  Music,
-  Zap,
+  Mic,
+  Scissors,
   Play,
   Pause,
+  type LucideIcon,
 } from 'lucide-react'
 import { rootRoute } from './root'
 import { api } from '@/api/client'
-import { apiErrorDetail } from '@/lib/apiErrorDetail'
+import type { VoiceoverRequest } from '@/api/client'
+import { apiErrorDetail, apiErrorStatus } from '@/lib/apiErrorDetail'
 import { toast } from 'sonner'
 import { useTimelineEditor } from '@/hooks/useTimelineEditor'
 import { MultiTrackTimeline } from '@/components/editor/MultiTrackTimeline'
 import { BrollCredits } from '@/components/broll-credits'
+import {
+  CaptionsPanel,
+  TextPanel,
+  TrimPanel,
+  VoiceoverPanel,
+} from '@/components/editor/EditorToolPanels'
+import type { TimelinePayload } from '@/api/client'
+import {
+  isV2,
+  itemsOf,
+  reelDuration,
+  segmentsOf,
+  setCaptionText,
+  upgradeTimeline,
+  type SourceWindow,
+} from '@/lib/timelineEdit'
 
 export const clipEditRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -32,23 +46,126 @@ export const clipEditRoute = createRoute({
   component: ClipEditorPage,
 })
 
-const RIGHT_TOOLS = [
-  { label: 'AI enhance', icon: Sparkles },
-  { label: 'Captions', icon: AlignLeft },
-  { label: 'Media', icon: Layers },
-  { label: 'Brand template', icon: LayoutTemplate },
-  { label: 'B-Roll', icon: Film },
-  { label: 'Transitions', icon: Wand2 },
-  { label: 'Text', icon: Type },
-  { label: 'Music', icon: Music },
-  { label: 'AI hook', icon: Zap },
+type ToolId = 'captions' | 'text' | 'voiceover' | 'trim'
+
+// Only tools the render applies (precedent T013: the editor does not
+// advertise features that do nothing). Reframe is the server's
+// YTVIDEO_REFRAME_PROVIDER, not a per-clip setting, so it has no tool here.
+const RIGHT_TOOLS: Array<{ id: ToolId; label: string; icon: LucideIcon }> = [
+  { id: 'captions', label: 'Captions', icon: AlignLeft },
+  { id: 'text', label: 'Text', icon: Type },
+  { id: 'voiceover', label: 'Voice-over', icon: Mic },
+  { id: 'trim', label: 'Trim', icon: Scissors },
 ]
+
+type Word = { word: string; start: number; end: number }
 
 function formatVideoTime(seconds: number): string {
   const m = Math.floor(seconds / 60)
   const s = Math.floor(seconds % 60)
   const cs = Math.floor((seconds % 1) * 100)
   return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${cs.toString().padStart(2, '0')}`
+}
+
+/** Shown when the server had no Piper voice and wrote the stub's silent track. */
+const STUB_VOICEOVER_WARNING =
+  'Voice-over added as a silent placeholder: no Piper voice is installed on the server. ' +
+  'Run `python -m scripts.fetch_piper_voice` there, then generate it again.'
+
+type Cut = ReadonlyArray<{ start: number; end: number }>
+
+/** The most two boundaries may differ and still be the same cut (the server may nudge by 1 ms). */
+const CUT_TOLERANCE = 1e-3 + 1e-9
+
+function sameCut(a: Cut, b: Cut): boolean {
+  return (
+    a.length === b.length &&
+    a.every((s, i) => Math.abs(s.start - b[i].start) <= CUT_TOLERANCE && Math.abs(s.end - b[i].end) <= CUT_TOLERANCE)
+  )
+}
+
+/** The source cut a timeline plays (v1 read through the clip's window). */
+function cutOf(timeline: TimelinePayload, window: SourceWindow | null): Cut {
+  return segmentsOf(upgradeTimeline(timeline, window) ?? timeline)
+}
+
+/**
+ * The cut the clip's file was rendered from, from the server's
+ * `[[start, end], ...]`: null/absent is the clip's own window (never edited,
+ * or rendered before this was recorded: Split then waits for a re-render),
+ * `[]` is "unknown, a render is replacing it" and matches nothing. Null when
+ * there is no window to fall back to.
+ */
+function renderedCut(
+  rendered: ReadonlyArray<readonly [number, number]> | null | undefined,
+  window: SourceWindow | null,
+): Cut | 'unknown' | null {
+  if (Array.isArray(rendered)) {
+    return rendered.length > 0 ? rendered.map(([start, end]) => ({ start, end })) : 'unknown'
+  }
+  return window ? [window] : null
+}
+
+/** A voice-over request's failure as shown in its panel. */
+function voiceoverErrorMessage(err: unknown): string {
+  const status = apiErrorStatus(err)
+  const detail = apiErrorDetail(err)
+  const reason = detail ? `: ${detail}` : ''
+  // The server re-checks the edit's version after synthesis (lost update).
+  if (status === 409 && detail?.startsWith("the clip's edit changed"))
+    return 'The edit changed while the voice-over was being generated, so it was not added. Reload the page and try again (409).'
+  if (status === 409) return `Cannot add a voice-over (409)${reason}`
+  if (status === 503 && detail?.startsWith('voice-over busy'))
+    return 'The server is busy making other voice-overs. Try again in a moment (503).'
+  if (status === 503) return `Voice-over is unavailable on the server (503)${reason}`
+  if (status === 502) return `The voice engine failed (502)${reason}`
+  if (status !== null) return `Voice-over failed (${status})${reason}`
+  return `Voice-over failed: ${String(err)}`
+}
+
+function CaptionRow({
+  index,
+  start,
+  end,
+  text,
+  active,
+  onSeek,
+  onCommit,
+}: {
+  index: number
+  start: number
+  end: number
+  text: string
+  active: boolean
+  onSeek: () => void
+  onCommit: (text: string) => void
+}) {
+  return (
+    <li className={`flex items-start gap-2 rounded px-1 py-0.5 ${active ? 'bg-white/10' : ''}`}>
+      <button
+        type="button"
+        onClick={onSeek}
+        title={`Jump to ${formatVideoTime(start)}`}
+        className="mt-1 font-mono text-[10px] text-zinc-500 hover:text-white"
+      >
+        {formatVideoTime(start)}
+      </button>
+      <input
+        key={text}
+        aria-label={`Caption ${index + 1}`}
+        title={`${formatVideoTime(start)}–${formatVideoTime(end)}`}
+        defaultValue={text}
+        maxLength={500}
+        onBlur={(e) => {
+          if (e.target.value !== text) onCommit(e.target.value)
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') e.currentTarget.blur()
+        }}
+        className="flex-1 bg-transparent text-sm text-zinc-200 border-b border-transparent hover:border-white/15 focus:border-white/40 focus:outline-none"
+      />
+    </li>
+  )
 }
 
 export function ClipEditorPage() {
@@ -63,7 +180,7 @@ export function ClipEditorPage() {
   const [activeWordIdx, setActiveWordIdx] = useState<number | null>(null)
   const [transcriptOnly, setTranscriptOnly] = useState(false)
   const [regenerateCopy, setRegenerateCopy] = useState(true)
-  const editor = useTimelineEditor(clipId)
+  const [activeTool, setActiveTool] = useState<ToolId | null>(null)
 
   const clipsQuery = useQuery({
     queryKey: ['clips'],
@@ -71,21 +188,131 @@ export function ClipEditorPage() {
   })
   const clip = (clipsQuery.data ?? []).find((c) => c.clip_id === clipId)
 
+  const clipStart = clip?.start
+  const clipEnd = clip?.end
+  const sourceWindow = useMemo<SourceWindow | null>(
+    () =>
+      typeof clipStart === 'number' && typeof clipEnd === 'number' && clipEnd > clipStart && clipStart >= 0
+        ? { start: clipStart, end: clipEnd }
+        : null,
+    [clipStart, clipEnd],
+  )
+  const editor = useTimelineEditor(clipId, { sourceWindow })
+
+  // The video plays the rendered file, so its clock (the playhead) only matches
+  // the edit while the edit's segments are the cut that file was rendered from.
+  // That cut is the server's (`clip.rendered_segments`; the clip's own window
+  // when none), replaced by the one a ClipRendered event of this clip carries.
+  const [eventCut, setEventCut] = useState<{ segments: ReadonlyArray<readonly [number, number]> | null } | null>(null)
+  const loadedTimeline = editor.loadedTimeline ?? null
+  const rendered = eventCut
+    ? renderedCut(eventCut.segments, sourceWindow)
+    : clip
+      ? renderedCut(clip.rendered_segments, sourceWindow)
+      : null
+  const baseline = rendered ?? (loadedTimeline ? cutOf(loadedTimeline, sourceWindow) : null)
+  const previewStale =
+    baseline !== null && (baseline === 'unknown' || !sameCut(cutOf(editor.timeline, sourceWindow), baseline))
+  // UX only (correctness is the cut comparison above): true from a 202 until
+  // this clip's ClipRendered / ClipRerenderFailed; the controls that would
+  // save or queue another change wait.
+  const [rerenderInFlight, setRerenderInFlight] = useState(false)
+  // Bumped when the clip's file is re-rendered: busts the preview's cache.
+  const [videoVersion, setVideoVersion] = useState(0)
+  const [rerenderError, setRerenderError] = useState<string | null>(null)
+
+  // A re-render of a completed job is reported on its live event stream
+  // (no replay: the job's old events are not for this page).
+  const clipJobId = clip?.job_id
+  useEffect(() => {
+    if (!clipJobId || typeof EventSource === 'undefined') return
+    const source = new EventSource(`/api/jobs/${clipJobId}/events?live=true`)
+    const payloadOf = (e: Event): Record<string, unknown> | null => {
+      try {
+        const parsed = JSON.parse((e as MessageEvent).data as string) as { payload?: Record<string, unknown> }
+        return parsed.payload && parsed.payload.clip_id === clipId ? parsed.payload : null
+      } catch {
+        return null
+      }
+    }
+    const onRendered = (e: Event) => {
+      const payload = payloadOf(e)
+      if (!payload) return
+      const segs = payload.segments
+      setEventCut({ segments: Array.isArray(segs) ? (segs as Array<[number, number]>) : null })
+      setRerenderInFlight(false)
+      setRerenderError(null)
+      setVideoVersion((v) => v + 1)
+      toast.success('Re-render finished')
+    }
+    const onFailed = (e: Event) => {
+      const payload = payloadOf(e)
+      if (!payload) return
+      setRerenderInFlight(false)
+      const error = typeof payload.error === 'string' && payload.error ? payload.error : 'unknown error'
+      setRerenderError(`Re-render failed: ${error}`)
+      toast.error(`Re-render failed: ${error}`)
+    }
+    source.addEventListener('ClipRendered', onRendered)
+    source.addEventListener('ClipRerenderFailed', onFailed)
+    return () => source.close()
+  }, [clipJobId, clipId])
+
   const rerenderMutation = useMutation({
     mutationFn: () =>
       api.rerenderClip(clipId, { reframe_provider: 'letterbox', regenerate_copy: regenerateCopy }),
-    onSuccess: () => toast.success('Re-render queued'),
+    // 202 only means queued: the preview keeps playing the old cut until this
+    // clip's ClipRendered event arrives (below), so renderedKey is not advanced here.
+    onSuccess: () => {
+      setRerenderInFlight(true)
+      setRerenderError(null)
+      toast.success('Re-render queued')
+    },
     onError: (err) => {
       const detail = apiErrorDetail(err)
       toast.error(detail ? `Cannot re-render: ${detail}` : 'Failed to queue re-render')
     },
   })
 
-  const words: Array<{ word: string; start: number; end: number }> =
-    clip?.transcript && Array.isArray((clip.transcript as Record<string, unknown>).words)
-      ? ((clip.transcript as Record<string, unknown>).words as Array<{ word: string; start: number; end: number }>)
-      : []
+  // The render reads the saved edit, so pending changes are saved first.
+  const rerender = useCallback(async () => {
+    if (editor.isDirty) {
+      try {
+        await editor.save()
+      } catch (e) {
+        toast.error(`Save failed: ${apiErrorDetail(e) ?? String(e)}`)
+        return
+      }
+    }
+    rerenderMutation.mutate()
+  }, [editor, rerenderMutation])
 
+  const voiceoverMutation = useMutation({
+    mutationFn: async (body: VoiceoverRequest) => {
+      // The server appends to the saved edit and refuses a saved v1 one:
+      // save local changes (as v2) first.
+      if (editor.isDirty || (editor.version > 0 && !isV2(editor.timeline))) await editor.save()
+      return api.createVoiceover(clipId, body)
+    },
+    onSuccess: (res) => {
+      editor.applyServerState?.(res.edit)
+      if (res.provider === 'stub') toast.warning(STUB_VOICEOVER_WARNING)
+      else toast.success('Voice-over added')
+    },
+  })
+
+  const transcriptWords = clip?.transcript && Array.isArray((clip.transcript as Record<string, unknown>).words)
+    ? ((clip.transcript as Record<string, unknown>).words as Word[])
+    : null
+  const editorWords = editor.words
+  const words: Word[] = useMemo(
+    () => (editorWords && editorWords.length > 0 ? editorWords : (transcriptWords ?? [])),
+    [editorWords, transcriptWords],
+  )
+  const captions = itemsOf(editor.timeline, 'caption')
+
+  // The <video> mounts once the clip has loaded with a file: attach to it then.
+  const hasVideo = Boolean(clip?.output_path)
   useEffect(() => {
     const video = videoRef.current
     if (!video) return
@@ -110,7 +337,7 @@ export function ClipEditorPage() {
       video.removeEventListener('play', onPlay)
       video.removeEventListener('pause', onPause)
     }
-  }, [words])
+  }, [words, hasVideo])
 
   const togglePlay = useCallback(() => {
     const v = videoRef.current
@@ -119,12 +346,21 @@ export function ClipEditorPage() {
     else v.pause()
   }, [])
 
+  const seek = useCallback((t: number) => {
+    if (videoRef.current) videoRef.current.currentTime = t
+  }, [])
+
   if (clipsQuery.isLoading) {
     return <div className="flex items-center justify-center h-full text-zinc-400">Loading…</div>
   }
   if (!clip) {
     return <div className="flex items-center justify-center h-full text-red-400">Clip not found.</div>
   }
+
+  // A voice-over saves first and the server appends to the saved edit: a save
+  // or re-render meanwhile would race it.
+  const voiceoverPending = voiceoverMutation.isPending
+  const busy = editor.isSaving || rerenderMutation.isPending || voiceoverPending || rerenderInFlight
 
   return (
     <div className="flex flex-col h-full -mx-6 -my-6 overflow-hidden" style={{ height: 'calc(100vh - 48px - 32px)' }}>
@@ -169,11 +405,18 @@ export function ClipEditorPage() {
 
         <button
           type="button"
-          disabled={!editor.isDirty || editor.isSaving}
+          disabled={!editor.isDirty || editor.isSaving || voiceoverPending || rerenderInFlight}
+          title={
+            voiceoverPending
+              ? 'Wait for the voice-over to finish'
+              : rerenderInFlight
+                ? 'Wait for the re-render to finish'
+                : undefined
+          }
           onClick={() =>
             editor.save().then(
               () => toast.success('Saved'),
-              (e) => toast.error(`Save failed: ${e}`),
+              (e) => toast.error(`Save failed: ${apiErrorDetail(e) ?? String(e)}`),
             )
           }
           className="px-3 py-1.5 rounded-lg border border-white/20 text-sm text-zinc-300 hover:text-white hover:border-white/40 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
@@ -184,6 +427,22 @@ export function ClipEditorPage() {
               ? 'Save changes'
               : 'Saved'}
         </button>
+
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void rerender()}
+          title="Save the edit and render the clip with it"
+          className="px-3 py-1.5 rounded-lg border border-white/20 text-sm text-zinc-300 hover:text-white hover:border-white/40 transition-colors disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-1.5"
+        >
+          <RefreshCw className="w-3.5 h-3.5" />
+          Re-render
+        </button>
+        {rerenderInFlight ? (
+          <span role="status" className="text-xs text-zinc-400">
+            Re-render in progress
+          </span>
+        ) : null}
 
         <a
           href={`/api/clips/${clip.clip_id}/video`}
@@ -213,21 +472,31 @@ export function ClipEditorPage() {
             Transcript only
           </label>
 
-          <button
-            disabled
-            className="text-xs text-zinc-500 border border-white/10 px-2 py-1 rounded-md cursor-not-allowed opacity-50"
-          >
-            + Add a section
-          </button>
-
-          {words.length > 0 ? (
+          {captions.length > 0 ? (
+            <ol aria-label="Captions" className="space-y-1">
+              {captions.map((c, i) => {
+                const start = Number(c.start) || 0
+                const end = Number(c.end) || 0
+                return (
+                  <CaptionRow
+                    key={i}
+                    index={i}
+                    start={start}
+                    end={end}
+                    text={String(c.text ?? '')}
+                    active={!previewStale && currentTime >= start && currentTime < end}
+                    onSeek={() => seek(start)}
+                    onCommit={(text) => editor.setTimeline(setCaptionText(editor.timeline, i, text))}
+                  />
+                )
+              })}
+            </ol>
+          ) : words.length > 0 ? (
             <div className="text-sm leading-relaxed">
               {words.map((w, i) => (
                 <span
                   key={i}
-                  onClick={() => {
-                    if (videoRef.current) videoRef.current.currentTime = w.start
-                  }}
+                  onClick={() => seek(w.start)}
                   className={`cursor-pointer rounded px-0.5 transition-colors ${
                     activeWordIdx === i
                       ? 'text-black font-medium'
@@ -254,8 +523,8 @@ export function ClipEditorPage() {
           </label>
 
           <button
-            onClick={() => rerenderMutation.mutate()}
-            disabled={rerenderMutation.isPending}
+            onClick={() => void rerender()}
+            disabled={busy}
             className="text-xs text-zinc-400 border border-white/10 px-3 py-1.5 rounded-md hover:text-white hover:border-white/30 transition-colors disabled:opacity-60"
           >
             {rerenderMutation.isPending ? 'Queuing…' : '+ Regenerate captions'}
@@ -270,31 +539,21 @@ export function ClipEditorPage() {
             <>
               <video
                 ref={videoRef}
-                src={`/api/clips/${clip.clip_id}/video`}
+                src={`/api/clips/${clip.clip_id}/video${videoVersion > 0 ? `?v=${videoVersion}` : ''}`}
                 className="max-h-full"
                 style={{ aspectRatio: '9/16' }}
               />
-              {/* Overlay chips */}
+              {rerenderError ? (
+                <p
+                  role="alert"
+                  className="absolute bottom-3 left-3 right-3 rounded bg-red-950/90 px-2 py-1 text-xs text-red-200 border border-red-500/40"
+                >
+                  {rerenderError}
+                </p>
+              ) : null}
               <span className="absolute top-3 left-3 text-[10px] px-2 py-0.5 rounded bg-black/70 text-white border border-white/20">
                 9:16
               </span>
-              <span className="absolute top-3 right-3 flex gap-1.5">
-                <span className="text-[10px] px-2 py-0.5 rounded bg-black/70 text-white border border-white/20">
-                  Layout: Fit
-                </span>
-                <span className="text-[10px] px-2 py-0.5 rounded bg-black/70 text-white border border-white/20">
-                  Tracker: OFF
-                </span>
-              </span>
-              {/* Corner handles */}
-              {[
-                'top-2 left-2', 'top-2 right-2', 'bottom-2 left-2', 'bottom-2 right-2',
-              ].map((pos) => (
-                <span
-                  key={pos}
-                  className={`absolute ${pos} w-3 h-3 border-2 border-white rounded-sm bg-transparent pointer-events-none`}
-                />
-              ))}
             </>
           ) : (
             <div className="aspect-[9/16] max-h-full bg-zinc-900 flex items-center justify-center rounded-lg">
@@ -303,17 +562,59 @@ export function ClipEditorPage() {
           )}
         </div>
 
+        {/* Active tool panel */}
+        {activeTool ? (
+          <div
+            key={activeTool}
+            className="w-72 flex-shrink-0 overflow-y-auto border-l border-white/8 p-4"
+            style={{ background: 'var(--sidebar-bg)' }}
+          >
+            {activeTool === 'captions' ? (
+              <CaptionsPanel timeline={editor.timeline} onChange={editor.setTimeline} />
+            ) : activeTool === 'text' ? (
+              <TextPanel timeline={editor.timeline} onChange={editor.setTimeline} playhead={currentTime} />
+            ) : activeTool === 'voiceover' ? (
+              <VoiceoverPanel
+                timeline={editor.timeline}
+                onChange={editor.setTimeline}
+                playhead={currentTime}
+                defaultText={clip.ai_hook_text ?? ''}
+                pending={voiceoverMutation.isPending}
+                locked={rerenderInFlight}
+                error={voiceoverMutation.error ? voiceoverErrorMessage(voiceoverMutation.error) : null}
+                onGenerate={(req) => voiceoverMutation.mutate(req)}
+              />
+            ) : (
+              <TrimPanel
+                timeline={editor.timeline}
+                onChange={editor.setTimeline}
+                playhead={currentTime}
+                sourceWindow={sourceWindow}
+                playheadStale={previewStale}
+              />
+            )}
+          </div>
+        ) : null}
+
         {/* Right tools sidebar */}
         <div
           className="w-16 flex-shrink-0 flex flex-col items-center gap-3 py-4 border-l border-white/8"
           style={{ background: 'var(--sidebar-bg)' }}
+          role="toolbar"
+          aria-label="Editor tools"
+          aria-orientation="vertical"
         >
-          {RIGHT_TOOLS.map(({ label, icon: Icon }) => (
+          {RIGHT_TOOLS.map(({ id, label, icon: Icon }) => (
             <button
-              key={label}
+              key={id}
+              type="button"
               title={label}
-              onClick={label === 'Brand template' ? () => void navigate({ to: '/settings/brand' }) : undefined}
-              className="p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-white/10 transition-colors"
+              aria-label={label}
+              aria-pressed={activeTool === id}
+              onClick={() => setActiveTool((cur) => (cur === id ? null : id))}
+              className={`p-2 rounded-lg transition-colors ${
+                activeTool === id ? 'text-white bg-white/15' : 'text-zinc-400 hover:text-white hover:bg-white/10'
+              }`}
             >
               <Icon className="w-5 h-5" />
             </button>
@@ -344,17 +645,14 @@ export function ClipEditorPage() {
             max={duration || 1}
             step={0.01}
             value={currentTime}
-            onChange={(e) => {
-              const v = videoRef.current
-              if (v) v.currentTime = Number(e.target.value)
-            }}
+            onChange={(e) => seek(Number(e.target.value))}
             className="flex-1 h-1 accent-white cursor-pointer"
           />
         </div>
 
         <MultiTrackTimeline
           timeline={editor.timeline}
-          duration={Math.max(duration, 1)}
+          duration={Math.max(duration, reelDuration(editor.timeline), 1)}
           onChange={editor.setTimeline}
         />
       </div>

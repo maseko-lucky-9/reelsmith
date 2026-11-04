@@ -28,11 +28,16 @@ target_metadata = Base.metadata
 # ... etc.
 
 
-def run_migrations_offline() -> None:
-    """Run migrations in 'offline' mode."""
+def _db_url() -> str:
+    """The URL passed by ``app.db.migrate.upgrade_to_head``, else the app's."""
     from app.settings import settings as app_settings
 
-    url = app_settings.db_url
+    return config.attributes.get("db_url") or app_settings.db_url
+
+
+def run_migrations_offline() -> None:
+    """Run migrations in 'offline' mode."""
+    url = _db_url()
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -56,10 +61,8 @@ async def run_async_migrations() -> None:
     and associate a connection with the context.
 
     """
-    from app.settings import settings as app_settings
-
-    # Override the URL from app settings so alembic.ini doesn't need a real URL.
-    config.set_main_option("sqlalchemy.url", app_settings.db_url)
+    # Override the URL so alembic.ini doesn't need a real one.
+    config.set_main_option("sqlalchemy.url", _db_url())
 
     connectable = async_engine_from_config(
         config.get_section(config.config_ini_section, {}),

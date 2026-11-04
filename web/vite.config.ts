@@ -3,6 +3,10 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import path from 'path'
 
+// The API the dev server proxies /api to. Set YTVIDEO_API_URL when something
+// else already holds port 8000 (e.g. YTVIDEO_API_URL=http://127.0.0.1:8001 pnpm dev).
+const apiTarget = process.env.YTVIDEO_API_URL ?? 'http://127.0.0.1:8000'
+
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss()],
@@ -14,7 +18,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:8000',
+        target: apiTarget,
         changeOrigin: true,
         rewrite: (path: string) => path.replace(/^\/api/, ''),
       },

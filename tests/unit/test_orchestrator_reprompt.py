@@ -218,13 +218,16 @@ class _Harness:
     def export_dir(self) -> Path:
         return self.tmp_path / "exp" / JOB_ID
 
-    async def complete_job(self, store: Any) -> list[dict[str, Any]]:
+    async def complete_job(
+        self, store: Any, source: str | None = "youtube"
+    ) -> list[dict[str, Any]]:
         """Run the original job (two discovered clips); return its clips."""
         options = PipelineOptions(audio_enhance=False)
         await store.create(
             JobState(
                 job_id=JOB_ID,
                 url=URL,
+                source=source,
                 download_path=str(self.tmp_path),
                 pipeline_options=options,
             )
@@ -341,16 +344,16 @@ async def test_reprompt_retires_old_clips_only_after_every_new_clip_rendered(
     ]
 
 
-async def test_reprompt_clip_indexes_follow_the_existing_ones(harness, memory_store):
-    old = await harness.complete_job(memory_store)
+async def test_reprompt_clip_indexes_follow_the_existing_ones(harness, store):
+    old = await harness.complete_job(store)
     old_bytes = {c["output_path"]: Path(c["output_path"]).read_bytes() for c in old}
 
-    await harness.reprompt(memory_store)
+    await harness.reprompt(store)
 
     for path, data in old_bytes.items():
         assert Path(path).read_bytes() == data
-    assert _names(await _live(memory_store)) == ["02_Alpha.mp4", "03_Gamma.mp4"]
-    job = await memory_store.get(JOB_ID)
+    assert _names(await _live(store)) == ["02_Alpha.mp4", "03_Gamma.mp4"]
+    job = await store.get(JOB_ID)
     assert sorted(job.chapters) == [2, 3]
 
 
@@ -427,6 +430,27 @@ async def test_reprompt_rewrites_the_manifest_with_the_new_clips(harness, memory
     assert (harness.export_dir / "02_Alpha.mp4").is_file()
 
 
+def _manifest_rows(harness: _Harness) -> list[dict[str, str]]:
+    with (harness.export_dir / "manifest.csv").open(encoding="utf-8") as fh:
+        return list(csv.DictReader(fh))
+
+
+@pytest.mark.parametrize(("source", "cell"), [("tiktok", "tiktok"), (None, "")])
+async def test_the_manifest_carries_the_jobs_source_before_and_after_a_reprompt(
+    harness, memory_store, source, cell
+):
+    await harness.complete_job(memory_store, source=source)
+    original = _manifest_rows(harness)
+    assert sorted(r["filename"] for r in original) == ["00_Alpha.mp4", "01_Beta.mp4"]
+    assert [r["source"] for r in original] == [cell, cell]
+
+    await harness.reprompt(memory_store)
+
+    rewritten = _manifest_rows(harness)
+    assert sorted(r["filename"] for r in rewritten) == ["02_Alpha.mp4", "03_Gamma.mp4"]
+    assert [r["source"] for r in rewritten] == [cell, cell]
+
+
 async def test_reprompt_leaves_no_temp_dir(harness, memory_store):
     await harness.complete_job(memory_store)
 
@@ -469,13 +493,13 @@ async def test_failed_reprompt_keeps_the_old_clips(harness, store):
     assert list((harness.clips / "_tmp").iterdir()) == []
 
 
-async def test_failed_reprompt_drops_its_chapters_from_the_job(harness, memory_store):
-    await harness.complete_job(memory_store)
+async def test_failed_reprompt_drops_its_chapters_from_the_job(harness, store):
+    await harness.complete_job(store)
     harness.fail_on = {"03_Gamma.mp4"}
 
-    await harness.reprompt(memory_store)
+    await harness.reprompt(store)
 
-    assert sorted((await memory_store.get(JOB_ID)).chapters) == [0, 1]
+    assert sorted((await store.get(JOB_ID)).chapters) == [0, 1]
 
 
 async def test_reprompt_with_no_kept_segment_fails_softly(harness, memory_store):
@@ -627,3 +651,33 @@ async def test_sse_stream_ends_on_reprompt_failed(harness, memory_store):
 
 async def _collect(iterator: Any) -> list[dict[str, Any]]:
     return [item async for item in iterator]
+
+
+async def test_reprompted_clips_are_discovered_whatever_the_original_was(
+    harness, memory_store
+):
+    await harness.complete_job(memory_store)
+    # The original run stored these via the proposer too; force a different
+    # origin on them to prove the reprompt does not inherit it.
+    for clip in await _live(memory_store):
+        await memory_store.upsert_clip(
+            JOB_ID, clip["clip_id"], lambda c: c.update(segment_origin="chapters")
+        )
+
+    await harness.reprompt(memory_store)
+
+    rows = _manifest_rows(harness)
+    assert sorted(r["filename"] for r in rows) == ["02_Alpha.mp4", "03_Gamma.mp4"]
+    assert [r["segment_origin"] for r in rows] == ["discovered", "discovered"]
+    assert {r["source_url"] for r in rows} == {URL}
+
+
+async def test_a_reprompt_range_clip_has_no_known_origin(harness, store):
+    await harness.complete_job(store)
+
+    await harness.reprompt(store, start_seconds=100.0, end_seconds=130.5)
+
+    (clip,) = await _live(store)
+    assert clip.get("segment_origin") is None
+    (row,) = _manifest_rows(harness)
+    assert row["segment_origin"] == ""
