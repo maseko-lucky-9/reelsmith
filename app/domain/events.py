@@ -53,7 +53,7 @@ class EventType(str, Enum):
     REPROMPT_FAILED = "RepromptFailed"
     # A queued clip re-render (POST /clips/{id}/rerender) ended without a new
     # file: refused (its saved edit cannot be rendered) or failed. Payload
-    # ``clip_id``, ``reason`` ("refused" | "failed"), ``error``. The job stays
+    # ``clip_id``, ``reason`` ("refused" | "failed" | "cancelled"), ``error``. The job stays
     # completed and the clip unchanged; a successful one emits ClipRendered.
     CLIP_RERENDER_FAILED = "ClipRerenderFailed"
     # ── Parity Wave (W1-W3) service emits ────────────────────────────────────

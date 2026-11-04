@@ -256,6 +256,84 @@ describe('playhead while the segments are not rendered', () => {
     expect(newSrc).toMatch(/^\/api\/clips\/clip-1\/video\?v=\d+$/)
   })
 
+  it('streams the live job events and closes the stream on unmount', async () => {
+    const view = await renderPage({ output_path: '/data/clip-1.mp4' })
+    expect(FakeEventSource.last().url).toContain('/api/jobs/job-1/events?live=true')
+    expect(FakeEventSource.last().closed).toBe(false)
+    view.unmount()
+    expect(FakeEventSource.last().closed).toBe(true)
+  })
+
+  it('blocks a second Re-render and shows progress while one is in flight, until it ends', async () => {
+    await renderWithPlayhead(4)
+    trimStart('101.5')
+    fireEvent.click(button('Re-render'))
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Re-render queued'))
+
+    expect(button('Re-render').disabled).toBe(true)
+    expect(screen.getByRole('status').textContent).toContain('Re-render in progress')
+    expect(button('Split at playhead').disabled).toBe(true)
+    fireEvent.click(button('Re-render'))
+    expect(api.rerenderClip).toHaveBeenCalledTimes(1)
+
+    act(() => FakeEventSource.last().emit('ClipRendered', { clip_id: 'clip-1' }))
+    await waitFor(() => expect(button('Re-render').disabled).toBe(false))
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+
+  it('keeps Split disabled while a re-render is in flight even when the cut is unchanged', async () => {
+    await renderWithPlayhead(4)
+    editCaption(1, 'new words')
+    expect(button('Split at playhead').disabled).toBe(false)
+    fireEvent.click(button('Re-render'))
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Re-render queued'))
+
+    expect(button('Split at playhead').disabled).toBe(true)
+
+    act(() => FakeEventSource.last().emit('ClipRendered', { clip_id: 'clip-1' }))
+    await waitFor(() => expect(button('Split at playhead').disabled).toBe(false))
+  })
+
+  it('unlocks Re-render after a failed re-render, keeping Split disabled', async () => {
+    await renderWithPlayhead(4)
+    trimStart('101.5')
+    fireEvent.click(button('Re-render'))
+    await waitFor(() => expect(button('Re-render').disabled).toBe(true))
+
+    act(() => FakeEventSource.last().emit('ClipRerenderFailed', { clip_id: 'clip-1', error: 'Re-render cancelled' }))
+
+    await waitFor(() => expect(button('Re-render').disabled).toBe(false))
+    expect(button('Split at playhead').disabled).toBe(true)
+  })
+
+  it('a rejected re-render (409) leaves no queued render: a later ClipRendered does not enable Split', async () => {
+    vi.mocked(api.rerenderClip).mockRejectedValue(new Error('409 {"detail":"job is running"}'))
+    await renderWithPlayhead(4)
+    trimStart('101.5')
+    fireEvent.click(button('Re-render'))
+    await waitFor(() => expect(toast.error).toHaveBeenCalled())
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(button('Re-render').disabled).toBe(false)
+
+    act(() => FakeEventSource.last().emit('ClipRendered', { clip_id: 'clip-1' }))
+
+    expect(button('Split at playhead').disabled).toBe(true)
+  })
+
+  it('a failed save before the re-render queues nothing and a later ClipRendered does not enable Split', async () => {
+    vi.mocked(api.upsertClipEdit).mockRejectedValue(new Error('boom'))
+    await renderWithPlayhead(4)
+    trimStart('101.5')
+    fireEvent.click(button('Re-render'))
+    await waitFor(() => expect(toast.error).toHaveBeenCalled())
+    expect(api.rerenderClip).not.toHaveBeenCalled()
+    expect(screen.queryByRole('status')).toBeNull()
+
+    act(() => FakeEventSource.last().emit('ClipRendered', { clip_id: 'clip-1' }))
+
+    expect(button('Split at playhead').disabled).toBe(true)
+  })
+
   it('keeps Split disabled and shows the error when the re-render fails', async () => {
     await renderWithPlayhead(4)
     trimStart('101.5')

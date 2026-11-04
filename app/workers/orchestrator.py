@@ -304,6 +304,14 @@ async def _cancel_before_start(trigger: Event, bus: AsyncEventBus, store: JobSto
     if trigger.payload.get("rerender_clip_id"):
         log.info("[%s] Re-render cancelled before it started", job_id)
         release_work(job_id)
+        await _emit(
+            bus,
+            EventType.CLIP_RERENDER_FAILED,
+            job_id,
+            clip_id=trigger.payload["rerender_clip_id"],
+            reason="cancelled",
+            error="Re-render cancelled",
+        )
     elif trigger.payload.get("reprompt"):
         log.info("[%s] Reprompt cancelled before it started", job_id)
         release_reprompt(job_id)
@@ -1321,10 +1329,23 @@ async def _rerender_clip(trigger: Event, bus: AsyncEventBus, store: JobStore) ->
         log.warning("[%s] Re-render of clip %s cancelled", job_id, clip_id)
         # A user cancel puts the chapter back, as a failure does; a shutdown
         # leaves it as it was.
-        if chapter is not None and job_id in _user_cancelled:
-            await _finish_then_honour_cancel(
-                _restore_chapter_status(store, job_id, int(chapter["index"]), prior_chapter_status)
-            )
+        if job_id in _user_cancelled:
+
+            async def _restore_and_report() -> None:
+                if chapter is not None:
+                    await _restore_chapter_status(store, job_id, int(chapter["index"]), prior_chapter_status)
+                # The editor waits for this clip's ClipRendered or ClipRerenderFailed.
+                with contextlib.suppress(Exception):
+                    await _emit(
+                        bus,
+                        EventType.CLIP_RERENDER_FAILED,
+                        job_id,
+                        clip_id=clip_id,
+                        reason="cancelled",
+                        error="Re-render cancelled",
+                    )
+
+            await _finish_then_honour_cancel(_restore_and_report())
         raise
     except Exception as exc:  # noqa: BLE001 — a failed re-render must not fail the job
         log.exception(
@@ -2359,8 +2380,8 @@ async def _process_chapter(
             job_id,
             chapter_index=index,
             output_path=output_path,
-            # Set when the render is of an existing clip (re-render, reprompt):
-            # the editor waits for its own clip's file to change.
+            # Set only by a re-render of an existing clip (a reprompt makes new
+            # clip ids): the editor waits for its own clip's file to change.
             **({"clip_id": clip_id} if clip_id else {}),
         )
     else:

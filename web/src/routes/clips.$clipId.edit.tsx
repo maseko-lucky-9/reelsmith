@@ -177,7 +177,12 @@ export function ClipEditorPage() {
   const loadedTimeline = editor.loadedTimeline ?? null
   const baselineKey = renderedKey ?? (loadedTimeline ? segmentsKey(loadedTimeline, sourceWindow) : null)
   const segmentsUnrendered = baselineKey !== null && segmentsKey(editor.timeline, sourceWindow) !== baselineKey
-  const rerenderKeyRef = useRef<string | null>(null)
+  // The segments key of the re-render the server accepted (set on its 202 only).
+  const queuedKeyRef = useRef<string | null>(null)
+  // True from a 202 until this clip's ClipRendered / ClipRerenderFailed: the
+  // preview plays the old file meanwhile, and a second re-render is refused.
+  const [rerenderInFlight, setRerenderInFlight] = useState(false)
+  const previewStale = segmentsUnrendered || rerenderInFlight
   // Bumped when the clip's file is re-rendered: busts the preview's cache.
   const [videoVersion, setVideoVersion] = useState(0)
   const [rerenderError, setRerenderError] = useState<string | null>(null)
@@ -198,7 +203,9 @@ export function ClipEditorPage() {
     }
     const onRendered = (e: Event) => {
       if (!payloadOf(e)) return
-      if (rerenderKeyRef.current !== null) setRenderedKey(rerenderKeyRef.current)
+      if (queuedKeyRef.current !== null) setRenderedKey(queuedKeyRef.current)
+      queuedKeyRef.current = null
+      setRerenderInFlight(false)
       setRerenderError(null)
       setVideoVersion((v) => v + 1)
       toast.success('Re-render finished')
@@ -206,6 +213,8 @@ export function ClipEditorPage() {
     const onFailed = (e: Event) => {
       const payload = payloadOf(e)
       if (!payload) return
+      queuedKeyRef.current = null
+      setRerenderInFlight(false)
       const error = typeof payload.error === 'string' && payload.error ? payload.error : 'unknown error'
       setRerenderError(`Re-render failed: ${error}`)
       toast.error(`Re-render failed: ${error}`)
@@ -216,11 +225,13 @@ export function ClipEditorPage() {
   }, [clipJobId, clipId])
 
   const rerenderMutation = useMutation({
-    mutationFn: () =>
+    mutationFn: (_queuedKey: string) =>
       api.rerenderClip(clipId, { reframe_provider: 'letterbox', regenerate_copy: regenerateCopy }),
     // 202 only means queued: the preview keeps playing the old cut until this
     // clip's ClipRendered event arrives (below), so renderedKey is not advanced here.
-    onSuccess: () => {
+    onSuccess: (_res, queuedKey) => {
+      queuedKeyRef.current = queuedKey
+      setRerenderInFlight(true)
       setRerenderError(null)
       toast.success('Re-render queued')
     },
@@ -232,7 +243,7 @@ export function ClipEditorPage() {
 
   // The render reads the saved edit, so pending changes are saved first.
   const rerender = useCallback(async () => {
-    rerenderKeyRef.current = segmentsKey(editor.timeline, sourceWindow)
+    const queuedKey = segmentsKey(editor.timeline, sourceWindow)
     if (editor.isDirty) {
       try {
         await editor.save()
@@ -241,7 +252,7 @@ export function ClipEditorPage() {
         return
       }
     }
-    rerenderMutation.mutate()
+    rerenderMutation.mutate(queuedKey)
   }, [editor, rerenderMutation, sourceWindow])
 
   const voiceoverMutation = useMutation({
@@ -318,6 +329,7 @@ export function ClipEditorPage() {
   // or re-render meanwhile would race it.
   const voiceoverPending = voiceoverMutation.isPending
   const busy = editor.isSaving || rerenderMutation.isPending || voiceoverPending
+  const rerenderDisabled = busy || rerenderInFlight
 
   return (
     <div className="flex flex-col h-full -mx-6 -my-6 overflow-hidden" style={{ height: 'calc(100vh - 48px - 32px)' }}>
@@ -381,7 +393,7 @@ export function ClipEditorPage() {
 
         <button
           type="button"
-          disabled={busy}
+          disabled={rerenderDisabled}
           onClick={() => void rerender()}
           title="Save the edit and render the clip with it"
           className="px-3 py-1.5 rounded-lg border border-white/20 text-sm text-zinc-300 hover:text-white hover:border-white/40 transition-colors disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-1.5"
@@ -389,6 +401,11 @@ export function ClipEditorPage() {
           <RefreshCw className="w-3.5 h-3.5" />
           Re-render
         </button>
+        {rerenderInFlight ? (
+          <span role="status" className="text-xs text-zinc-400">
+            Re-render in progress
+          </span>
+        ) : null}
 
         <a
           href={`/api/clips/${clip.clip_id}/video`}
@@ -430,7 +447,7 @@ export function ClipEditorPage() {
                     start={start}
                     end={end}
                     text={String(c.text ?? '')}
-                    active={!segmentsUnrendered && currentTime >= start && currentTime < end}
+                    active={!previewStale && currentTime >= start && currentTime < end}
                     onSeek={() => seek(start)}
                     onCommit={(text) => editor.setTimeline(setCaptionText(editor.timeline, i, text))}
                   />
@@ -535,7 +552,7 @@ export function ClipEditorPage() {
                 onChange={editor.setTimeline}
                 playhead={currentTime}
                 sourceWindow={sourceWindow}
-                playheadStale={segmentsUnrendered}
+                playheadStale={previewStale}
               />
             )}
           </div>

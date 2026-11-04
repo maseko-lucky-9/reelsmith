@@ -589,7 +589,10 @@ async def test_a_user_cancel_of_an_edited_rerender_keeps_the_old_clip(layout, pl
 
     monkeypatch.setattr(orch.render_service, "render_clip", _render_until_killed)
     orch._user_cancelled.discard(JOB_ID)
-    task = asyncio.create_task(orch._run_job(_trigger(), AsyncEventBus(), store))
+    bus = AsyncEventBus()
+    recorder = _Recorder(bus)
+    bus.publish = recorder  # type: ignore[method-assign]
+    task = asyncio.create_task(orch._run_job(_trigger(), bus, store))
     orch._job_tasks.setdefault(JOB_ID, set()).add(task)
     try:
         await asyncio.wait_for(asyncio.to_thread(entered.wait, 5), timeout=6)
@@ -601,6 +604,9 @@ async def test_a_user_cancel_of_an_edited_rerender_keeps_the_old_clip(layout, pl
         orch._user_cancelled.discard(JOB_ID)
         orch._user_cancelled_tasks.discard(task)
 
+    failed = [e for e in recorder.events if e.type is EventType.CLIP_RERENDER_FAILED]
+    assert [(e.payload["clip_id"], e.payload["reason"]) for e in failed] == [(CLIP_ID, "cancelled")]
+    assert "cancelled" in failed[0].payload["error"].lower()
     assert plans and plans[0] is not None and plans[0].caption_style == "hormozi"
     assert layout["output"].read_bytes() == b"old"
     assert await store.get_clip(CLIP_ID) == before_clip
@@ -608,3 +614,21 @@ async def test_a_user_cancel_of_an_edited_rerender_keeps_the_old_clip(layout, pl
     assert job.status == "completed"
     assert job.chapters[1].status == "completed"
     assert not (layout["clips"] / "_tmp" / f"{JOB_ID}-rerender-{CLIP_ID[:8]}").exists()
+
+
+async def test_a_cancel_before_the_rerender_starts_reports_it_for_the_clip(layout):
+    """No event used to follow: the editor, locked while a re-render is in
+    flight, would wait for ever."""
+    store = InMemoryJobStore()
+    await _seed(store, layout)
+    bus = AsyncEventBus()
+    recorder = _Recorder(bus)
+    bus.publish = recorder  # type: ignore[method-assign]
+    orch.claim_work(JOB_ID)
+
+    await orch._cancel_before_start(_trigger(), bus, store)
+
+    assert not orch.job_has_work(JOB_ID)
+    (failed,) = [e for e in recorder.events if e.type is EventType.CLIP_RERENDER_FAILED]
+    assert failed.payload["clip_id"] == CLIP_ID
+    assert failed.payload["reason"] == "cancelled"
