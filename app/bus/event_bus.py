@@ -12,6 +12,9 @@ from app.domain.events import Event, EventType
 log = logging.getLogger(__name__)
 
 _HISTORY_SIZE = 200
+# Delivered live but never replayed: up to 100 a download, they would evict
+# the events a late subscriber needs, and only the latest one matters.
+_NOT_REPLAYED: frozenset[EventType] = frozenset({EventType.DOWNLOAD_PROGRESS})
 
 
 class _Subscription:
@@ -52,7 +55,8 @@ class AsyncEventBus:
         if self._closed:
             return
         async with self._lock:
-            self._history.append(event)
+            if event.type not in _NOT_REPLAYED:
+                self._history.append(event)
             subs = list(self._subscriptions)
         matched = [s for s in subs if s.matches(event)]
         log.debug("Event published  type=%s  job_id=%s  subscribers=%d",
@@ -64,6 +68,8 @@ class AsyncEventBus:
         self,
         types: Iterable[EventType] | None = None,
         job_id: str | None = None,
+        *,
+        replay: bool = True,
     ) -> AsyncIterator[Event]:
         type_tuple: tuple[EventType, ...] | None = tuple(types) if types else None
         queue: asyncio.Queue[Event | None] = asyncio.Queue()
@@ -74,7 +80,7 @@ class AsyncEventBus:
             # Holding the lock here prevents publish() from adding new events
             # to _subscriptions (and thus this sub's queue) while we replay,
             # which guarantees no events are double-delivered or lost.
-            for past_event in self._history:
+            for past_event in self._history if replay else ():
                 if sub.matches(past_event):
                     queue.put_nowait(past_event)
         try:

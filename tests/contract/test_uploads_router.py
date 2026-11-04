@@ -39,6 +39,42 @@ def test_upload_valid_video_returns_202(monkeypatch, tmp_path):
     assert body["status"] == "queued"
 
 
+class _Queue:
+    def __init__(self) -> None:
+        self.items: list[tuple[str, dict]] = []
+
+    async def put(self, item: tuple[str, dict]) -> None:
+        self.items.append(item)
+
+
+def test_upload_passes_its_prompt_to_the_job(monkeypatch, tmp_path):
+    """Spec 014: an upload takes a prompt like ``POST /jobs`` (stored and queued)."""
+    monkeypatch.setattr("app.routers.uploads._UPLOAD_DIR", tmp_path / "uploads")
+    queue = _Queue()
+    with TestClient(create_app()) as client:
+        client.app.state.job_queue = queue
+        response = client.post(
+            "/uploads",
+            files={"file": ("video.mp4", b"\x00" * 64, "video/mp4")},
+            data={"prompt": "  every shot of a red car  "},
+        )
+        job = client.get(f"/jobs/{response.json()['job_id']}").json()
+        blank = client.post(
+            "/uploads",
+            files={"file": ("video.mp4", b"\x00" * 64, "video/mp4")},
+            data={"prompt": "   "},
+        )
+        too_long = client.post(
+            "/uploads",
+            files={"file": ("video.mp4", b"\x00" * 64, "video/mp4")},
+            data={"prompt": "x" * 2001},
+        )
+    assert response.status_code == 202 and blank.status_code == 202
+    assert job["prompt"] == "every shot of a red car"
+    assert [payload["prompt"] for _, payload in queue.items] == ["every shot of a red car", None]
+    assert too_long.status_code == 422
+
+
 def test_upload_quicktime_mime_accepted(monkeypatch, tmp_path):
     monkeypatch.setattr("app.routers.uploads._UPLOAD_DIR", tmp_path / "uploads")
     with TestClient(create_app()) as client:

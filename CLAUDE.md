@@ -18,6 +18,8 @@ Learning project: YouTube-to-reels pipeline. FastAPI backend + React UI (`web/`)
 
 | What | Command |
 |---|---|
+| Everything (Postgres in Docker + API + UI) | `scripts/start.sh` |
+| One-off SQLite to Postgres copy | `python -m scripts.migrate_sqlite_to_postgres` |
 | API server | `uvicorn app.main:app --reload` |
 | UI | `cd web && pnpm dev` (legacy: `streamlit run ui/_legacy/streamlit_app.py`) |
 | Tests | `pytest` |
@@ -28,6 +30,7 @@ Learning project: YouTube-to-reels pipeline. FastAPI backend + React UI (`web/`)
 - Domain events live in `app/domain/events.py`; job lifecycle and progress are reported through `app/bus/event_bus.py`. The orchestrator sequences stages; services are plain functions called directly.
 - Services are stateless functions — state lives in `JobStore` on `app.state`.
 - Run ffmpeg only through `app/services/ffmpeg_tools.run` (bundled binary, killed on timeout/cancel); never a system ffmpeg/ffprobe. MoviePy is not a dependency.
+- Integration tests run on the compose Postgres in their own database, `reelsmith_test` (`YTVIDEO_TEST_DB_URL`); `tests/db_safety.py` refuses any database not named `*_test`, because the fixture TRUNCATEs the job tables. Never point it at the app database.
 - Test markers: `integration` (real network), `live` (real YouTube), `e2e` (fixtures), `playwright` (UI). Default run excludes `integration`, `live`, `playwright`.
 
 ## Build & Test
@@ -39,7 +42,7 @@ pip install -r requirements.txt
 # Run all fast tests
 pytest
 
-# Run with integration tests
+# Run with integration tests (needs `docker compose up -d --wait postgres`)
 pytest -m integration
 ```
 
@@ -49,5 +52,16 @@ Always run `pytest` after code changes before committing.
 
 - Constitution: `.specify/memory/constitution.md`. Baseline spec: `specs/001-reelsmith-baseline/spec.md` (status-tagged inventory).
 - New work: `/speckit-specify` → `/speckit-plan` → `/speckit-tasks` → `/speckit-implement`, one `specs/NNN-<slug>/` per feature.
-- Open tasks live in each `specs/*/tasks.md`; `tasks/todo.md` indexes them and holds the finished history. `specs/README.md` indexes the specs and the roadmap stubs (002-007). Decisions: `docs/decisions/` (ADR-001…007).
+- Open tasks live in each `specs/*/tasks.md`; `tasks/todo.md` indexes them and holds the finished history. `specs/README.md` indexes the specs and the roadmap stubs (002-007). Decisions: `docs/decisions/` (ADR-001…008).
 - Opt-in stages (defaults off): clip discovery and reprompt (`YTVIDEO_SEGMENT_PROVIDER=local_heuristic`), a local-LLM re-rank of the discovered clips (`YTVIDEO_SEGMENT_RERANK_PROVIDER=ollama`), face-tracked reframe (`YTVIDEO_REFRAME_PROVIDER=face_track`), B-roll (`YTVIDEO_BROLL_PROVIDER=local|pexels`).
+- AI scene search (spec 014, ADR-013) is on by default when it can run (`YTVIDEO_SCENE_SEARCH_PROVIDER=auto`: a prompt is given and `.venv-mlx` exists): the prompt picks the clips over YouTube chapters, the index lives in `<job folder>/scenes/`, the sidecar runs as a killable child (`app/services/child_process.py`). Tests pin it off in `conftest.py`.
+
+## Ship profile
+
+```yaml
+base: main
+test: pytest -q
+deploy: none
+url: []
+# shape (detected 2026-10-29: GitHub · PR CI: github-hosted · deploys: none)
+```

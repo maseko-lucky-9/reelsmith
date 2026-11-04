@@ -18,14 +18,19 @@ from app.main import create_app
 @pytest.fixture
 async def enhance_client(tmp_path, monkeypatch):
     monkeypatch.setattr("app.settings.settings.audio_enhance_provider", "passthrough")
+    downloads = tmp_path / "downloads"  # the managed root: enhancing writes only below it
+    monkeypatch.setattr("app.settings.settings.default_download_path", str(downloads))
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
 
-    src = tmp_path / "clip.mp4"
-    src.write_bytes(b"data")
+    src = downloads / "clip.mp4"
+    shared = tmp_path / "share" / "clip.mp4"  # an export copy, e.g. a Syncthing share
+    for path in (src, shared):
+        path.parent.mkdir()
+        path.write_bytes(b"data")
 
     async with factory() as session:
         job = JobRecord(youtube_url="https://example.com/v")
@@ -33,6 +38,7 @@ async def enhance_client(tmp_path, monkeypatch):
         await session.flush()
         rendered = ClipRecord(job_id=job.id, start=0, end=10, output_path=str(src))
         unrendered = ClipRecord(job_id=job.id, start=0, end=10)
+        session.add(ClipRecord(id="export-clip", job_id=job.id, start=0, end=10, output_path=str(shared)))
         session.add(rendered)
         session.add(unrendered)
         await session.commit()
@@ -197,3 +203,20 @@ async def test_enhance_audio_unrendered_clip_409(enhance_client):
         json={"provider": "passthrough"},
     )
     assert r.status_code == 409
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "body"),
+    [("enhance-speech", None), ("enhance-audio", {"provider": "passthrough"})],
+)
+async def test_a_clip_that_points_at_an_export_copy_is_not_enhanced(enhance_client, tmp_path, endpoint, body):
+    """Enhancing writes beside the clip's file; beside an export copy that would sync to other devices."""
+    client, *_ = enhance_client
+    share = tmp_path / "share"
+    before = sorted(p.name for p in share.iterdir())
+
+    r = await client.post(f"/api/clips/export-clip/{endpoint}", json=body)
+
+    assert r.status_code == 409, r.text
+    assert "export copy" in r.json()["detail"]
+    assert sorted(p.name for p in share.iterdir()) == before

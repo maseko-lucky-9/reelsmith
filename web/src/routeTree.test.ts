@@ -11,4 +11,8 @@ describe('routeTree', () => {
     expect(paths).toEqual(expect.arrayContaining(['/', '/jobs/$jobId', '/settings/social']))
     expect(paths).not.toContain('/calendar')
   })
+
+  it('has the YouTube source search page (spec 015)', () => {
+    expect(paths).toContain('/sources/youtube')
+  })
 })

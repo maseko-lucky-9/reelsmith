@@ -15,6 +15,15 @@ Spec numbers and ADR numbers (`docs/decisions/NNN-*.md`) are separate sequences.
 | 005 webhooks | Roadmap stub (from T017) | this file |
 | 006 api-tokens | Roadmap stub (from T017) | this file |
 | 007 workspaces | Roadmap stub (from T017) | this file |
+| 008 render-speed | Implemented (T053-T055; T056 decision and T057 open) | [spec](008-render-speed/spec.md) · [plan](008-render-speed/plan.md) · [tasks](008-render-speed/tasks.md) |
+| 009 durable-job-history | Implemented (T058-T063) | [spec](009-durable-job-history/spec.md) · [tasks](009-durable-job-history/tasks.md) |
+| 010 map-export-folder | Implemented (T064-T067) | [spec](010-map-export-folder/spec.md) · [tasks](010-map-export-folder/tasks.md) |
+| 011 repair-job-metadata | Implemented (T068-T070) | [spec](011-repair-job-metadata/spec.md) · [tasks](011-repair-job-metadata/tasks.md) |
+| 012 tiktok-posting-and-trends | Phase 1 built, not live (T071-T076; T077 go-live is an owner decision); phases 2-4 planned | [spec](012-tiktok-posting-and-trends/spec.md) · [tasks](012-tiktok-posting-and-trends/tasks.md) · [baseline](012-tiktok-posting-and-trends/baseline.md) |
+| 013 cancel-and-delete-jobs | Implemented (T084-T088, T090-T092 review rounds; T089 end-to-end check open) | [spec](013-cancel-and-delete-jobs/spec.md) · [plan](013-cancel-and-delete-jobs/plan.md) · [tasks](013-cancel-and-delete-jobs/tasks.md) |
+| 014 ai-scene-search | Implemented (T093-T106; T107 owner-stack check, T108-T110 follow-ups open) | [spec](014-ai-scene-search/spec.md) · [plan](014-ai-scene-search/plan.md) · [tasks](014-ai-scene-search/tasks.md) |
+| 015 youtube-source-search | Implemented, not verified live (T111-T121, T123, T124; T122 and T125 open: YouTube refused the stream request from the build machine every time) | [spec](015-youtube-source-search/spec.md) · [plan](015-youtube-source-search/plan.md) · [tasks](015-youtube-source-search/tasks.md) |
+| 016 editor-render | Implemented (T126-T132); T133 real render check, T134 editor flow in dark and light, T135 live Piper voice check open | [spec](016-editor-render/spec.md) · [plan](016-editor-render/plan.md) · [tasks](016-editor-render/tasks.md) |
 
 ## Roadmap stubs
 

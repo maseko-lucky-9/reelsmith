@@ -12,13 +12,13 @@ FastAPI backend with an asyncio orchestrator that turns a video URL into caption
 
 **Language/Version**: Python 3.14 (CI; 3.12 unsupported), TypeScript 6.0.x
 **Primary Dependencies**: FastAPI 0.143, SQLAlchemy 2.1.4 + Alembic 1.20, yt-dlp, faster-whisper, imageio-ffmpeg + PyAV, React 19, Vite 8, Tailwind 4, TanStack Router/Query (`requirements.txt`, `web/package.json`)
-**Storage**: SQLite by default, PostgreSQL supported (`YTVIDEO_DB_URL`); media on the local filesystem ([docs/db-parity.md](../../docs/db-parity.md))
+**Storage**: SQLite by default in code, PostgreSQL supported (`YTVIDEO_DB_URL`); `scripts/start.sh` runs the stack on Docker Postgres ([ADR-009](../../docs/decisions/009-postgres-default-store.md), [spec 009](../009-durable-job-history/spec.md)); media on the local filesystem ([docs/db-parity.md](../../docs/db-parity.md))
 **Testing**: pytest + pytest-asyncio (markers `integration`, `live`, `e2e`, `playwright`); Vitest and Playwright for `web/`
 **Target Platform**: developer Mac and Linux CI (`.github/workflows/ci.yml`)
 **Project Type**: web application (API + SPA)
 **Performance Goals**: see SC-001 in the spec (measured, not targeted)
 **Constraints**: bundled ffmpeg only; offline default test run
-**Scale/Scope**: 46 HTTP operations, 40 event types, 16 tables, 18 web routes (counted at `67dd68d`; 38 event types at `40ab44d`; T045 removed one event type and one web route, leaving 39 and 17)
+**Scale/Scope**: 46 HTTP operations, 40 event types, 16 tables, 18 web routes (counted at `67dd68d`; 38 event types at `40ab44d`; T045 removed one event type and one web route, leaving 39 and 17; T052 added `ChapterCompleted` and `DownloadProgress`, making 41)
 
 ## Constitution Check
 

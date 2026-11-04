@@ -1,18 +1,25 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import contextlib
+import dataclasses
 import logging
+import math
+import os
 import re
 import shutil
+import threading
 import time
 import uuid
-from collections.abc import Callable, Coroutine, Sequence
+import weakref
+from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
 from pathlib import Path
 from typing import Any
 
 import app.logging_config  # noqa: F401
 from app.bus.event_bus import AsyncEventBus
-from app.bus.job_store import JobStore
+from app.bus.job_store import JobNotFoundError, JobStore
 from app.domain.events import Event, EventType
 from app.domain.models import ChapterArtifacts, JobState, PipelineOptions
 from app.services import (
@@ -22,6 +29,7 @@ from app.services import (
     broll_service,
     caption_service,
     clip_service,
+    clip_words,
     export_service,
     ffmpeg_tools,
     filler_removal_service,
@@ -30,13 +38,16 @@ from app.services import (
     ollama_service,
     reframe_service,
     render_service,
+    scene_search,
     segment_discovery,
     segment_proposer,
     segment_rerank,
     thumbnail_service,
+    timeline_render_service,
     transcription_service,
 )
 from app.services.platforms import resolve as resolve_adapter
+from app.services.platforms._yt_dlp_base import download_progress, download_stop
 from app.settings import settings
 
 log = logging.getLogger(__name__)
@@ -51,32 +62,205 @@ def _sanitize(name: str) -> str:
     return _SAFE_CHAR_RE.sub("_", name).strip() or "chapter"
 
 
+# ── Cancel (spec 013) ─────────────────────────────────────────────────────────
+
+# Every pipeline task of a job (its run, a re-render, a reprompt), waiting for
+# a slot or running; an entry leaves when its task is done. In-process only,
+# like the tasks themselves.
+_job_tasks: dict[str, set[asyncio.Task[Any]]] = {}
+# Jobs the user cancelled (``cancel_job``) whose tasks are still unwinding.
+# A task cancelled while its job is not in here was cancelled by a shutdown,
+# which keeps the job's status as it was.
+_user_cancelled: set[str] = set()
+# Tasks a user cancel already reached: a second Cancel does not cancel them
+# again. Not ``task.cancelling()``: an internal cancel (a timeout, a failing
+# sibling's TaskGroup) raises it too, and a user cancel must not be skipped.
+_user_cancelled_tasks: weakref.WeakSet[asyncio.Task[Any]] = weakref.WeakSet()
+# Worker threads of each job still running (``_job_thread``), the download
+# included. Cancelling a task cannot stop its thread: the download stops at
+# yt-dlp's next progress tick (``download_stop``), the others run to their
+# end (an export, a manifest, a thumbnail). Until then the job counts as
+# active, so it cannot be deleted while a thread may still write into it.
+_threads_running: dict[str, int] = {}
+_threads_lock = threading.Lock()
+# Jobs a ``DELETE /jobs/{id}`` is deleting; a re-render, reprompt or clip
+# enhancement of one answers 409.
+_deleting: set[str] = set()
+# Claimed work per job (``claim_work``): re-renders between their 202 and the
+# end of their task, clip enhancements during their request.
+_work_in_flight: dict[str, int] = {}
+
+
+def _track_job_task(job_id: str, task: asyncio.Task[Any]) -> None:
+    _job_tasks.setdefault(job_id, set()).add(task)
+
+    def _untrack(done: asyncio.Task[Any]) -> None:
+        tasks = _job_tasks.get(job_id)
+        if tasks is None:
+            return
+        tasks.discard(done)
+        if not tasks:
+            del _job_tasks[job_id]
+            _user_cancelled.discard(job_id)
+
+    task.add_done_callback(_untrack)
+
+
+def cancel_job(job_id: str) -> bool:
+    """Cancel every pipeline task of ``job_id``; False if it has none.
+
+    The job is marked as cancelled by the user first, so each task, as it
+    unwinds, records what a user cancel means (``cancelled`` status and
+    ``JobCancelled`` for a run, ``RepromptFailed`` for a reprompt, the prior
+    chapter status for a re-render) instead of what a shutdown leaves.
+    """
+    tasks = [task for task in _job_tasks.get(job_id, ()) if not task.done()]
+    if not tasks:
+        return False
+    _user_cancelled.add(job_id)
+    for task in tasks:
+        # One cancel per task per user: a second click changes nothing. (A
+        # further cancel would be harmless too: ``to_thread_cancellable``
+        # keeps waiting for its worker thread through it.)
+        if task not in _user_cancelled_tasks:
+            _user_cancelled_tasks.add(task)
+            task.cancel()
+    return True
+
+
+def job_has_work(job_id: str) -> bool:
+    """True while the job has work a cancel can stop or wait for: a pipeline
+    task (run, re-render or reprompt, waiting or running), a reprompt claim,
+    or a claimed re-render or clip enhancement (``claim_work``)."""
+    return job_id in _job_tasks or reprompt_in_flight(job_id) or job_id in _work_in_flight
+
+
+def job_threads_running(job_id: str) -> bool:
+    """True while a worker thread of the job still runs after its task ended
+    (it cannot be stopped; it finishes on its own)."""
+    return job_id in _threads_running
+
+
+def job_active(job_id: str) -> bool:
+    """True while anything of the job may still run or write files
+    (``job_has_work`` or ``job_threads_running``)."""
+    return job_has_work(job_id) or job_threads_running(job_id)
+
+
+def claim_work(job_id: str) -> None:
+    """Count one piece of work on the job's files that has no task yet or
+    none at all: a re-render from its 202 until its task ends, a clip
+    enhancement for its request. Taken synchronously in the route right
+    after its ``deleting`` check, so a delete and the work exclude each
+    other; released with ``release_work``."""
+    _work_in_flight[job_id] = _work_in_flight.get(job_id, 0) + 1
+
+
+def release_work(job_id: str) -> None:
+    left = _work_in_flight.get(job_id, 0) - 1
+    if left > 0:
+        _work_in_flight[job_id] = left
+    else:
+        _work_in_flight.pop(job_id, None)
+
+
+# Clips with a re-render queued or running: a second one is refused (409), so
+# the editor's file only ever changes once per request it made.
+_rerender_claims: set[str] = set()
+
+
+def claim_rerender(clip_id: str) -> bool:
+    """Mark ``clip_id`` as being re-rendered; False if it already is.
+    Taken in the route with no await since its checks; ``release_rerender``
+    when the re-render ends (or is never queued)."""
+    if clip_id in _rerender_claims:
+        return False
+    _rerender_claims.add(clip_id)
+    return True
+
+
+def release_rerender(clip_id: str) -> None:
+    _rerender_claims.discard(clip_id)
+
+
+def claim_delete(job_id: str) -> bool:
+    """Mark ``job_id`` as being deleted; False if a delete of it already is.
+    ``DELETE /jobs/{id}`` claims before its checks and releases at the end."""
+    if job_id in _deleting:
+        return False
+    _deleting.add(job_id)
+    return True
+
+
+def release_delete(job_id: str) -> None:
+    _deleting.discard(job_id)
+
+
+def deleting(job_id: str) -> bool:
+    return job_id in _deleting
+
+
+def _counted(job_id: str, fn: Callable[..., Any]) -> Callable[..., Any]:
+    """``fn`` counted in ``_threads_running`` for as long as it runs. Counted
+    from inside the thread: a call cancelled before its thread started never
+    runs, so it must not count."""
+
+    def _run(*args: Any, **kwargs: Any) -> Any:
+        with _threads_lock:
+            _threads_running[job_id] = _threads_running.get(job_id, 0) + 1
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            with _threads_lock:
+                left = _threads_running[job_id] - 1
+                if left:
+                    _threads_running[job_id] = left
+                else:
+                    del _threads_running[job_id]
+
+    return _run
+
+
+async def _job_thread(job_id: str, fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    """``asyncio.to_thread`` for work of ``job_id``: the job stays active
+    (``job_active``) until the thread returns, even after a cancel."""
+    return await asyncio.to_thread(_counted(job_id, fn), *args, **kwargs)
+
+
 async def run_orchestrator(bus: AsyncEventBus, store: JobStore) -> None:
     """Subscribes to VIDEO_REQUESTED events and runs per-job pipelines.
 
     At most ``settings.max_concurrent_jobs`` pipelines run at once; a job past
     the cap waits for a slot with its status still ``pending``. Cancelling the
-    orchestrator cancels running and waiting jobs alike.
+    orchestrator cancels running and waiting jobs alike. Each task is also
+    registered under its job id, so ``cancel_job`` can cancel one job.
     """
     log.info("Orchestrator subscribed; awaiting VideoRequested events")
     max_jobs = settings.max_concurrent_jobs
     if max_jobs < 1:
-        log.warning(
-            "max_concurrent_jobs=%d is below 1; running 1 job at a time", max_jobs
-        )
+        log.warning("max_concurrent_jobs=%d is below 1; running 1 job at a time", max_jobs)
         max_jobs = 1
     job_slots = asyncio.Semaphore(max_jobs)
     pipeline_tasks: set[asyncio.Task[Any]] = set()
 
     async def _run_when_slot_free(event: Event) -> None:
-        async with job_slots:
+        try:
+            await job_slots.acquire()
+        except asyncio.CancelledError:
+            if event.job_id in _user_cancelled:
+                await _finish_then_honour_cancel(_cancel_before_start(event, bus, store))
+            raise
+        try:
             await _run_job(event, bus, store)
+        finally:
+            job_slots.release()
 
     try:
         async for event in bus.subscribe(types=[EventType.VIDEO_REQUESTED]):
             task = asyncio.create_task(_run_when_slot_free(event))
             pipeline_tasks.add(task)
             task.add_done_callback(pipeline_tasks.discard)
+            _track_job_task(event.job_id, task)
     except asyncio.CancelledError:
         for task in pipeline_tasks:
             task.cancel()
@@ -89,6 +273,73 @@ async def run_orchestrator(bus: AsyncEventBus, store: JobStore) -> None:
 
 async def _emit(bus: AsyncEventBus, type_: EventType, job_id: str, **payload: Any) -> None:
     await bus.publish(Event(type=type_, job_id=job_id, payload=payload))
+
+
+@contextlib.asynccontextmanager
+async def _download_progress_events(bus: AsyncEventBus, job_id: str) -> AsyncIterator[None]:
+    """Emit ``DownloadProgress`` for the download run inside the block.
+
+    Sets the ``download_progress`` callback, which the download thread calls
+    and which hops to the loop to publish. On exit no further percent is
+    published, even by a download thread that outlived a timeout, and every
+    one already scheduled has been published, so they all precede the
+    events that follow the block.
+    """
+    loop = asyncio.get_running_loop()
+    lock = threading.Lock()
+    pending: list[concurrent.futures.Future[None]] = []
+    closed = False
+    # The scheduled publishes start in call order; this FIFO lock keeps a
+    # slow publish from letting a later, higher percent overtake it.
+    in_order = asyncio.Lock()
+
+    async def _publish(percent: int) -> None:
+        async with in_order:
+            await _emit(bus, EventType.DOWNLOAD_PROGRESS, job_id, percent=percent)
+
+    def _report(percent: int) -> None:
+        with lock:
+            if closed:
+                return
+            pending.append(asyncio.run_coroutine_threadsafe(_publish(percent), loop))
+
+    token = download_progress.set(_report)
+    try:
+        yield
+    finally:
+        download_progress.reset(token)
+        with lock:
+            closed = True
+        await asyncio.gather(*(asyncio.wrap_future(f) for f in pending), return_exceptions=True)
+
+
+async def _cancel_before_start(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
+    """Record a user cancel of a task that was still waiting for a slot.
+
+    A run is marked ``cancelled``; a reprompt releases its claim (the
+    reprompt itself never ran, so nothing else will) and reports
+    ``RepromptFailed``; a re-render had changed nothing yet.
+    """
+    job_id = trigger.job_id
+    if trigger.payload.get("rerender_clip_id"):
+        log.info("[%s] Re-render cancelled before it started", job_id)
+        release_work(job_id)
+        release_rerender(trigger.payload["rerender_clip_id"])
+        await _emit(
+            bus,
+            EventType.CLIP_RERENDER_FAILED,
+            job_id,
+            clip_id=trigger.payload["rerender_clip_id"],
+            reason="cancelled",
+            error="Re-render cancelled",
+        )
+    elif trigger.payload.get("reprompt"):
+        log.info("[%s] Reprompt cancelled before it started", job_id)
+        release_reprompt(job_id)
+        await _emit(bus, EventType.REPROMPT_FAILED, job_id, error="cancelled", reason="cancelled")
+    else:
+        log.info("[%s] Job cancelled before it started", job_id)
+        await _record_cancel(bus, store, job_id)
 
 
 async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
@@ -104,9 +355,7 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
     url: str = payload["url"]
     download_path: str = payload["download_path"]
     caption_format: str = payload.get("caption_format", settings.default_caption_format)
-    target_aspect_ratio: float = payload.get(
-        "target_aspect_ratio", settings.default_target_aspect_ratio
-    )
+    target_aspect_ratio: float = payload.get("target_aspect_ratio", settings.default_target_aspect_ratio)
     # Job language tag (e.g. "en-US"); None lets the transcription service
     # apply settings.default_transcription_language.
     language: str | None = payload.get("language")
@@ -118,6 +367,13 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
 
     cleanup_root: Path | None = None
     try:
+        # Cancelled while it had no task yet (still in the queue): never
+        # start. Inside the try: a user cancel landing on this read is
+        # recorded like any other.
+        with contextlib.suppress(JobNotFoundError):
+            if (await store.get(job_id)).status == "cancelled":
+                log.info("[%s] Job was cancelled before it started; not running it", job_id)
+                return
         await store.update(job_id, lambda s: setattr(s, "status", "running"))
 
         # ── Resolve platform adapter ─────────────────────────────────────────
@@ -128,7 +384,8 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
         log.info("[%s] Step: create folder  path=%s", job_id, download_path)
         step_t0 = time.perf_counter()
         await store.update(job_id, lambda s: setattr(s, "current_step", "folder"))
-        destination, clips_folder = await asyncio.to_thread(
+        destination, clips_folder = await _job_thread(
+            job_id,
             folder_service.create_video_subfolder,
             download_path,
             url,
@@ -156,16 +413,22 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
         log.info("[%s] Step: download video", job_id)
         step_t0 = time.perf_counter()
         await store.update(job_id, lambda s: setattr(s, "current_step", "download"))
+        stop_download = threading.Event()
         try:
-            result = await asyncio.wait_for(
-                asyncio.to_thread(adapter.download, url, destination),
-                timeout=settings.download_timeout_seconds,
-            )
+            async with _download_progress_events(bus, job_id):
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(_download_in_thread, adapter, url, destination, job_id, stop_download),
+                    timeout=settings.download_timeout_seconds,
+                )
         except asyncio.TimeoutError:
             raise
         except Exception as e:
             log.error("[%s] download failed  url=%s  error=%s", job_id, url, e)
             raise RuntimeError(f"download failed: {e}") from e
+        finally:
+            # A thread that outlived the wait (cancel, timeout) stops at its
+            # next progress tick instead of downloading for nobody.
+            stop_download.set()
         video_path = result.video_path
         info = result.info
         if not video_path or info is None:
@@ -175,7 +438,11 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
         duration = float(info.get("duration") or 0.0)
         log.info(
             "[%s] Download complete (%.2fs)  title=%r  duration=%.1fs  path=%s",
-            job_id, time.perf_counter() - step_t0, title, duration, video_path,
+            job_id,
+            time.perf_counter() - step_t0,
+            title,
+            duration,
+            video_path,
         )
 
         def _set_download(s: JobState) -> None:
@@ -198,15 +465,52 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
         await store.update(job_id, lambda s: setattr(s, "current_step", "chapters"))
         raw_chapters = adapter.extract_chapters(info)
         chapters = [
-            {"index": c.index, "title": c.title, "start": c.start, "end": c.end}
+            {
+                "index": c.index,
+                "title": c.title,
+                "start": c.start,
+                "end": c.end,
+                # The source's own chapter list: the only branch that is.
+                "segment_origin": manifest_service.ORIGIN_CHAPTERS,
+            }
             for c in raw_chapters
         ]
-        safe_end = await asyncio.to_thread(clip_service.probe_safe_end, video_path)
+        safe_end = await _job_thread(job_id, clip_service.probe_safe_end, video_path)
         # Full-source word timings, set when discovery transcribed the whole
         # source; each chapter then reuses them instead of re-transcribing.
         source_words: list[transcription_service.WordTiming] | None = None
 
-        if not chapters:
+        # AI scene search (spec 014): a prompt picks the clips by what is
+        # seen and said, whatever the source's chapters and segment mode.
+        # None: it could not run, so today's path below runs; []: nothing
+        # matched, which also falls back.
+        prompt: str | None = payload.get("prompt")
+        scene_chapters: list[dict[str, Any]] | None = None
+        if opts.segment_proposer and scene_search.enabled(prompt):
+            assert prompt is not None
+            scene_chapters, source_words, why = await _scene_chapters(
+                job_id=job_id,
+                video_path=video_path,
+                job_folder=destination,
+                safe_end=safe_end,
+                cleanup_root=cleanup_root,
+                opts=opts,
+                language=language,
+                prompt=prompt,
+                words=None,
+                first_index=0,
+                bus=bus,
+            )
+            if scene_chapters == []:
+                log.info("[%s] No moment matched the prompt; using the source's chapters or discovery", job_id)
+                await _emit(
+                    bus, EventType.STAGE_SKIPPED, job_id,
+                    stage_id="scene_search", reason=f"no moment matched the prompt{why}",
+                )
+
+        if scene_chapters:
+            chapters = scene_chapters
+        elif not chapters:
             if not opts.segment_proposer:
                 # segment_proposer off → single full-video pseudo-chapter
                 chapters = [_full_video_chapter(safe_end)]
@@ -224,8 +528,9 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
                     cleanup_root=cleanup_root,
                     opts=opts,
                     language=language,
-                    prompt=payload.get("prompt"),
+                    prompt=prompt,
                     bus=bus,
+                    words=source_words,
                 )
             else:
                 # Provider "chapter", transcription off or segment_mode
@@ -239,7 +544,9 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
                 if cend - cstart < 0.5:
                     log.warning(
                         "[%s] Dropping chapter %r post-clamp (duration=%.3fs)",
-                        job_id, c.get("title"), cend - cstart,
+                        job_id,
+                        c.get("title"),
+                        cend - cstart,
                     )
                     continue
                 clamped.append({**c, "start": cstart, "end": cend})
@@ -247,18 +554,20 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
 
         if not chapters:
             raise RuntimeError(
-                f"all chapters out-of-bounds vs safe_end {safe_end:.3f}s "
-                f"(yt-dlp duration {duration:.3f}s)"
+                f"all chapters out-of-bounds vs safe_end {safe_end:.3f}s (yt-dlp duration {duration:.3f}s)"
             )
 
         if duration - safe_end > clip_service.AUDIO_TAIL_EPSILON_SECONDS + 0.5:
             log.info(
                 "[%s] Audio EOF gap: yt-dlp=%.3fs safe_end=%.3fs (audio shorter than video?)",
-                job_id, duration, safe_end,
+                job_id,
+                duration,
+                safe_end,
             )
 
-        log.info("[%s] %d chapter(s) detected: %s", job_id, len(chapters),
-                 [c["title"] for c in chapters])
+        log.info("[%s] %d chapter(s) detected: %s", job_id, len(chapters), [c["title"] for c in chapters])
+        # Stored before ChaptersDetected: the UI refetches the job on it.
+        await store.update(job_id, lambda s: setattr(s, "chapters_total", len(chapters)))
         await _emit(bus, EventType.CHAPTERS_DETECTED, job_id, chapters=chapters)
 
         # ── Per-chapter fan-out ───────────────────────────────────────────────
@@ -266,7 +575,7 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
 
         async def _bound(chapter: dict[str, Any]) -> str | None:
             async with semaphore:
-                return await _process_chapter(
+                output_path = await _process_chapter(
                     chapter=chapter,
                     job_id=job_id,
                     video_path=video_path,
@@ -280,6 +589,17 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
                     language=language,
                     source_words=source_words,
                 )
+                # Counted here, not in _process_chapter: a re-render or a
+                # reprompt is not job progress. Stored before the event, on
+                # which the UI refetches the job.
+                await store.increment_chapters_done(job_id)
+                await _emit(
+                    bus,
+                    EventType.CHAPTER_COMPLETED,
+                    job_id,
+                    chapter_index=int(chapter["index"]),
+                )
+                return output_path
 
         # Structured fan-out: the first failing chapter cancels its siblings
         # and the group waits for them to unwind before the job is marked
@@ -298,7 +618,9 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
             first, *others = group.exceptions
             for other in others:
                 log.warning(
-                    "[%s] Another chapter also failed: %s", job_id, other,
+                    "[%s] Another chapter also failed: %s",
+                    job_id,
+                    other,
                     exc_info=other,
                 )
             raise first from None
@@ -309,11 +631,8 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
             export_dir = str(Path(settings.export_base_folder) / job_id)
         else:
             export_dir = str(Path(clips_folder).parent / "exports")
-        exported_paths = await asyncio.to_thread(
-            export_service.export_clips, output_paths, export_dir
-        )
-        await _emit(bus, EventType.EXPORT_COMPLETED, job_id,
-                    export_dir=export_dir, count=len(exported_paths))
+        exported_paths = await _job_thread(job_id, export_service.export_clips, output_paths, export_dir)
+        await _emit(bus, EventType.EXPORT_COMPLETED, job_id, export_dir=export_dir, count=len(exported_paths))
 
         # ── Manifest ──────────────────────────────────────────────────────────
         clips_data = await store.list_clips(job_id=job_id)
@@ -322,16 +641,30 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
             stem = Path(clip.get("output_path") or "").stem
             clip["export_path"] = path_map.get(stem, "")
 
-        manifest_path = await asyncio.to_thread(
-            manifest_service.write_manifest, clips_data, export_dir
+        job = await store.get(job_id)
+        manifest_path = await _job_thread(
+            job_id,
+            manifest_service.write_manifest,
+            clips_data,
+            export_dir,
+            source=job.source,
+            source_url=job.url,
         )
         await _emit(bus, EventType.MANIFEST_CREATED, job_id, manifest_path=manifest_path)
 
         total_elapsed = time.perf_counter() - job_t0
         log.info(
             "[%s] Job completed in %.2fs  outputs=%d  paths=%s",
-            job_id, total_elapsed, len(output_paths), output_paths,
+            job_id,
+            total_elapsed,
+            len(output_paths),
+            output_paths,
         )
+
+        if job_id in _user_cancelled:
+            # The user's cancel landed while an internal one (a timeout, a
+            # TaskGroup) was in flight and was absorbed by it: it still wins.
+            raise asyncio.CancelledError
 
         def _complete(s: JobState) -> None:
             s.status = "completed"
@@ -343,20 +676,60 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
 
     except asyncio.CancelledError:
         log.warning("[%s] Job cancelled after %.2fs", job_id, time.perf_counter() - job_t0)
+        # Only a user cancel is recorded; a shutdown leaves the job as it
+        # was (the next start fails it as interrupted).
+        if job_id in _user_cancelled:
+            await _finish_then_honour_cancel(_record_cancel(bus, store, job_id))
         raise
     except Exception as e:  # noqa: BLE001
         log.exception("[%s] Job failed after %.2fs", job_id, time.perf_counter() - job_t0)
         # A cancel (e.g. shutdown) may already be pending — TaskGroup re-arms
         # an outer cancel that hit while a chapter was failing — or arrive
-        # now; record the failure regardless, then let the cancel through.
-        await _finish_then_honour_cancel(_record_failure(bus, store, job_id, str(e)))
+        # now; record the outcome regardless, then let the cancel through. A
+        # user cancel that an internal cancel's error (a timeout, a failing
+        # sibling chapter) overtook is still the outcome: "cancelled".
+        if job_id in _user_cancelled:
+            await _finish_then_honour_cancel(_record_cancel(bus, store, job_id))
+        else:
+            await _finish_then_honour_cancel(_record_failure(bus, store, job_id, str(e)))
     finally:
         if cleanup_root is not None and cleanup_root.exists():
             shutil.rmtree(cleanup_root, ignore_errors=True)
 
 
+def _download_in_thread(adapter: Any, url: str, destination: str, job_id: str, stop: threading.Event) -> Any:
+    """``adapter.download`` in a worker thread that ``stop`` can end.
+
+    yt-dlp polls ``download_stop`` on each progress tick and aborts once
+    ``stop`` is set. The job counts as active (``job_active``) until the
+    thread returns, however long it outlives its task.
+    """
+    if stop.is_set():
+        raise RuntimeError("download cancelled before it started")
+
+    def _download() -> Any:
+        token = download_stop.set(stop.is_set)
+        try:
+            return adapter.download(url, destination)
+        finally:
+            download_stop.reset(token)
+
+    return _counted(job_id, _download)()
+
+
 def _full_video_chapter(safe_end: float) -> dict[str, Any]:
-    return {"index": 0, "title": "Full Video", "start": 0.0, "end": safe_end}
+    return {
+        "index": 0,
+        "title": "Full Video",
+        "start": 0.0,
+        "end": safe_end,
+        "segment_origin": manifest_service.ORIGIN_FULL_VIDEO,
+    }
+
+
+def _mark_discovered(chapters: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Tag chapters the proposer picked: Reelsmith found them, not the source."""
+    return [{**c, "segment_origin": manifest_service.ORIGIN_DISCOVERED} for c in chapters]
 
 
 def _discovery_enabled(opts: PipelineOptions, segment_mode: str) -> bool:
@@ -384,6 +757,7 @@ async def _discover_segments(
     language: str | None,
     prompt: str | None,
     bus: AsyncEventBus,
+    words: list[transcription_service.WordTiming] | None = None,
 ) -> tuple[list[dict[str, Any]], list[transcription_service.WordTiming] | None]:
     """Chapters for the best-scoring windows of a source without chapters.
 
@@ -396,29 +770,38 @@ async def _discover_segments(
     Emits ``SegmentsProposed`` and one ``SegmentScored`` per kept segment.
 
     Returns the chapters and the full-source words (``None`` when the source
-    was not transcribed). A source shorter than the minimum clip length, no
-    kept segment, or any failure yields the single "Full Video" chapter, so
-    discovery never fails the job; cancellation propagates.
+    was not transcribed). ``words`` given (scene search transcribed the
+    source and then could not run) skips the transcription. A source shorter
+    than the minimum clip length, no kept segment, or any failure yields the
+    single "Full Video" chapter, so discovery never fails the job;
+    cancellation propagates.
     """
     full_video = [_full_video_chapter(safe_end)]
     min_secs, max_secs = segment_discovery.clip_length_range(opts)
     if safe_end < min_secs:
         log.info(
             "[%s] Source (%.1fs) shorter than the minimum clip (%ds); one Full Video clip",
-            job_id, safe_end, min_secs,
+            job_id,
+            safe_end,
+            min_secs,
         )
         await _emit(
-            bus, EventType.STAGE_SKIPPED, job_id,
-            stage_id="segment_proposer", reason="source shorter than the minimum clip",
+            bus,
+            EventType.STAGE_SKIPPED,
+            job_id,
+            stage_id="segment_proposer",
+            reason="source shorter than the minimum clip",
         )
         return full_video, None
 
     log.info(
         "[%s] Step: discover clips  provider=%s  length=%d-%ds",
-        job_id, settings.segment_provider, min_secs, max_secs,
+        job_id,
+        settings.segment_provider,
+        min_secs,
+        max_secs,
     )
     step_t0 = time.perf_counter()
-    words: list[transcription_service.WordTiming] | None = None
     wav_path = cleanup_root / "discover_source.wav"
     try:
         audio_path = await ffmpeg_tools.to_thread_cancellable(
@@ -426,32 +809,30 @@ async def _discover_segments(
         )
         if audio_path is None:
             raise RuntimeError("source has no audio stream")
-        words = await transcription_service.transcribe_words_async(
-            audio_path, language=language, audio_duration_s=safe_end, repeatable=True
-        )
-        try:
-            await asyncio.to_thread(
-                segment_discovery.write_words_sidecar, video_path, words
+        if words is None:
+            words = await transcription_service.transcribe_words_async(
+                audio_path, language=language, audio_duration_s=safe_end, repeatable=True
             )
-        except OSError as e:
-            # Only re-renders lose out: they transcribe their window again.
-            log.warning("[%s] Could not save the words sidecar: %s", job_id, e)
-        proposer = segment_proposer.get_segment_proposer(
-            min_secs=min_secs, max_secs=max_secs
-        )
-        candidates = await asyncio.to_thread(
-            proposer.propose, words, audio_path, [], safe_end, prompt=prompt
-        )
+            try:
+                await _job_thread(job_id, segment_discovery.write_words_sidecar, video_path, words)
+            except OSError as e:
+                # Only re-renders lose out: they transcribe their window again.
+                log.warning("[%s] Could not save the words sidecar: %s", job_id, e)
+        proposer = segment_proposer.get_segment_proposer(min_secs=min_secs, max_secs=max_secs)
+        candidates = await _job_thread(job_id, proposer.propose, words, audio_path, [], safe_end, prompt=prompt)
         ranked = await segment_rerank.rerank(candidates, prompt=prompt, duration=safe_end, job_id=job_id)
         kept = segment_discovery.select_discovered(ranked, safe_end)
-        chapters = segment_discovery.segments_to_chapters(kept, safe_end)
+        chapters = _mark_discovered(segment_discovery.segments_to_chapters(kept, safe_end))
     except asyncio.CancelledError:
         raise
     except Exception as e:  # noqa: BLE001 — discovery must never fail the job
         log.exception("[%s] Clip discovery failed; one Full Video clip", job_id)
         await _emit(
-            bus, EventType.STAGE_SKIPPED, job_id,
-            stage_id="segment_proposer", reason=f"discovery failed: {e}",
+            bus,
+            EventType.STAGE_SKIPPED,
+            job_id,
+            stage_id="segment_proposer",
+            reason=f"discovery failed: {e}",
         )
         return full_video, words
     finally:
@@ -459,22 +840,264 @@ async def _discover_segments(
 
     log.info(
         "[%s] Discovery done (%.2fs)  words=%d  candidates=%d  kept=%s",
-        job_id, time.perf_counter() - step_t0, len(words), len(candidates),
+        job_id,
+        time.perf_counter() - step_t0,
+        len(words),
+        len(candidates),
         [(c["start"], c["end"], c["virality_score"]) for c in chapters],
     )
     await _emit(
+        bus,
+        EventType.SEGMENTS_PROPOSED,
+        job_id,
+        count=len(chapters),
+        candidates=len(candidates),
+    )
+    for c in chapters:
+        await _emit(
+            bus,
+            EventType.SEGMENT_SCORED,
+            job_id,
+            index=c["index"],
+            start=c["start"],
+            end=c["end"],
+            score=c["virality_score"],
+            breakdown=c["score_breakdown"],
+        )
+    if not chapters:
+        log.warning("[%s] No segment kept; one Full Video clip", job_id)
+        return full_video, words
+    return chapters, words
+
+
+SCENE_PROGRESS_INTERVAL = 1.0
+"""Least seconds between two ``SceneIndexProgress`` events (the first and the
+last are always sent)."""
+
+
+async def _index_scenes(
+    *, job_id: str, video_path: str, index_dir: Path, bus: AsyncEventBus
+) -> scene_search.SceneIndex | None:
+    """The source's scene index (spec 014), built or reused.
+
+    The sidecar (``scripts/scene_index.py`` in ``settings.scene_python``) is
+    a child process: a cancel of the job SIGTERMs it (it removes its temp
+    files), and SIGKILLs it after a grace period. Its progress lines become
+    ``SceneIndexProgress`` events (``done``, ``total`` chunks), at most one
+    a second; the end is ``ScenesIndexed`` (``chunks``, ``reused``,
+    ``seconds``). A failure is logged and reported as ``StageSkipped``
+    (``scene_search``) and returns None, so the job falls back; cancellation
+    propagates.
+    """
+    log.info(
+        "[%s] Step: index scenes  model=%s  dir=%s",
+        job_id, settings.scene_model, index_dir,
+    )  # fmt: skip
+    step_t0 = time.perf_counter()
+    last_sent = -math.inf
+
+    async def _progress(done: int, total: int) -> None:
+        nonlocal last_sent
+        now = time.monotonic()
+        if done in (0, total) or now - last_sent >= SCENE_PROGRESS_INTERVAL:
+            last_sent = now
+            await _emit(bus, EventType.SCENE_INDEX_PROGRESS, job_id, done=done, total=total)
+
+    try:
+        index, reused = await scene_search.ensure_index(video_path, index_dir, on_progress=_progress)
+    except (scene_search.SceneSearchError, OSError) as e:
+        log.warning("[%s] Scene indexing failed (%s); the prompt falls back to chapters/discovery", job_id, e)
+        await _emit(
+            bus, EventType.STAGE_SKIPPED, job_id,
+            stage_id="scene_search", reason="scene indexing failed",
+        )  # fmt: skip
+        return None
+    seconds = round(time.perf_counter() - step_t0, 2)
+    log.info(
+        "[%s] Scenes %s (%.2fs)  chunks=%d",
+        job_id, "reused" if reused else "indexed", seconds, len(index.spans),
+    )  # fmt: skip
+    await _emit(
+        bus, EventType.SCENES_INDEXED, job_id,
+        chunks=len(index.spans), reused=reused, seconds=seconds,
+    )  # fmt: skip
+    return index
+
+
+async def _transcribe_source(
+    *, job_id: str, video_path: str, safe_end: float, cleanup_root: Path, language: str | None
+) -> list[transcription_service.WordTiming] | None:
+    """Words of the whole source, saved as its ``.words.json`` sidecar; None
+    (logged) when it has no audio or transcription fails."""
+    wav_path = cleanup_root / "scene_source.wav"
+    try:
+        audio_path = await ffmpeg_tools.to_thread_cancellable(
+            clip_service.extract_audio, video_path, 0.0, safe_end, str(wav_path)
+        )
+        if audio_path is None:
+            log.info("[%s] Source has no audio stream; scene search matches what is seen only", job_id)
+            return None
+        words = await transcription_service.transcribe_words_async(
+            audio_path, language=language, audio_duration_s=safe_end, repeatable=True
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 — speech is optional for scene search
+        log.warning("[%s] Transcription failed; scene search matches what is seen only", job_id, exc_info=True)
+        return None
+    finally:
+        wav_path.unlink(missing_ok=True)
+    try:
+        await _job_thread(job_id, segment_discovery.write_words_sidecar, video_path, words)
+    except OSError as e:
+        log.warning("[%s] Could not save the words sidecar: %s", job_id, e)
+    return words
+
+
+async def _scene_chapters(
+    *,
+    job_id: str,
+    video_path: str,
+    job_folder: str,
+    safe_end: float,
+    cleanup_root: Path,
+    opts: PipelineOptions,
+    language: str | None,
+    prompt: str,
+    words: list[transcription_service.WordTiming] | None,
+    first_index: int,
+    bus: AsyncEventBus,
+) -> tuple[list[dict[str, Any]] | None, list[transcription_service.WordTiming] | None, str]:
+    """``_scene_search_stage``, guarded: any error but cancellation is logged,
+    reported as ``StageSkipped`` (``scene_search``) and returns ``(None,
+    words, "")``, so scene search never fails a job (spec 014 FR-009).
+
+    The third item is why nothing matched when the chapters are ``[]``: ""
+    or ``JUDGE_UNAVAILABLE`` (candidates there were, but the judge never
+    answered and none was strong enough to stand without it)."""
+    state: dict[str, Any] = {"words": words, "why": ""}
+    try:
+        chapters, words = await _scene_search_stage(
+            job_id=job_id, video_path=video_path, job_folder=job_folder, safe_end=safe_end,
+            cleanup_root=cleanup_root, opts=opts, language=language, prompt=prompt,
+            words=words, first_index=first_index, bus=bus, state=state,
+        )  # fmt: skip
+        return chapters, words, state["why"]
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001 — scene search must never fail the job
+        log.warning(
+            "[%s] Scene search failed (%s); the prompt falls back to chapters/discovery",
+            job_id, e, exc_info=True,
+        )  # fmt: skip
+        # A fixed reason: the event goes to every SSE client; details stay in the log.
+        await _emit(
+            bus, EventType.STAGE_SKIPPED, job_id,
+            stage_id="scene_search", reason="scene search failed",
+        )  # fmt: skip
+        return None, state["words"], ""
+
+
+# Appended to the no-match reason when the judge never answered.
+JUDGE_UNAVAILABLE = " (the judge was unavailable)"
+
+
+async def _scene_search_stage(
+    *,
+    job_id: str,
+    video_path: str,
+    job_folder: str,
+    safe_end: float,
+    cleanup_root: Path,
+    opts: PipelineOptions,
+    language: str | None,
+    prompt: str,
+    words: list[transcription_service.WordTiming] | None,
+    first_index: int,
+    bus: AsyncEventBus,
+    state: dict[str, Any],
+) -> tuple[list[dict[str, Any]] | None, list[transcription_service.WordTiming] | None]:
+    """Chapters for the moments of the source that match ``prompt`` (spec 014).
+
+    Indexes the source into ``<job_folder>/scenes/`` (``_index_scenes``,
+    reused when current) while the source is transcribed (when ``words`` is
+    None and the job transcribes); embeds the prompt and the transcript
+    sentences; ranks the moments (``scene_search.search``); lets the vision
+    judge look at the best few (``segment_rerank.judge_scenes``); keeps the
+    best with discovery's selection (``select_discovered``). Chapter indexes
+    start at ``first_index``; each carries the judge's title, reason and
+    emotion when it judged. Emits ``SegmentsProposed`` and one
+    ``SegmentScored`` per chapter, as discovery does.
+
+    Returns ``(chapters, words)``: ``chapters`` is None when scene search
+    could not run (the caller falls back; ``words`` spares it a second
+    transcription) and ``[]`` when no moment survived the judge.
+    """
+    min_secs, max_secs = segment_discovery.clip_length_range(opts)
+    index_dir = scene_search.scenes_dir(job_folder)
+    step_t0 = time.perf_counter()
+
+    async def _words() -> list[transcription_service.WordTiming] | None:
+        if words is not None or not opts.transcription:
+            return words
+        return await _transcribe_source(
+            job_id=job_id, video_path=video_path, safe_end=safe_end,
+            cleanup_root=cleanup_root, language=language,
+        )  # fmt: skip
+
+    # Indexing (GPU, child process) and transcription (CPU) run side by side.
+    async with asyncio.TaskGroup() as group:
+        index_task = group.create_task(
+            _index_scenes(job_id=job_id, video_path=video_path, index_dir=index_dir, bus=bus)
+        )
+        words_task = group.create_task(_words())
+    index, words = index_task.result(), words_task.result()
+    state["words"] = words
+    if index is None:
+        return None, words
+    try:
+        sentences = scene_search.sentences_from_words(words or [])
+        prompt_vec, sentence_vecs = await scene_search.prompt_and_sentence_vectors(index_dir, prompt, sentences)
+    except (scene_search.SceneSearchError, OSError) as e:
+        log.warning("[%s] Prompt embedding failed (%s); the prompt falls back to chapters/discovery", job_id, e)
+        await _emit(
+            bus, EventType.STAGE_SKIPPED, job_id,
+            stage_id="scene_search", reason="prompt embedding failed",
+        )  # fmt: skip
+        return None, words
+    # numpy over every chunk and sentence: off the event loop for long sources.
+    candidates = await _job_thread(
+        job_id, scene_search.search, index, prompt_vec, sentences=sentences,
+        sentence_vecs=sentence_vecs, min_s=min_secs, max_s=max_secs, duration=safe_end,
+    )  # fmt: skip
+    judge_t0 = time.perf_counter()
+    judge_stats: dict[str, int] = {}
+    ranked = await segment_rerank.judge_scenes(
+        candidates, prompt=prompt, video_path=video_path, job_id=job_id, stats=judge_stats
+    )
+    if candidates and not ranked and judge_stats.get("judged") == 0:
+        state["why"] = JUDGE_UNAVAILABLE
+    kept = segment_discovery.select_discovered(ranked, safe_end)
+    chapters = [
+        {**c, "index": first_index + c["index"]}
+        for c in segment_discovery.segments_to_chapters(kept, safe_end)
+    ]
+    log.info(
+        "[%s] Scene search done (%.2fs, judge %.2fs)  sentences=%d  candidates=%d  judged_kept=%d  kept=%s",
+        job_id, time.perf_counter() - step_t0, time.perf_counter() - judge_t0, len(sentences),
+        len(candidates), len(ranked),
+        [(c["start"], c["end"], c["virality_score"], c["title"]) for c in chapters],
+    )  # fmt: skip
+    await _emit(
         bus, EventType.SEGMENTS_PROPOSED, job_id,
         count=len(chapters), candidates=len(candidates),
-    )
+    )  # fmt: skip
     for c in chapters:
         await _emit(
             bus, EventType.SEGMENT_SCORED, job_id,
             index=c["index"], start=c["start"], end=c["end"],
             score=c["virality_score"], breakdown=c["score_breakdown"],
-        )
-    if not chapters:
-        log.warning("[%s] No segment kept; one Full Video clip", job_id)
-        return full_video, words
+        )  # fmt: skip
     return chapters, words
 
 
@@ -513,11 +1136,99 @@ def _chapter_for_clip(clip: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+@dataclasses.dataclass(frozen=True)
+class _EditRender:
+    """A clip's saved editor timeline, planned for a re-render (spec 016).
+
+    ``plan`` is rendered over the source window ``[start, end)``, the span
+    of its segments; the reel it makes is ``reel_seconds`` long and shows
+    ``words`` (the plan's caption words, on the reel's clock).
+    """
+
+    plan: timeline_render_service.RenderPlan
+    start: float
+    end: float
+    reel_seconds: float
+    words: list[transcription_service.WordTiming]
+    # The source windows the plan plays, in order: the cut the file is made from.
+    segments: list[tuple[float, float]]
+
+
+def _plan_saved_edit(
+    timeline: dict[str, Any],
+    *,
+    video_path: str,
+    clip_path: str,
+    clip_start: float,
+    source_range: tuple[float, float] | None,
+) -> _EditRender:
+    """Validate and plan a saved edit against the job's source video.
+
+    Raises ``ValueError`` (``TimelineError`` included) when it cannot be
+    rendered. v2 segments are source seconds and read ``video_path``. A v1
+    ``src: main`` is the reel itself and its ``trim_start`` is on the reel's
+    clock (the default timeline is ``trim_start: 0`` over the whole reel),
+    so it is planned against ``clip_path`` and then moved onto the source:
+    ``src`` = ``video_path``, ``trim_start`` + the clip's start. Reading the
+    source at a reel offset instead would render the video's opening. Any
+    other v1 ``src`` stays as given, and ``plan_segments`` refuses it unless
+    it is the job's own source.
+    """
+    plan = timeline_render_service.build_render_plan(
+        timeline,
+        clip_path,
+        source_path=video_path,
+        source_range=source_range,
+        clip_folder=str(Path(clip_path).parent),
+    )
+    if plan.schema_version < 2:
+        plan = dataclasses.replace(
+            plan,
+            video=[
+                dataclasses.replace(v, src=video_path, trim_start=v.trim_start + clip_start)
+                if v.src == clip_path
+                else v
+                for v in plan.video
+            ],
+        )
+    windows = render_service.plan_segments(plan, video_path)
+    words = [
+        transcription_service.WordTiming(w.word, w.start, w.end) for caption in plan.captions for w in caption.words
+    ]
+    return _EditRender(
+        plan=plan,
+        start=windows[0].start,
+        end=windows[-1].end,
+        reel_seconds=sum(w.length for w in windows),
+        words=words,
+        segments=[(w.start, w.end) for w in windows],
+    )
+
+
+async def _source_range(job_id: str, job: JobState) -> tuple[float, float] | None:
+    """``[0, duration]`` of the job's source, as ``PUT /clips/{id}/edit``
+    checks a v2 edit: probed, else the job's recorded duration, else None."""
+    try:
+        duration = await _job_thread(job_id, ffmpeg_tools.duration, job.video_path)
+    except Exception as exc:  # noqa: BLE001 - fall back to the recorded duration
+        log.info("[%s] Source duration probe failed (%s)", job_id, exc)
+        duration = None
+    if not duration or duration <= 0:
+        duration = job.duration
+    return (0.0, float(duration)) if duration and duration > 0 else None
+
+
 async def _rerender_clip(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
     """Re-render one clip of a completed job in place, from its saved source.
 
+    A clip with a saved editor timeline (``ClipEdit``) is rendered as that
+    edit (``_plan_saved_edit``): its segments, captions in its caption
+    style, text overlays, voice-overs and ``mute_source``. An edit that
+    cannot be planned is refused before anything is touched (logged at
+    WARNING, the clip and its file unchanged, ClipRerenderFailed "refused").
+
     The job's status, step, error and outputs are left alone and neither
-    JobCompleted nor JobFailed is emitted. A failure is logged and swallowed:
+    JobCompleted nor JobFailed is emitted. A failure is logged, reported (ClipRerenderFailed "failed") and swallowed:
     the clip keeps its fields, render_clip's atomic replace keeps its
     previous file, and the chapter gets back the status it had before the
     attempt (``completed`` if it had none). Cancellation propagates.
@@ -529,41 +1240,102 @@ async def _rerender_clip(trigger: Event, bus: AsyncEventBus, store: JobStore) ->
     t0 = time.perf_counter()
     cleanup_root: Path | None = None
     chapter: dict[str, Any] | None = None
+    claim_released = False
+
+    def _release_claim_once() -> None:
+        # Once the file and its record are written the editor may queue the next
+        # re-render; the slow copy steps after must not hold it off (nor, at the
+        # end, release a claim that request took).
+        nonlocal claim_released
+        if not claim_released:
+            claim_released = True
+            release_rerender(clip_id)
+
     prior_chapter_status = "completed"
     try:
         job = await store.get(job_id)
         clip = await store.get_clip(clip_id)
         if clip is None or clip.get("job_id") != job_id:
             log.error("[%s] Re-render skipped: clip %s not found", job_id, clip_id)
+            await _report_rerender_failed(bus, job_id, clip_id, "refused", "the clip no longer exists")
             return
         output_path = clip.get("output_path")
         if not output_path:
             log.error("[%s] Re-render skipped: clip %s was never rendered", job_id, clip_id)
+            await _report_rerender_failed(bus, job_id, clip_id, "refused", "the clip was never rendered")
             return
         if not job.video_path or not Path(job.video_path).is_file():
             log.error(
                 "[%s] Re-render skipped: source video not retained (%s)",
-                job_id, job.video_path,
+                job_id,
+                job.video_path,
             )
+            await _report_rerender_failed(bus, job_id, clip_id, "refused", "the source video is not retained")
             return
 
         chapter = _chapter_for_clip(clip)
         prior_chapter = job.chapters.get(chapter["index"])
         if prior_chapter is not None:
             prior_chapter_status = prior_chapter.status
+        edit: _EditRender | None = None
+        timeline = await store.get_clip_edit(clip_id)
+        if timeline is not None:
+            try:
+                edit = await _job_thread(
+                    job_id,
+                    _plan_saved_edit,
+                    timeline,
+                    video_path=job.video_path,
+                    clip_path=output_path,
+                    clip_start=float(chapter["start"]),
+                    source_range=await _source_range(job_id, job),
+                )
+            except ValueError as exc:
+                # Nothing has been touched yet: the clip, its file and the
+                # chapter status stay as they are.
+                log.warning(
+                    "[%s] Re-render of clip %s refused: its saved edit cannot be rendered; clip left unchanged (%s)",
+                    job_id,
+                    clip_id,
+                    exc,
+                )
+                await _emit(
+                    bus,
+                    EventType.CLIP_RERENDER_FAILED,
+                    job_id,
+                    clip_id=clip_id,
+                    reason="refused",
+                    error=f"the saved edit cannot be rendered: {exc}",
+                )
+                return
+            log.info(
+                "[%s] Re-render of clip %s renders its saved edit  v%d  segments=%d  window=%.3f-%.3fs  style=%s",
+                job_id,
+                clip_id,
+                edit.plan.schema_version,
+                len(edit.plan.video),
+                edit.start,
+                edit.end,
+                edit.plan.caption_style,
+            )
         clips_folder = str(Path(output_path).parent)
-        cleanup_root = Path(clips_folder) / "_tmp" / f"{job_id}-rerender-{clip_id[:8]}"
+        cleanup_root = Path(clips_folder) / "_tmp" / f"{job_id}-rerender-{clip_id[:8]}-{uuid.uuid4().hex[:8]}"
         cleanup_root.mkdir(parents=True, exist_ok=True)
         # A re-render always renders, whatever the job's options said.
         raw_opts = payload.get("pipeline_options") or job.pipeline_options.model_dump()
-        # Words saved by clip discovery: reused instead of re-transcribing.
-        source_words = await asyncio.to_thread(
-            segment_discovery.read_words_sidecar, job.video_path
+        # Words saved by clip discovery: reused instead of re-transcribing
+        # (an edit brings its own words, its captions).
+        source_words = (
+            None
+            if edit is not None
+            else await _job_thread(job_id, segment_discovery.read_words_sidecar, job.video_path)
         )
         if source_words is not None:
             log.info(
                 "[%s] Re-render of clip %s reuses the source words sidecar (%d words)",
-                job_id, clip_id, len(source_words),
+                job_id,
+                clip_id,
+                len(source_words),
             )
         # The payload's reframe_provider is ignored: the provider is the
         # server's settings.reframe_provider (see _reframe_step).
@@ -583,31 +1355,94 @@ async def _rerender_clip(trigger: Event, bus: AsyncEventBus, store: JobStore) ->
             regenerate_copy=bool(payload.get("regenerate_copy", True)),
             source_words=source_words,
             render_to=output_path,
+            edit=edit,
+            on_rendered=_release_claim_once,
         )
         log.info(
             "[%s] Re-render of clip %s done in %.2fs",
-            job_id, clip_id, time.perf_counter() - t0,
+            job_id,
+            clip_id,
+            time.perf_counter() - t0,
         )
     except asyncio.CancelledError:
         log.warning("[%s] Re-render of clip %s cancelled", job_id, clip_id)
+        # A user cancel puts the chapter back, as a failure does; a shutdown
+        # leaves it as it was.
+        if job_id in _user_cancelled:
+
+            async def _restore_and_report() -> None:
+                if chapter is not None:
+                    await _restore_chapter_status(store, job_id, int(chapter["index"]), prior_chapter_status)
+                # The editor waits for this clip's ClipRendered or ClipRerenderFailed.
+                with contextlib.suppress(Exception):
+                    await _emit(
+                        bus,
+                        EventType.CLIP_RERENDER_FAILED,
+                        job_id,
+                        clip_id=clip_id,
+                        reason="cancelled",
+                        error="Re-render cancelled",
+                    )
+
+            await _finish_then_honour_cancel(_restore_and_report())
         raise
-    except Exception:  # noqa: BLE001 — a failed re-render must not fail the job
+    except Exception as exc:  # noqa: BLE001 — a failed re-render must not fail the job
         log.exception(
             "[%s] Re-render of clip %s failed after %.2fs; clip left unchanged",
-            job_id, clip_id, time.perf_counter() - t0,
+            job_id,
+            clip_id,
+            time.perf_counter() - t0,
         )
-        if chapter is not None:
-            await _restore_chapter_status(
-                store, job_id, int(chapter["index"]), prior_chapter_status
-            )
+
+        async def _restore_and_report_failure() -> None:
+            if chapter is not None:
+                await _restore_chapter_status(store, job_id, int(chapter["index"]), prior_chapter_status)
+            await _report_rerender_failed(bus, job_id, clip_id, "failed", str(exc)[:500])
+
+        # A cancel landing meanwhile must not skip the report: the editor waits for it.
+        await _finish_then_honour_cancel(_restore_and_report_failure())
     finally:
         if cleanup_root is not None:
             shutil.rmtree(cleanup_root, ignore_errors=True)
+        # The route's claims (``claim_work``, ``claim_rerender``), however the re-render ended.
+        release_work(job_id)
+        _release_claim_once()
 
 
-async def _restore_chapter_status(
-    store: JobStore, job_id: str, index: int, status: str
+_NO_CUT: Any = object()
+
+
+def _file_identity(path: str) -> tuple[int, int, int] | None:
+    """(inode, mtime_ns, size) of ``path``; None when it does not exist."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_ino, st.st_mtime_ns, st.st_size)
+
+
+async def _set_rendered_segments(
+    store: JobStore, job_id: str, clip_id: str, segments: list[list[float]] | None
 ) -> None:
+    """``clips.rendered_segments``: the source cut the clip's file was made
+    from; ``[]`` = unknown (a render is replacing it), None = the clip's own window."""
+
+    def _set(c: dict[str, Any]) -> None:
+        if segments is _NO_CUT:  # the record had no such key (a store that omits it)
+            c.pop("rendered_segments", None)
+        else:
+            c["rendered_segments"] = segments
+
+    await store.upsert_clip(job_id, clip_id, _set)
+
+
+async def _report_rerender_failed(bus: AsyncEventBus, job_id: str, clip_id: str, reason: str, error: str) -> None:
+    """ClipRerenderFailed for ``clip_id`` (the editor waits for it or ClipRendered)."""
+    with contextlib.suppress(Exception):
+        await _emit(bus, EventType.CLIP_RERENDER_FAILED, job_id, clip_id=clip_id, reason=reason, error=error)
+
+
+async def _restore_chapter_status(store: JobStore, job_id: str, index: int, status: str) -> None:
     """Put a chapter back to ``status`` after a failed re-render (T028a);
     otherwise it stays at the stage that failed, e.g. ``rendering``."""
 
@@ -619,7 +1454,8 @@ async def _restore_chapter_status(
     except Exception:  # noqa: BLE001 — best effort; the re-render already failed
         log.exception(
             "[%s] Could not reset chapter %d status after a failed re-render",
-            job_id, index,
+            job_id,
+            index,
         )
 
 
@@ -651,10 +1487,13 @@ def reprompt_in_flight(job_id: str) -> bool:
     return job_id in _reprompts_in_flight
 
 
-def reprompt_unavailable_reason() -> str | None:
+def reprompt_unavailable_reason(prompt: str | None = None) -> str | None:
     """Why a reprompt cannot propose clips (provider ``chapter`` has no
     proposer), or None when it can. A reprompt of an explicit time range
-    needs no proposer."""
+    needs no proposer, and one whose ``prompt`` scene search takes
+    (``scene_search.enabled``) needs none either."""
+    if scene_search.enabled(prompt):
+        return None
     if settings.segment_provider == "chapter":
         return (
             "clip discovery is off (segment_provider=chapter); set "
@@ -673,9 +1512,7 @@ def _span_chapter(start: float, end: float, safe_end: float) -> dict[str, Any]:
     cstart = max(0.0, float(start))
     cend = min(float(end), safe_end)
     if cend - cstart < segment_discovery.MIN_CHAPTER_SECONDS:
-        raise RuntimeError(
-            f"range {start:g}-{end:g}s is outside the source (it ends at {safe_end:.1f}s)"
-        )
+        raise RuntimeError(f"range {start:g}-{end:g}s is outside the source (it ends at {safe_end:.1f}s)")
     return {
         "index": 0,
         "title": f"Clip {_clock(cstart)}-{_clock(cend)}",
@@ -696,9 +1533,7 @@ def _reprompt_clips_folder(job: JobState, live_clips: list[dict[str, Any]]) -> s
     return str(Path(job.video_path or ".").parent / "clips")
 
 
-def _next_clip_index(
-    job: JobState, live_clips: list[dict[str, Any]], clips_folder: str
-) -> int:
+def _next_clip_index(job: JobState, live_clips: list[dict[str, Any]], clips_folder: str) -> int:
     """One past the highest chapter index the job has used: its chapters, its
     live clips' file names and every ``NN_*`` file in the clips folder (the
     files of retired clips stay on disk), so a new clip never overwrites one."""
@@ -749,38 +1584,42 @@ async def _propose_reprompt_chapters(
                 audio_path, language=language, audio_duration_s=safe_end, repeatable=True
             )
             try:
-                await asyncio.to_thread(
-                    segment_discovery.write_words_sidecar, video_path, words
-                )
+                await _job_thread(job_id, segment_discovery.write_words_sidecar, video_path, words)
             except OSError as e:
                 log.warning("[%s] Could not save the words sidecar: %s", job_id, e)
-        proposer = segment_proposer.get_segment_proposer(
-            min_secs=min_secs, max_secs=max_secs
-        )
-        candidates = await asyncio.to_thread(
-            proposer.propose, words, audio_path, [], safe_end, prompt=prompt
-        )
+        proposer = segment_proposer.get_segment_proposer(min_secs=min_secs, max_secs=max_secs)
+        candidates = await _job_thread(job_id, proposer.propose, words, audio_path, [], safe_end, prompt=prompt)
     finally:
         wav_path.unlink(missing_ok=True)
     kept = segment_discovery.select_discovered(candidates, safe_end)
     chapters = [
         {**c, "index": first_index + c["index"]}
-        for c in segment_discovery.segments_to_chapters(kept, safe_end)
+        for c in _mark_discovered(segment_discovery.segments_to_chapters(kept, safe_end))
     ]
     log.info(
         "[%s] Reprompt proposal  words=%d  candidates=%d  kept=%s",
-        job_id, len(words), len(candidates),
+        job_id,
+        len(words),
+        len(candidates),
         [(c["start"], c["end"], c["virality_score"]) for c in chapters],
     )
     await _emit(
-        bus, EventType.SEGMENTS_PROPOSED, job_id,
-        count=len(chapters), candidates=len(candidates),
+        bus,
+        EventType.SEGMENTS_PROPOSED,
+        job_id,
+        count=len(chapters),
+        candidates=len(candidates),
     )
     for c in chapters:
         await _emit(
-            bus, EventType.SEGMENT_SCORED, job_id,
-            index=c["index"], start=c["start"], end=c["end"],
-            score=c["virality_score"], breakdown=c["score_breakdown"],
+            bus,
+            EventType.SEGMENT_SCORED,
+            job_id,
+            index=c["index"],
+            start=c["start"],
+            end=c["end"],
+            score=c["virality_score"],
+            breakdown=c["score_breakdown"],
         )
     if not chapters:
         raise RuntimeError("the proposer kept no segment for this prompt")
@@ -865,9 +1704,7 @@ async def _reprompt_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> 
         await bus.forget(job_id)
         job = await store.get(job_id)
         if job.status != "completed":
-            raise RuntimeError(
-                f"job is {job.status}; only a completed job can be reprompted"
-            )
+            raise RuntimeError(f"job is {job.status}; only a completed job can be reprompted")
         video_path = job.video_path
         if not video_path or not Path(video_path).is_file():
             raise RuntimeError("source video not retained")
@@ -877,7 +1714,7 @@ async def _reprompt_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> 
         span_start = payload.get("start_seconds")
         span_end = payload.get("end_seconds")
         has_span = span_start is not None and span_end is not None
-        if not has_span and (reason := reprompt_unavailable_reason()):
+        if not has_span and (reason := reprompt_unavailable_reason(prompt)):
             raise RuntimeError(reason)
         opts = _effective_options(job.pipeline_options.model_dump())
         if length_min is not None:
@@ -892,34 +1729,57 @@ async def _reprompt_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> 
         first_index = _next_clip_index(job, old_clips, clips_folder)
         cleanup_root = Path(clips_folder) / "_tmp" / f"{job_id}-reprompt"
         cleanup_root.mkdir(parents=True, exist_ok=True)
-        safe_end = await asyncio.to_thread(clip_service.probe_safe_end, video_path)
-        words = await asyncio.to_thread(
-            segment_discovery.read_words_sidecar, video_path
-        )
+        safe_end = await _job_thread(job_id, clip_service.probe_safe_end, video_path)
+        words = await _job_thread(job_id, segment_discovery.read_words_sidecar, video_path)
         log.info(
             "[%s] Reprompt  first_index=%d  live_clips=%d  words=%s",
-            job_id, first_index, len(old_ids),
+            job_id,
+            first_index,
+            len(old_ids),
             "none (transcribing)" if words is None else f"{len(words)} from the sidecar",
         )
 
         # ── Chapters ──────────────────────────────────────────────────────────
         if has_span:
-            chapters = [
-                {**_span_chapter(span_start, span_end, safe_end), "index": first_index}
-            ]
+            chapters = [{**_span_chapter(span_start, span_end, safe_end), "index": first_index}]
         else:
-            chapters, words = await _propose_reprompt_chapters(
-                job_id=job_id,
-                video_path=video_path,
-                safe_end=safe_end,
-                cleanup_root=cleanup_root,
-                opts=opts,
-                language=language,
-                prompt=prompt,
-                words=words,
-                first_index=first_index,
-                bus=bus,
-            )
+            scene_chapters: list[dict[str, Any]] | None = None
+            if scene_search.enabled(prompt):
+                # Reuses <job folder>/scenes/ when the source is unchanged,
+                # so only the prompt is embedded: seconds, not minutes.
+                assert prompt is not None
+                scene_chapters, words, why = await _scene_chapters(
+                    job_id=job_id,
+                    video_path=video_path,
+                    job_folder=job.destination_folder or str(Path(clips_folder).parent),
+                    safe_end=safe_end,
+                    cleanup_root=cleanup_root,
+                    opts=opts,
+                    language=language,
+                    prompt=prompt,
+                    words=words,
+                    first_index=first_index,
+                    bus=bus,
+                )
+                if scene_chapters == []:
+                    raise RuntimeError(f"no moment of the source matched the prompt{why}")
+            if scene_chapters:
+                chapters = scene_chapters
+            else:
+                if reason := reprompt_unavailable_reason():
+                    raise RuntimeError(f"scene search could not run, and {reason}")
+                chapters, words = await _propose_reprompt_chapters(
+                    job_id=job_id,
+                    video_path=video_path,
+                    safe_end=safe_end,
+                    cleanup_root=cleanup_root,
+                    opts=opts,
+                    language=language,
+                    prompt=prompt,
+                    words=words,
+                    first_index=first_index,
+                    bus=bus,
+                )
         await _emit(bus, EventType.CHAPTERS_DETECTED, job_id, chapters=chapters)
 
         # ── New clips, hidden until every one has rendered ────────────────────
@@ -940,9 +1800,7 @@ async def _reprompt_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> 
                     clips_folder=clips_folder,
                     cleanup_root=cleanup_root,
                     caption_format=payload.get("caption_format", job.caption_format),
-                    target_aspect_ratio=payload.get(
-                        "target_aspect_ratio", job.target_aspect_ratio
-                    ),
+                    target_aspect_ratio=payload.get("target_aspect_ratio", job.target_aspect_ratio),
                     bus=bus,
                     store=store,
                     pipeline_options=opts,
@@ -953,10 +1811,7 @@ async def _reprompt_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> 
 
         try:
             async with asyncio.TaskGroup() as chapter_group:
-                chapter_tasks = [
-                    chapter_group.create_task(_bound(c, cid))
-                    for c, cid in zip(chapters, new_clip_ids)
-                ]
+                chapter_tasks = [chapter_group.create_task(_bound(c, cid)) for c, cid in zip(chapters, new_clip_ids)]
         except ExceptionGroup as group:
             raise group.exceptions[0] from None
         output_paths = [p for p in (t.result() for t in chapter_tasks) if p]
@@ -966,19 +1821,21 @@ async def _reprompt_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> 
             export_dir = str(Path(settings.export_base_folder) / job_id)
         else:
             export_dir = str(Path(clips_folder).parent / "exports")
-        exported_paths = await asyncio.to_thread(
-            export_service.export_clips, output_paths, export_dir
-        )
-        await _emit(bus, EventType.EXPORT_COMPLETED, job_id,
-                    export_dir=export_dir, count=len(exported_paths))
+        exported_paths = await _job_thread(job_id, export_service.export_clips, output_paths, export_dir)
+        await _emit(bus, EventType.EXPORT_COMPLETED, job_id, export_dir=export_dir, count=len(exported_paths))
         path_map = {Path(p).stem: p for p in exported_paths}
         manifest_clips: list[dict[str, Any]] = []
         for clip_id in new_clip_ids:
             clip = dict(await store.get_clip(clip_id, include_retired=True) or {})
             clip["export_path"] = path_map.get(Path(clip.get("output_path") or "").stem, "")
             manifest_clips.append(clip)
-        manifest_path = await asyncio.to_thread(
-            manifest_service.write_manifest, manifest_clips, export_dir
+        manifest_path = await _job_thread(
+            job_id,
+            manifest_service.write_manifest,
+            manifest_clips,
+            export_dir,
+            source=job.source,
+            source_url=job.url,
         )
         await _emit(bus, EventType.MANIFEST_CREATED, job_id, manifest_path=manifest_path)
 
@@ -1000,32 +1857,50 @@ async def _reprompt_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> 
         await store.update(job_id, _record)
         log.info(
             "[%s] Reprompt done in %.2fs  new=%d  retired=%d  paths=%s",
-            job_id, time.perf_counter() - t0, len(new_clip_ids), len(old_ids),
+            job_id,
+            time.perf_counter() - t0,
+            len(new_clip_ids),
+            len(old_ids),
             output_paths,
         )
         await _emit(
-            bus, EventType.JOB_REPROMPTED, job_id,
-            prompt=prompt, clip_ids=new_clip_ids, retired_clip_ids=old_ids,
+            bus,
+            EventType.JOB_REPROMPTED,
+            job_id,
+            prompt=prompt,
+            clip_ids=new_clip_ids,
+            retired_clip_ids=old_ids,
             output_paths=output_paths,
         )
         await _emit(bus, EventType.JOB_COMPLETED, job_id, output_paths=output_paths)
     except asyncio.CancelledError:
         log.warning("[%s] Reprompt cancelled; the job keeps its clips", job_id)
-        await _finish_then_honour_cancel(
-            _undo_reprompt(store, job_id, new_clip_ids, new_indexes, retired_old_ids)
-        )
+        user_cancel = job_id in _user_cancelled
+
+        async def _undo() -> None:
+            await _undo_reprompt(store, job_id, new_clip_ids, new_indexes, retired_old_ids)
+            # A user cancel ends the UI's reprompt; a shutdown has no listener.
+            if user_cancel:
+                await _emit(
+                    bus,
+                    EventType.REPROMPT_FAILED,
+                    job_id,
+                    error="cancelled",
+                    reason="cancelled",
+                )
+
+        await _finish_then_honour_cancel(_undo())
         raise
     except Exception as e:  # noqa: BLE001 — a failed reprompt must not fail the job
         error_text = str(e)
         log.exception(
             "[%s] Reprompt failed after %.2fs; the job keeps its clips",
-            job_id, time.perf_counter() - t0,
+            job_id,
+            time.perf_counter() - t0,
         )
 
         async def _fail() -> None:
-            await _undo_reprompt(
-                store, job_id, new_clip_ids, new_indexes, retired_old_ids
-            )
+            await _undo_reprompt(store, job_id, new_clip_ids, new_indexes, retired_old_ids)
             await _emit(bus, EventType.REPROMPT_FAILED, job_id, error=error_text)
 
         await _finish_then_honour_cancel(_fail())
@@ -1035,9 +1910,7 @@ async def _reprompt_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> 
             shutil.rmtree(cleanup_root, ignore_errors=True)
 
 
-async def _record_failure(
-    bus: AsyncEventBus, store: JobStore, job_id: str, error: str
-) -> None:
+async def _record_failure(bus: AsyncEventBus, store: JobStore, job_id: str, error: str) -> None:
     def _fail(s: JobState) -> None:
         s.status = "failed"
         s.error = error
@@ -1050,6 +1923,26 @@ async def _record_failure(
         failed_step=(await store.get(job_id)).current_step,
         error=error,
     )
+
+
+async def _record_cancel(bus: AsyncEventBus, store: JobStore, job_id: str) -> None:
+    """Mark a user-cancelled job ``cancelled`` and emit ``JobCancelled``.
+
+    Only a job still ``pending`` or ``running`` changes: one that completed
+    or failed just before the cancel landed keeps that outcome, and one the
+    cancel route already marked is not reported twice.
+    """
+    changed = False
+
+    def _cancel(s: JobState) -> None:
+        nonlocal changed
+        if s.status in ("pending", "running"):
+            s.status = "cancelled"
+            changed = True
+
+    state = await store.update(job_id, _cancel)
+    if changed:
+        await _emit(bus, EventType.JOB_CANCELLED, job_id, cancelled_step=state.current_step)
 
 
 async def _finish_then_honour_cancel(coro: Coroutine[Any, Any, None]) -> None:
@@ -1113,17 +2006,28 @@ async def _reframe_step(
         if plan.track is not None:
             log.info(
                 "[%s] Chapter %d  face track (%.2fs)  keyframes=%d  %s",
-                job_id, index, time.perf_counter() - step_t0, len(plan.track), plan.reason,
+                job_id,
+                index,
+                time.perf_counter() - step_t0,
+                len(plan.track),
+                plan.reason,
             )
             return plan.track
         reason = plan.reason
         log.info(
             "[%s] Chapter %d  no face track (%.2fs): %s; letterbox",
-            job_id, index, time.perf_counter() - step_t0, reason,
+            job_id,
+            index,
+            time.perf_counter() - step_t0,
+            reason,
         )
     await _emit(
-        bus, EventType.STAGE_SKIPPED, job_id,
-        stage_id="reframe", chapter_index=index, reason=reason,
+        bus,
+        EventType.STAGE_SKIPPED,
+        job_id,
+        stage_id="reframe",
+        chapter_index=index,
+        reason=reason,
     )
     return None
 
@@ -1145,6 +2049,8 @@ async def _process_chapter(
     regenerate_copy: bool = True,
     source_words: Sequence[Any] | None = None,
     render_to: str | None = None,
+    edit: _EditRender | None = None,
+    on_rendered: Callable[[], None] | None = None,
 ) -> str | None:
     """Process one chapter into a clip; ``clip_id`` updates an existing clip
     in place (re-render) instead of creating a new one.
@@ -1157,6 +2063,13 @@ async def _process_chapter(
     these rebased onto its window instead of a fresh transcription of it.
     ``render_to`` is the reel's path (re-render: the clip's existing file);
     by default ``{index:02d}_{title}.mp4`` in ``clips_folder``.
+
+    ``edit`` (re-render of an edited clip) renders that plan over its source
+    window instead: no audio extraction, transcription, filler removal,
+    captions or B-roll (the plan's captions are the reel's words, and
+    render_clip refuses B-roll with a plan). The clip keeps its start/end:
+    they anchor a v1 edit's reel clock, so moving them would shift that
+    edit on the next re-render.
     """
     index = int(chapter["index"])
     title = chapter["title"]
@@ -1164,8 +2077,16 @@ async def _process_chapter(
     end = float(chapter["end"])
     chapter_duration = end - start
 
-    log.info("[%s] Chapter %d/%d start  title=%r  %.1f–%.1fs (%.1fs)",
-             job_id, index, index, title, start, end, chapter_duration)
+    log.info(
+        "[%s] Chapter %d/%d start  title=%r  %.1f–%.1fs (%.1fs)",
+        job_id,
+        index,
+        index,
+        title,
+        start,
+        end,
+        chapter_duration,
+    )
     chapter_t0 = time.perf_counter()
 
     # TODO(orchestrator-wiring-wave-2): integrate the remaining W1-W3 services.
@@ -1188,6 +2109,16 @@ async def _process_chapter(
     #   * active_speaker_service        — informs reframe; would slot in just
     #                                     before render when reframe=True.
     opts = pipeline_options or PipelineOptions()
+    if edit is not None:
+        opts = opts.model_copy(
+            update={
+                "transcription": False,
+                "captions": False,
+                "audio_enhance": False,
+                "filler_removal": False,
+                "broll": False,
+            }
+        )
     tmp_dir = cleanup_root
 
     def _set_status(state: ChapterArtifacts, status: str) -> None:
@@ -1207,12 +2138,15 @@ async def _process_chapter(
         audio_path = await ffmpeg_tools.to_thread_cancellable(
             clip_service.extract_audio, video_path, start, chapter_duration, wav_path
         )
-        log.info("[%s] Chapter %d  audio extracted (%.2fs)  audio=%s",
-                 job_id, index, time.perf_counter() - step_t0, audio_path)
+        log.info(
+            "[%s] Chapter %d  audio extracted (%.2fs)  audio=%s",
+            job_id,
+            index,
+            time.perf_counter() - step_t0,
+            audio_path,
+        )
         if audio_path is not None:
-            await store.upsert_chapter(
-                job_id, lambda c: setattr(c, "audio_path", audio_path), index
-            )
+            await store.upsert_chapter(job_id, lambda c: setattr(c, "audio_path", audio_path), index)
     # The web UI's "Extract clips" stage (render-gated) still counts this event;
     # there is no intermediate chapter clip any more, so clip_path is None.
     if opts.render:
@@ -1232,7 +2166,9 @@ async def _process_chapter(
     if opts.audio_enhance and audio_path is not None and Path(audio_path).exists():
         log.info(
             "[%s] Chapter %d  enhancing audio  provider=%s",
-            job_id, index, settings.audio_enhance_provider,
+            job_id,
+            index,
+            settings.audio_enhance_provider,
         )
         step_t0 = time.perf_counter()
         enhanced_audio_path = str(tmp_dir / f"chapter_{index}_enhanced.wav")
@@ -1247,25 +2183,30 @@ async def _process_chapter(
             )
             # Hand-off: subsequent stages should read the enhanced track.
             audio_path = enhanced_audio_path
-            await store.upsert_chapter(
-                job_id, lambda c: setattr(c, "audio_path", enhanced_audio_path), index
-            )
+            await store.upsert_chapter(job_id, lambda c: setattr(c, "audio_path", enhanced_audio_path), index)
             log.info(
                 "[%s] Chapter %d  audio enhanced (%.2fs)  path=%s",
-                job_id, index, time.perf_counter() - step_t0, enhanced_audio_path,
+                job_id,
+                index,
+                time.perf_counter() - step_t0,
+                enhanced_audio_path,
             )
         except Exception as exc:  # noqa: BLE001
             # Non-fatal: fall back to the original audio. Enhancement is
             # quality-of-life and must never block the rest of the pipeline.
             log.warning(
                 "[%s] Chapter %d  audio enhancement failed (%s); using original audio",
-                job_id, index, exc,
+                job_id,
+                index,
+                exc,
             )
         else:
             # Emitted here, not by the service: it runs in a worker thread,
             # where emit_from_sync has no event loop and does nothing.
             await _emit(
-                bus, EventType.AUDIO_ENHANCED, job_id,
+                bus,
+                EventType.AUDIO_ENHANCED,
+                job_id,
                 chapter_index=index,
                 provider=settings.audio_enhance_provider,
                 audio_path=enhanced_audio_path,
@@ -1274,22 +2215,34 @@ async def _process_chapter(
         # Nothing to enhance: the chapter is not transcribed again.
         log.info("[%s] Chapter %d  audio_enhance not needed: words reused", job_id, index)
         await _emit(
-            bus, EventType.STAGE_SKIPPED, job_id,
-            stage_id="audio_enhance", chapter_index=index, reason="words reused",
+            bus,
+            EventType.STAGE_SKIPPED,
+            job_id,
+            stage_id="audio_enhance",
+            chapter_index=index,
+            reason="words reused",
         )
     elif not opts.audio_enhance:
         log.info("[%s] Chapter %d  skipping audio_enhance", job_id, index)
         await _emit(
-            bus, EventType.STAGE_SKIPPED, job_id,
-            stage_id="audio_enhance", chapter_index=index,
+            bus,
+            EventType.STAGE_SKIPPED,
+            job_id,
+            stage_id="audio_enhance",
+            chapter_index=index,
         )
 
     # ── Transcribe ────────────────────────────────────────────────────────────
     words = []
     text = ""
     if opts.transcription:
-        log.info("[%s] Chapter %d  transcribing audio  provider=%s  language=%s",
-                 job_id, index, settings.transcription_provider, language)
+        log.info(
+            "[%s] Chapter %d  transcribing audio  provider=%s  language=%s",
+            job_id,
+            index,
+            settings.transcription_provider,
+            language,
+        )
         step_t0 = time.perf_counter()
         await store.upsert_chapter(job_id, lambda c: _set_status(c, "transcribing"), index)
         if reuse_words:
@@ -1298,8 +2251,7 @@ async def _process_chapter(
             words = segment_discovery.rebase_words(source_words, start, end)
             log.info("[%s] Chapter %d  reusing source words", job_id, index)
         elif audio_path is None:
-            log.warning("[%s] Chapter %d  source has no audio; nothing to transcribe",
-                        job_id, index)
+            log.warning("[%s] Chapter %d  source has no audio; nothing to transcribe", job_id, index)
         else:
             # Budget max(setting, chapter length), charged from decode start;
             # a timeout/cancel stops the worker at its next segment.
@@ -1307,8 +2259,13 @@ async def _process_chapter(
                 audio_path, language=language, audio_duration_s=chapter_duration
             )
         text = " ".join(w.word for w in words)
-        log.info("[%s] Chapter %d  transcription done (%.2fs)  words=%d",
-                 job_id, index, time.perf_counter() - step_t0, len(words))
+        log.info(
+            "[%s] Chapter %d  transcription done (%.2fs)  words=%d",
+            job_id,
+            index,
+            time.perf_counter() - step_t0,
+            len(words),
+        )
         await store.upsert_chapter(job_id, lambda c: setattr(c, "transcript", text), index)
         await _emit(bus, EventType.CHAPTER_TRANSCRIBED, job_id, chapter_index=index, text=text)
     else:
@@ -1326,45 +2283,56 @@ async def _process_chapter(
         # For caption/render alignment we want the per-word list filtered, which
         # we do here directly with the filler allowlist.
         allowlist = {f.lower() for f in filler_removal_service.DEFAULT_FILLERS}
-        kept_words = [
-            w for w in words
-            if not filler_removal_service._is_filler(w.word, allowlist)
-        ]
+        kept_words = [w for w in words if not filler_removal_service._is_filler(w.word, allowlist)]
         if kept_words:
             words = kept_words
             text = " ".join(w.word for w in words)
-            await store.upsert_chapter(
-                job_id, lambda c: setattr(c, "transcript", text), index
-            )
+            await store.upsert_chapter(job_id, lambda c: setattr(c, "transcript", text), index)
         log.info(
             "[%s] Chapter %d  filler removal done (%.2fs)  after=%d",
-            job_id, index, time.perf_counter() - step_t0, len(words),
+            job_id,
+            index,
+            time.perf_counter() - step_t0,
+            len(words),
         )
         # words_removed is 0 when nothing matched, or when every word was a
         # filler (the transcript is then kept as is).
         await _emit(
-            bus, EventType.FILLERS_REMOVED, job_id,
+            bus,
+            EventType.FILLERS_REMOVED,
+            job_id,
             chapter_index=index,
             words_removed=words_before - len(words),
             words_kept=len(words),
         )
     elif not opts.filler_removal:
         await _emit(
-            bus, EventType.STAGE_SKIPPED, job_id,
-            stage_id="filler_removal", chapter_index=index,
+            bus,
+            EventType.STAGE_SKIPPED,
+            job_id,
+            stage_id="filler_removal",
+            chapter_index=index,
         )
 
     # ── Captions ──────────────────────────────────────────────────────────────
     captions_obj = None
     captions_path: str | None = None
     if opts.captions and opts.transcription:
-        log.info("[%s] Chapter %d  generating captions  format=%s  words_per_segment=%d",
-                 job_id, index, caption_format, settings.caption_words_per_segment)
+        log.info(
+            "[%s] Chapter %d  generating captions  format=%s  words_per_segment=%d",
+            job_id,
+            index,
+            caption_format,
+            settings.caption_words_per_segment,
+        )
         step_t0 = time.perf_counter()
         await store.upsert_chapter(job_id, lambda c: _set_status(c, "captioning"), index)
-        captions_obj = await asyncio.to_thread(
+        captions_obj = await _job_thread(
+            job_id,
             caption_service.generate_captions_from_word_timings,
-            words, settings.caption_words_per_segment, caption_format,
+            words,
+            settings.caption_words_per_segment,
+            caption_format,
         )
         captions_path = str(tmp_dir / f"chapter_{index}.{caption_format}")
         # Cancellable: a cancelled chapter waits for this write into tmp_dir
@@ -1373,11 +2341,15 @@ async def _process_chapter(
             caption_service.write_captions, captions_obj, caption_format, captions_path
         )
         caption_count = len(captions_obj) if captions_obj is not None else 0
-        log.info("[%s] Chapter %d  captions written (%.2fs)  count=%d  path=%s",
-                 job_id, index, time.perf_counter() - step_t0, caption_count, captions_path)
-        await store.upsert_chapter(
-            job_id, lambda c: setattr(c, "captions_path", captions_path), index
+        log.info(
+            "[%s] Chapter %d  captions written (%.2fs)  count=%d  path=%s",
+            job_id,
+            index,
+            time.perf_counter() - step_t0,
+            caption_count,
+            captions_path,
         )
+        await store.upsert_chapter(job_id, lambda c: setattr(c, "captions_path", captions_path), index)
         await _emit(
             bus,
             EventType.CAPTIONS_GENERATED,
@@ -1395,11 +2367,31 @@ async def _process_chapter(
 
     # ── B-roll (gated on render + broll; settings.broll_provider) ────────────
     broll_inserts, broll_assets = await _broll_step(
-        job_id=job_id, index=index, words=words, duration=chapter_duration,
-        opts=opts, bus=bus,
+        job_id=job_id,
+        index=index,
+        words=words,
+        duration=chapter_duration,
+        opts=opts,
+        bus=bus,
+    )
+
+    # An edit's captions are what the reel shows and says.
+    render_start, render_end = start, end
+    plan_kwargs: dict[str, Any] = {}
+    if edit is not None:
+        words = list(edit.words)
+        text = " ".join(w.word for w in words)
+        render_start, render_end = edit.start, edit.end
+        plan_kwargs["plan"] = edit.plan
+        await store.upsert_chapter(job_id, lambda c: setattr(c, "transcript", text), index)
+
+    # The source cut this render plays, [[start, end], ...] (None: the clip's own window).
+    rendered_segments: list[list[float]] | None = (
+        [[s, e] for s, e in edit.segments] if edit is not None else None
     )
 
     # ── Render final clip (gated on render) ──────────────────────────────────
+    cut_recorded = False
     output_path: str | None = None
     safe_title = _sanitize(title)
     if opts.render:
@@ -1407,30 +2399,86 @@ async def _process_chapter(
         step_t0 = time.perf_counter()
         await store.upsert_chapter(job_id, lambda c: _set_status(c, "rendering"), index)
         output_path = render_to or str(Path(clips_folder) / f"{index:02d}_{safe_title}.mp4")
+        # Over the render window; an edit's crop track counts from its
+        # window's start, as render_clip's plan render expects.
         crop_track = await _reframe_step(
-            job_id=job_id, index=index, video_path=video_path, start=start, end=end,
-            target_aspect_ratio=target_aspect_ratio, opts=opts, bus=bus,
+            job_id=job_id,
+            index=index,
+            video_path=video_path,
+            start=render_start,
+            end=render_end,
+            target_aspect_ratio=target_aspect_ratio,
+            opts=opts,
+            bus=bus,
         )
+        # An existing clip's file is replaced in place: until the new cut is
+        # recorded below, which cut the file holds is unknown (``[]``, which the
+        # editor never matches), so a cancel or crash in between cannot leave
+        # the old cut recorded against the new file.
+        # Only a re-render of a clip that already has a rendered file does this
+        # (``render_to`` is its path); a reprompt's placeholder clip has none.
+        prior_clip = await store.get_clip(clip_id, include_retired=True) if clip_id and render_to else None
+        replaces_file = prior_clip is not None and bool(prior_clip.get("output_path"))
+        prior_cut = prior_clip.get("rendered_segments", _NO_CUT) if replaces_file and prior_clip else _NO_CUT
+        file_before = _file_identity(output_path) if replaces_file else None
+        cut_recorded = replaces_file
         # Reads the SOURCE and trims [start, end) itself — one ffmpeg pass.
         # Cancellation (e.g. this wait_for timing out) kills that ffmpeg.
-        await asyncio.wait_for(
-            ffmpeg_tools.to_thread_cancellable(
-                render_service.render_clip,
-                video_path,
-                output_path,
-                start,
-                end,
-                captions_path,
-                target_aspect_ratio,
-                word_timings=words,
-                broll=broll_inserts,
-                caption_words_per_segment=settings.caption_words_per_segment,
-                crop_track=crop_track,
-            ),
-            timeout=settings.render_timeout_seconds,
+        try:
+            if replaces_file:
+                await _set_rendered_segments(store, job_id, clip_id, [])
+            await asyncio.wait_for(
+                ffmpeg_tools.to_thread_cancellable(
+                    render_service.render_clip,
+                    video_path,
+                    output_path,
+                    render_start,
+                    render_end,
+                    captions_path,
+                    target_aspect_ratio,
+                    word_timings=words,
+                    broll=broll_inserts,
+                    caption_words_per_segment=settings.caption_words_per_segment,
+                    crop_track=crop_track,
+                    **plan_kwargs,
+                ),
+                timeout=settings.render_timeout_seconds,
+            )
+        except BaseException:
+            if replaces_file:
+                # render_clip replaces the file atomically. A cancel or timeout
+                # can still land just after it did (the poll is 100 ms): if the
+                # file changed it holds THIS render, so record this render's cut;
+                # only an untouched file gets the previous cut back.
+                if _file_identity(output_path) == file_before:
+                    await _finish_then_honour_cancel(_set_rendered_segments(store, job_id, clip_id, prior_cut))
+                else:
+                    await _finish_then_honour_cancel(
+                        _set_rendered_segments(store, job_id, clip_id, rendered_segments)
+                    )
+            raise
+        if replaces_file:
+            # The file is the new cut from here on; record it before anything else can fail.
+            await _finish_then_honour_cancel(_set_rendered_segments(store, job_id, clip_id, rendered_segments))
+        log.info(
+            "[%s] Chapter %d  render done (%.2fs)  output=%s", job_id, index, time.perf_counter() - step_t0, output_path
         )
-        log.info("[%s] Chapter %d  render done (%.2fs)  output=%s",
-                 job_id, index, time.perf_counter() - step_t0, output_path)
+        # Every render, re-renders included, so the editor's words are never
+        # stale: this render's words, or none when it made none. An edited
+        # reel's words are its plan's caption words on the reel's clock: the
+        # file now says them, so the editor (and a default timeline, should
+        # the edit be discarded) stays in step with what was rendered.
+        await _record_reel_duration(job_id, index, output_path, edited=edit is not None)
+        if edit is not None:
+            await _write_clip_words(job_id, index, output_path, words, edit.reel_seconds)
+        else:
+            await _write_clip_words(
+                job_id,
+                index,
+                output_path,
+                words if opts.transcription else None,
+                chapter_duration,
+            )
         log.info("[%s] Chapter %d  finished in %.2fs", job_id, index, time.perf_counter() - chapter_t0)
 
         await store.upsert_chapter(
@@ -1444,7 +2492,14 @@ async def _process_chapter(
             job_id,
             chapter_index=index,
             output_path=output_path,
+            # Set only by a re-render of an existing clip (a reprompt makes new
+            # clip ids): the editor waits for its own clip's file to change.
+            **({"clip_id": clip_id} if clip_id else {}),
+            # The cut the file was made from (None: the clip's own window).
+            segments=rendered_segments,
         )
+        if on_rendered is not None:
+            on_rendered()
     else:
         log.info("[%s] Chapter %d  skipping render (render=False)", job_id, index)
         await _emit(bus, EventType.STAGE_SKIPPED, job_id, stage_id="render", chapter_index=index)
@@ -1470,11 +2525,14 @@ async def _process_chapter(
             # Named after the reel: {index:02d}_{title}_thumb.jpg by default.
             reel = Path(output_path)
             thumbnail_out = str(reel.with_name(f"{reel.stem}_thumb.jpg"))
-            thumbnail_path = await asyncio.to_thread(
-                thumbnail_service.generate_thumbnail, output_path, thumbnail_out
+            thumbnail_path = await _job_thread(job_id, thumbnail_service.generate_thumbnail, output_path, thumbnail_out)
+            log.info(
+                "[%s] Chapter %d  thumbnail generated (%.2fs)  path=%s",
+                job_id,
+                index,
+                time.perf_counter() - step_t0,
+                thumbnail_path,
             )
-            log.info("[%s] Chapter %d  thumbnail generated (%.2fs)  path=%s",
-                     job_id, index, time.perf_counter() - step_t0, thumbnail_path)
             await _emit(bus, EventType.THUMBNAIL_GENERATED, job_id, chapter_index=index, thumbnail_path=thumbnail_path)
         except Exception as e:  # noqa: BLE001
             log.warning("[%s] Chapter %d  thumbnail failed: %s", job_id, index, e)
@@ -1484,20 +2542,29 @@ async def _process_chapter(
 
     # ── Upsert clip record ────────────────────────────────────────────────────
     def _init_clip(c: dict[str, Any]) -> None:
-        c.update({
-            "start": start,
-            "end": end,
-            "output_path": output_path,
-            "thumbnail_path": thumbnail_path,
-            "transcript": text,
-            "broll_assets": broll_assets,
-        })
+        c.update(
+            {
+                "start": start,
+                "end": end,
+                "output_path": output_path,
+                "thumbnail_path": thumbnail_path,
+                "transcript": text,
+                "broll_assets": broll_assets,
+                # A re-render of an existing file recorded its cut right after the
+                # render; writing it again here could clobber a newer re-render's.
+                **({"rendered_segments": rendered_segments} if opts.render and not cut_recorded else {}),
+            }
+        )
         if regenerate_copy:
             c["title"] = title
         # Clip discovery's score fields (absent on chapter-based clips).
         for key in ("virality_score", "score_breakdown", "summary"):
             if key in chapter:
                 c[key] = chapter[key]
+        # How the segment was produced; a chapter without it (a re-render's
+        # rebuilt chapter, a reprompt range) leaves the clip's value alone.
+        if chapter.get("segment_origin"):
+            c["segment_origin"] = chapter["segment_origin"]
 
     await store.upsert_clip(job_id, clip_id, _init_clip)
 
@@ -1507,16 +2574,17 @@ async def _process_chapter(
     # meaningful, so we skip silently when transcription was off or empty.
     if not regenerate_copy:
         log.info(
-            "[%s] Chapter %d  keeping title, summary, hashtags and AI hook "
-            "(regenerate_copy=False)",
-            job_id, index,
+            "[%s] Chapter %d  keeping title, summary, hashtags and AI hook (regenerate_copy=False)",
+            job_id,
+            index,
         )
         return output_path
     if opts.ai_hook and text.strip():
         log.info("[%s] Chapter %d  generating AI hook  model=%s", job_id, index, settings.ollama_model)
         step_t0 = time.perf_counter()
         try:
-            hook = await asyncio.to_thread(
+            hook = await _job_thread(
+                job_id,
                 ai_hook_service.generate_hook,
                 text,
                 base_url=settings.ollama_base_url,
@@ -1529,29 +2597,41 @@ async def _process_chapter(
             hook = ""
 
         if hook:
+
             def _set_hook(c: dict[str, Any]) -> None:
                 c["ai_hook_text"] = hook
 
             await store.upsert_clip(job_id, clip_id, _set_hook)
             log.info(
                 "[%s] Chapter %d  ai_hook done (%.2fs)  hook=%r",
-                job_id, index, time.perf_counter() - step_t0, hook,
+                job_id,
+                index,
+                time.perf_counter() - step_t0,
+                hook,
             )
             await _emit(
-                bus, EventType.AI_HOOK_GENERATED, job_id,
-                chapter_index=index, clip_id=clip_id, hook=hook,
+                bus,
+                EventType.AI_HOOK_GENERATED,
+                job_id,
+                chapter_index=index,
+                clip_id=clip_id,
+                hook=hook,
             )
         else:
             log.info("[%s] Chapter %d  ai_hook returned empty; skipping", job_id, index)
     elif not opts.ai_hook:
         await _emit(
-            bus, EventType.STAGE_SKIPPED, job_id,
-            stage_id="ai_hook", chapter_index=index,
+            bus,
+            EventType.STAGE_SKIPPED,
+            job_id,
+            stage_id="ai_hook",
+            chapter_index=index,
         )
 
     # ── Social content ────────────────────────────────────────────────────────
     if settings.ollama_enabled:
-        description, hashtags = await asyncio.to_thread(
+        description, hashtags = await _job_thread(
+            job_id,
             ollama_service.generate_social_content,
             title,
             text,
@@ -1565,19 +2645,69 @@ async def _process_chapter(
     def _update_social(c: dict[str, Any]) -> None:
         # Without a generated description a discovered clip keeps the
         # proposer's summary; chapter-based clips are unchanged.
-        c["summary"] = (
-            description if description or "summary" not in chapter
-            else chapter["summary"]
-        )
+        c["summary"] = description if description or "summary" not in chapter else chapter["summary"]
         c["hashtags"] = hashtags
 
     await store.upsert_clip(job_id, clip_id, _update_social)
     await _emit(
-        bus, EventType.SOCIAL_CONTENT_GENERATED, job_id,
-        chapter_index=index, description=description, hashtag_count=len(hashtags),
+        bus,
+        EventType.SOCIAL_CONTENT_GENERATED,
+        job_id,
+        chapter_index=index,
+        description=description,
+        hashtag_count=len(hashtags),
     )
 
     return output_path
+
+
+async def _record_reel_duration(job_id: str, index: int, output_path: str, *, edited: bool) -> None:
+    """An edited reel's length is its plan's, not the clip's ``end - start``
+    (which stays: it anchors a v1 edit): record the rendered file's real
+    duration (``clip_words.write_reel_duration``) for the manifest and the
+    editor's default timeline. A render of the clip's window forgets any
+    recorded length. A failure is logged, not raised (``end - start`` then
+    holds)."""
+    try:
+        if not edited:
+            await ffmpeg_tools.to_thread_cancellable(clip_words.clear_reel_duration, output_path)
+            return
+        seconds = await ffmpeg_tools.to_thread_cancellable(ffmpeg_tools.duration, output_path)
+        path = await ffmpeg_tools.to_thread_cancellable(clip_words.write_reel_duration, output_path, seconds)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - the clip's window length then holds
+        log.warning("[%s] Chapter %d  reel duration not recorded: %s", job_id, index, exc)
+        with contextlib.suppress(OSError):
+            clip_words.clear_reel_duration(output_path)
+        return
+    log.info("[%s] Chapter %d  edited reel is %.3fs  (%s)", job_id, index, seconds, path)
+
+
+async def _write_clip_words(
+    job_id: str,
+    index: int,
+    output_path: str,
+    words: Sequence[Any] | None,
+    duration: float,
+) -> None:
+    """Cache the reel's words (clip clock, the words its captions show) for
+    the editor (``clip_words.clip_words_path``); ``words=None`` (no
+    transcription) removes a cached set instead. A failure is logged, not
+    raised: the editor transcribes the clip on its first open instead."""
+    try:
+        # Cancellable like the caption write: a cancel waits for this small
+        # write to finish, so the job's cleanup never races it.
+        if words is None:
+            await ffmpeg_tools.to_thread_cancellable(clip_words.clear_clip_words, output_path)
+            return
+        rebased = clip_words.clip_window_words(words, duration)
+        path = await ffmpeg_tools.to_thread_cancellable(clip_words.write_clip_words, output_path, rebased)
+    except OSError as exc:
+        log.warning("[%s] Chapter %d  clip words sidecar not written: %s", job_id, index, exc)
+        return
+    if path is not None:
+        log.info("[%s] Chapter %d  clip words sidecar written  words=%d  path=%s", job_id, index, len(rebased), path)
 
 
 async def _broll_step(
@@ -1634,22 +2764,29 @@ async def _broll_step(
                 ]  # fmt: skip
                 log.info(
                     "[%s] Chapter %d  B-roll (%.2fs)  provider=%s  inserts=%s",
-                    job_id, index, time.perf_counter() - step_t0, provider_name,
+                    job_id,
+                    index,
+                    time.perf_counter() - step_t0,
+                    provider_name,
                     [(a["query"], a["start"], a["asset_id"]) for a in assets],
                 )
                 await _emit(
-                    bus, EventType.BROLL_APPLIED, job_id,
-                    chapter_index=index, provider=provider_name, assets=assets,
+                    bus,
+                    EventType.BROLL_APPLIED,
+                    job_id,
+                    chapter_index=index,
+                    provider=provider_name,
+                    assets=assets,
                 )
                 return inserts, assets
-            reason = (
-                f"no B-roll found for: {', '.join(p.query for p in plan)}"
-                if plan
-                else "no keyword to illustrate"
-            )
+            reason = f"no B-roll found for: {', '.join(p.query for p in plan)}" if plan else "no keyword to illustrate"
     log.info("[%s] Chapter %d  no B-roll: %s", job_id, index, reason)
     await _emit(
-        bus, EventType.STAGE_SKIPPED, job_id,
-        stage_id="broll", chapter_index=index, reason=reason,
+        bus,
+        EventType.STAGE_SKIPPED,
+        job_id,
+        stage_id="broll",
+        chapter_index=index,
+        reason=reason,
     )
     return None, None

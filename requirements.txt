@@ -29,6 +29,10 @@ faster-whisper==1.2.1
 ctranslate2==4.8.2
 tokenizers==0.23.2
 onnxruntime==1.30.0
+# Voice-over (spec 016): Piper TTS, abi3 wheel (works on 3.14); voices are
+# fetched by scripts/fetch_piper_voice.py, never at import.
+piper-tts==1.8.0
+pathvalidate==3.3.1  # piper-tts dependency
 huggingface-hub==1.33.0  # tokenizers 0.23 caps hub <2.0
 pysrt==1.1.2
 webvtt-py==0.5.1

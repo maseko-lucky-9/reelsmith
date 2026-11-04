@@ -1,0 +1,472 @@
+{
+ "note": "Hand labelled from contact sheets of frames sampled every 4 s (viewed by the author) and a faster-whisper base transcript. spans are [start_s, end_s] in the source video. A retrieved chunk is a hit when it overlaps a span by >= min(2 s, half the span). speech prompts: on_screen_text=true means the words are also burned in as captions (an embedding of frames can see them); false means audio only.",
+ "videos": {
+  "satellite": "How_This__800_Satellite_Dish_Intercepts_Government_Data__bigtech__job-31a37620/How This $800 Satellite Dish Intercepts Government Data #bigtech #job....mp4",
+  "tesla": "Tesla_just_released_a_flying_car__Here_s_what_you_need_to_know_about-43b24de3/Tesla just released a flying car! Here's what you need to know about ....mp4",
+  "alcohol": "How_To_Know_if_You_Have_a_Problem_With_Alcohol-3165144e/How To Know if You Have a Problem With Alcohol.mp4",
+  "mutation": "Mutation_testing_is_AWESOME-bbe3b7ef/Mutation testing is AWESOME.mp4",
+  "prayer": "Prayer_to_break_the_most_difficult_temptation___lust__temptations__Go-2c738beb/Prayer to break the most difficult temptation. #lust #temptations #Go....mp4",
+  "lawfirm": "I_Built_a_Private_AI_That_Makes_Law_Firms_an_Extra__100K_a_Year__tech-e3bdfbee/I Built a Private AI That Makes Law Firms an Extra $100K a Year #tech....mp4"
+ },
+ "prompts": [
+  {
+   "id": "tes01",
+   "video": "tesla",
+   "category": "visual",
+   "text": "a Tesla car with rocket thrusters taking off in a cloud of white smoke",
+   "spans": [
+    [
+     0,
+     16
+    ]
+   ],
+   "evidence": "frames 0s/4s/8s: car on thrusters, smoke plume"
+  },
+  {
+   "id": "tes02",
+   "video": "tesla",
+   "category": "visual",
+   "text": "a Tesla Roadster floating in space with planet Earth behind it",
+   "spans": [
+    [
+     72,
+     80
+    ]
+   ],
+   "evidence": "frames 72s/76s: red car, Earth"
+  },
+  {
+   "id": "tes03",
+   "video": "tesla",
+   "category": "visual",
+   "text": "close up of round rocket thruster nozzles on a black car",
+   "spans": [
+    [
+     100,
+     106
+    ]
+   ],
+   "evidence": "frames 100s/104s"
+  },
+  {
+   "id": "tes04",
+   "video": "tesla",
+   "category": "visual",
+   "text": "a sleek white futuristic sports car on a white background",
+   "spans": [
+    [
+     92,
+     99
+    ]
+   ],
+   "evidence": "frames 92s/96s"
+  },
+  {
+   "id": "tes05",
+   "video": "tesla",
+   "category": "speech",
+   "text": "you can reserve one for a 50k dollar deposit",
+   "spans": [
+    [
+     94,
+     99
+    ],
+    [
+     103,
+     108
+    ]
+   ],
+   "evidence": "burned captions at 96s ($50k) and 104s ($250k)",
+   "on_screen_text": true
+  },
+  {
+   "id": "tes06",
+   "video": "tesla",
+   "category": "emotion",
+   "text": "a man with glasses looking sceptical and gesturing with his hands while talking",
+   "spans": [
+    [
+     108,
+     121
+    ]
+   ],
+   "evidence": "frames 108s-120s: raised eyebrows, hand gestures"
+  },
+  {
+   "id": "alc07",
+   "video": "alcohol",
+   "category": "visual",
+   "text": "ice and liquid being poured into a glass, close up",
+   "spans": [
+    [
+     0,
+     4
+    ]
+   ],
+   "evidence": "frame 0s"
+  },
+  {
+   "id": "alc08",
+   "video": "alcohol",
+   "category": "visual",
+   "text": "a bearded man smiling in a dim bar with drinks on the table",
+   "spans": [
+    [
+     8,
+     12
+    ]
+   ],
+   "evidence": "frame 8s"
+  },
+  {
+   "id": "alc09",
+   "video": "alcohol",
+   "category": "visual",
+   "text": "a rolled joint and white powder on a dark surface",
+   "spans": [
+    [
+     12,
+     16
+    ]
+   ],
+   "evidence": "frame 12s"
+  },
+  {
+   "id": "alc10",
+   "video": "alcohol",
+   "category": "emotion",
+   "text": "a sad man sitting alone in the dark, head bowed in despair",
+   "spans": [
+    [
+     35,
+     40
+    ],
+    [
+     48,
+     52
+    ]
+   ],
+   "evidence": "frames 36s silhouette, 48s head down"
+  },
+  {
+   "id": "alc11",
+   "video": "alcohol",
+   "category": "emotion",
+   "text": "a lonely man in a crowded purple nightclub",
+   "spans": [
+    [
+     52,
+     56
+    ]
+   ],
+   "evidence": "frame 52s"
+  },
+  {
+   "id": "alc12",
+   "video": "alcohol",
+   "category": "speech",
+   "text": "performative contradiction when you act against your moral beliefs",
+   "spans": [
+    [
+     38,
+     52
+    ]
+   ],
+   "evidence": "transcript 41.8-54.7 plus captions",
+   "on_screen_text": true
+  },
+  {
+   "id": "pra13",
+   "video": "prayer",
+   "category": "visual",
+   "text": "an older grey haired man in a red fleece jacket praying with his eyes closed",
+   "spans": [
+    [
+     0,
+     42
+    ]
+   ],
+   "evidence": "frames 0s-40s, log cabin wall"
+  },
+  {
+   "id": "pra14",
+   "video": "prayer",
+   "category": "visual",
+   "text": "a young man with messy hair in a plaid shirt praying with eyes closed in a wooden cabin",
+   "spans": [
+    [
+     44,
+     79
+    ]
+   ],
+   "evidence": "frames 44s-76s"
+  },
+  {
+   "id": "pra15",
+   "video": "prayer",
+   "category": "speech",
+   "text": "the power of the Holy Spirit that raised Jesus from the dead lives inside of you",
+   "spans": [
+    [
+     51,
+     61
+    ]
+   ],
+   "evidence": "transcript 51.4-60.3, no matching caption",
+   "on_screen_text": false
+  },
+  {
+   "id": "mut16",
+   "video": "mutation",
+   "category": "visual",
+   "text": "the AIhero.dev logo banner, go from zero to AI hero",
+   "spans": [
+    [
+     3,
+     8
+    ]
+   ],
+   "evidence": "frame 4s"
+  },
+  {
+   "id": "mut17",
+   "video": "mutation",
+   "category": "visual",
+   "text": "dark code editor with red marked lines above a man at a microphone",
+   "spans": [
+    [
+     12,
+     46
+    ]
+   ],
+   "evidence": "frames 12s-44s split screen"
+  },
+  {
+   "id": "mut18",
+   "video": "mutation",
+   "category": "speech",
+   "text": "a surviving mutant is a mutant that needs to be killed",
+   "spans": [
+    [
+     22,
+     32
+    ]
+   ],
+   "evidence": "transcript 20.6-32.0 plus captions at 28s",
+   "on_screen_text": true
+  },
+  {
+   "id": "mut19",
+   "video": "mutation",
+   "category": "speech",
+   "text": "I used striker.js for TypeScript",
+   "spans": [
+    [
+     52,
+     58
+    ]
+   ],
+   "evidence": "caption at 52s",
+   "on_screen_text": true
+  },
+  {
+   "id": "law20",
+   "video": "lawfirm",
+   "category": "visual",
+   "text": "a phone lock screen showing 7:30 in the morning",
+   "spans": [
+    [
+     55,
+     60
+    ]
+   ],
+   "evidence": "frame 56s"
+  },
+  {
+   "id": "law21",
+   "video": "lawfirm",
+   "category": "visual",
+   "text": "a scanned paper document with a red stamp",
+   "spans": [
+    [
+     66,
+     72
+    ]
+   ],
+   "evidence": "frame 68s"
+  },
+  {
+   "id": "law22",
+   "video": "lawfirm",
+   "category": "visual",
+   "text": "diagram of a crossed out cloud above local servers and lawyer faces",
+   "spans": [
+    [
+     88,
+     97
+    ]
+   ],
+   "evidence": "frames 88s/92s"
+  },
+  {
+   "id": "law23",
+   "video": "lawfirm",
+   "category": "speech",
+   "text": "module two, intake: the AI picks up the phone call at 9pm",
+   "spans": [
+    [
+     41,
+     54
+    ]
+   ],
+   "evidence": "transcript 40.5-50.6 plus caption 'Module two: intake.' at 44s",
+   "on_screen_text": true
+  },
+  {
+   "id": "sat24",
+   "video": "satellite",
+   "category": "visual",
+   "text": "a Radio Shack sign on a wall",
+   "spans": [
+    [
+     90,
+     95
+    ]
+   ],
+   "evidence": "frame 92s"
+  },
+  {
+   "id": "sat25",
+   "video": "satellite",
+   "category": "visual",
+   "text": "four people standing next to a white satellite dish on a rooftop",
+   "spans": [
+    [
+     11,
+     16
+    ]
+   ],
+   "evidence": "frame 12s"
+  },
+  {
+   "id": "sat26",
+   "video": "satellite",
+   "category": "visual",
+   "text": "a navy warship at sea seen from the deck of a ship",
+   "spans": [
+    [
+     256,
+     264
+    ]
+   ],
+   "evidence": "frames 256s/260s"
+  },
+  {
+   "id": "sat27",
+   "video": "satellite",
+   "category": "visual",
+   "text": "the Signal messenger app on a phone screen",
+   "spans": [
+    [
+     326,
+     331
+    ]
+   ],
+   "evidence": "frame 328s"
+  },
+  {
+   "id": "sat28",
+   "video": "satellite",
+   "category": "visual",
+   "text": "Wireshark packet capture window on a dark screen",
+   "spans": [
+    [
+     162,
+     168
+    ]
+   ],
+   "evidence": "frame 164s"
+  },
+  {
+   "id": "sat29",
+   "video": "satellite",
+   "category": "visual",
+   "text": "the US Capitol building lit up at night, aerial view",
+   "spans": [
+    [
+     106,
+     111
+    ]
+   ],
+   "evidence": "frame 108s"
+  },
+  {
+   "id": "sat30",
+   "video": "satellite",
+   "category": "emotion",
+   "text": "a woman in sunglasses laughing happily on a sunny rooftop",
+   "spans": [
+    [
+     210,
+     219
+    ]
+   ],
+   "evidence": "frames 212s/216s"
+  },
+  {
+   "id": "sat31",
+   "video": "satellite",
+   "category": "emotion",
+   "text": "a smiling man in a blue shirt outdoors under a clear blue sky",
+   "spans": [
+    [
+     223,
+     236
+    ]
+   ],
+   "evidence": "frames 224s-232s"
+  },
+  {
+   "id": "sat32",
+   "video": "satellite",
+   "category": "speech",
+   "text": "they found a radar system for the Mexican Navy used to watch boats off the coast",
+   "spans": [
+    [
+     251,
+     263
+    ]
+   ],
+   "evidence": "transcript 250.7-262.6, no captions",
+   "on_screen_text": false
+  },
+  {
+   "id": "sat33",
+   "video": "satellite",
+   "category": "speech",
+   "text": "the encryption was not even turned on at all",
+   "spans": [
+    [
+     165,
+     171
+    ]
+   ],
+   "evidence": "transcript 165.1-170.4, no captions",
+   "on_screen_text": false
+  },
+  {
+   "id": "sat34",
+   "video": "satellite",
+   "category": "speech",
+   "text": "the TV tuner sold out worldwide within weeks of publishing the paper",
+   "spans": [
+    [
+     346,
+     352
+    ]
+   ],
+   "evidence": "transcript 346.2-351.8, no captions",
+   "on_screen_text": false
+  }
+ ]
+}
