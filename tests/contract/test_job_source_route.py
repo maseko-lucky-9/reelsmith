@@ -225,3 +225,31 @@ def test_auth_required(root, source, monkeypatch):
         assert ok.status_code == 206
         bearer = client.get(url, headers={"Authorization": "Bearer test-key"})
         assert bearer.status_code == 200
+
+
+def test_file_vanishing_after_the_checks_is_404_not_500(client, source, monkeypatch):
+    """The file is deleted between the path checks and the open."""
+    _seed(client, str(source))
+    real_open = os.open
+
+    def vanish(path, *a, **kw):
+        if str(path) == str(source.resolve()):
+            source.unlink()
+        return real_open(path, *a, **kw)
+
+    monkeypatch.setattr(os, "open", vanish)
+    r = client.get(f"/jobs/{JOB}/source")
+    assert r.status_code == 404
+    assert r.json() == NOT_RETAINED
+
+
+def test_non_latin1_source_name_is_200(client, root):
+    folder = root / JOB
+    folder.mkdir()
+    path = folder / "旅｜日本：1.mp4"
+    path.write_bytes(DATA)
+    _seed(client, str(path))
+    r = client.get(f"/jobs/{JOB}/source")
+    assert r.status_code == 200
+    assert r.content == DATA
+    assert r.headers["content-disposition"].startswith("inline; filename=")

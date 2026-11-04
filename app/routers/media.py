@@ -2,10 +2,13 @@
 source video."""
 from __future__ import annotations
 
+import os
 import re
+import stat
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
@@ -31,8 +34,31 @@ _SOURCE_MEDIA_TYPES = {
 }
 
 
-def _iter_file(path: Path, start: int, length: int) -> Iterator[bytes]:
-    with open(path, "rb") as f:
+def content_disposition(disposition: str, name: str) -> str:
+    """An RFC 6266 / 5987 ``Content-Disposition`` value for ``name``.
+
+    The plain ``filename`` is an ASCII fallback (``"``, ``\\``, control and
+    non-ASCII characters become ``_``); ``filename*`` carries the exact name
+    percent-encoded as UTF-8 (only when it differs from the fallback), so the header is always Latin-1 safe and cannot
+    be broken or injected through a file name.
+    """
+    fallback = "".join(
+        c if " " <= c < "\x7f" and c not in '"\\' else "_" for c in name
+    )
+    value = f'{disposition}; filename="{fallback}"'
+    return value if fallback == name else f"{value}; filename*=utf-8''{quote(name, safe='')}"
+
+
+class _FileResponse(StreamingResponse):
+    """Streams an already-open file and closes it when the response ends,
+    however it ends (done, client abort, cancellation)."""
+
+    def __init__(self, f: BinaryIO, start: int, length: int, **kwargs: Any) -> None:
+        self._file = f
+        super().__init__(self._iter(f, start, length), **kwargs)
+
+    @staticmethod
+    def _iter(f: BinaryIO, start: int, length: int) -> Iterator[bytes]:
         f.seek(start)
         remaining = length
         while remaining > 0:
@@ -42,6 +68,31 @@ def _iter_file(path: Path, start: int, length: int) -> Iterator[bytes]:
             remaining -= len(data)
             yield data
 
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._file.close()
+
+
+def _open_regular(path: Path, missing_detail: str) -> tuple[BinaryIO, int]:
+    """Open ``path`` once (never following a final symlink where the OS can)
+    and size it from the descriptor, so a file removed or swapped after the
+    caller's checks is a 404, not a 500 or a wrong size."""
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        raise HTTPException(status_code=404, detail=missing_detail) from None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise HTTPException(status_code=404, detail=missing_detail)
+        return os.fdopen(fd, "rb"), st.st_size
+    except BaseException:
+        os.close(fd)
+        raise
+
 
 def range_response(
     path: Path,
@@ -49,6 +100,7 @@ def range_response(
     *,
     media_type: str,
     disposition: str,
+    missing_detail: str = "file not found",
 ) -> Response:
     """Answer a request for ``path`` honouring one ``Range``.
 
@@ -62,30 +114,35 @@ def range_response(
         range_header: The request's ``Range`` header, if any.
         media_type: The ``Content-Type``.
         disposition: ``inline`` or ``attachment``; the file name is added.
+        missing_detail: The 404 ``detail`` if the file cannot be opened.
+
+    Raises:
+        HTTPException: 404 when the file is gone or is not a regular file.
     """
-    size = path.stat().st_size
+    f, size = _open_regular(path, missing_detail)
     headers = {
         "Accept-Ranges": "bytes",
-        "Content-Disposition": f'{disposition}; filename="{path.name}"',
+        "Content-Disposition": content_disposition(disposition, path.name),
     }
     m = _RANGE_RE.fullmatch(range_header.strip()) if range_header else None
     if m is None:
-        return StreamingResponse(
-            _iter_file(path, 0, size),
-            media_type=media_type,
-            headers={**headers, "Content-Length": str(size)},
+        return _FileResponse(
+            f, 0, size, media_type=media_type, headers={**headers, "Content-Length": str(size)}
         )
     start = int(m.group(1))
     end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
     if start >= size or start > end:
+        f.close()
         return JSONResponse(
             {"detail": "range not satisfiable"},
             status_code=416,
             headers={"Content-Range": f"bytes */{size}"},
         )
     length = end - start + 1
-    return StreamingResponse(
-        _iter_file(path, start, length),
+    return _FileResponse(
+        f,
+        start,
+        length,
         status_code=206,
         media_type=media_type,
         headers={
@@ -157,6 +214,7 @@ async def stream_job_source(job_id: str, request: Request):
         request.headers.get("range"),
         media_type=_SOURCE_MEDIA_TYPES.get(path.suffix.lower(), "application/octet-stream"),
         disposition="inline",
+        missing_detail="source video not retained",
     )
 
 

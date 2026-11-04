@@ -28,7 +28,7 @@ The job's source video, read-only, for the editor's clean preview. Also answers 
 
 ## Shared range rules (`GET /clips/{clip_id}/video` too)
 
-The range parsing and the 200/206/416 answers above are one helper used by both routes. The clip route keeps its `video/mp4` type and `attachment` disposition; its only behaviour change is the 416 (today a start past the end gives a 206 with a zero or negative `Content-Length`, `media.py:46-49`).
+The range parsing and the 200/206/416 answers above are one helper used by both routes. `Content-Disposition` is `<disposition>; filename="<ascii fallback>"`, plus `; filename*=utf-8''<percent-encoded name>` when the name has any character outside printable ASCII or a `"`/`\`/control character (those become `_` in the fallback), so the header is always Latin-1 safe and cannot be injected through a file name (`content_disposition()`). The file is opened once (`O_NOFOLLOW` where available, sized with `fstat`) and closed when the response ends, aborted or not; a file that vanishes, or is not a regular file, after the route's checks is the same 404 (`source video not retained` on the source route). The clip route keeps its `video/mp4` type and `attachment` disposition; its only behaviour change is the 416 (today a start past the end gives a 206 with a zero or negative `Content-Length`, `media.py:46-49`).
 
 ## Contract tests (each must fail when its rule is broken)
 
@@ -38,6 +38,7 @@ The range parsing and the 200/206/416 answers above are one helper used by both 
 4. 206 with E past the end: clamped to `size - 1`.
 5. 416 for `bytes=<size>-` and for `bytes=50-10`, with `Content-Range: bytes */<size>`; the clip route answers the same 416.
 6. 200 for `bytes=-500` (suffix range not supported: whole file).
+6a. A non-Latin-1 name (CJK, emoji, full-width) is 200 with `filename*`; a name with `"`, `\`, CR or LF yields a safe header; the file handle is closed after a mid-stream abort; a file removed between the checks and the open is 404.
 7. 404 unknown job; 404 `video_path` None; 404 file missing; 404 path outside the download folder (a real file in `tmp_path` outside `YTVIDEO_DEFAULT_DOWNLOAD_PATH`); 404 for a symlink inside the download folder pointing outside it; 404 for a stored path with `..`, a relative path and a NUL byte; none of the 404 bodies contains the stored path.
 8. 409 while the job is marked deleting.
 9. `/api/jobs/{id}/source` answers like `/jobs/{id}/source`.
