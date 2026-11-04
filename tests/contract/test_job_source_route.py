@@ -94,6 +94,14 @@ def test_end_past_the_file_is_clamped(client, source):
     assert r.headers["content-range"] == "bytes 900-999/1000"
 
 
+@pytest.mark.parametrize("header", ["bytes=" + "9" * 5000 + "-", "bytes=0-" + "9" * 5000])
+def test_absurdly_long_range_numbers_get_the_whole_file_not_a_500(client, source, header):
+    _seed(client, str(source))
+    r = client.get(f"/jobs/{JOB}/source", headers={"Range": header})
+    assert r.status_code == 200
+    assert r.content == DATA
+
+
 @pytest.mark.parametrize("header", ["bytes=1000-", "bytes=50-10"])
 def test_unsatisfiable_range_is_416(client, source, header):
     _seed(client, str(source))

@@ -21,8 +21,9 @@ router = APIRouter(prefix="/clips", tags=["media"])
 jobs_router = APIRouter(prefix="/jobs", tags=["media"])
 
 # One range only: ``bytes=<start>-<end?>``. Suffix ranges (``bytes=-500``),
-# several ranges and other units do not match and get the whole file.
-_RANGE_RE = re.compile(r"bytes=(\d+)-(\d*)")
+# several ranges, other units and numbers longer than 19 digits (``int()``
+# raises past 4300 digits; no file is that big) do not match and get the whole file.
+_RANGE_RE = re.compile(r"bytes=(\d{1,19})-(\d{0,19})")
 _CHUNK = 65536
 
 _SOURCE_MEDIA_TYPES = {
