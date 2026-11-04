@@ -9,10 +9,14 @@
 import { create } from "zustand";
 import type { TimelinePayload } from "@/api/client";
 import {
+  longEnough,
+  MAX_SEGMENTS,
   MIN_SEGMENT_SECONDS,
   segmentsOf,
+  segmentsRefusal,
   setSegments,
   splitAt,
+  splitPoint,
   type Segment,
   type SourceWindow,
 } from "@/lib/timelineEdit";
@@ -91,6 +95,7 @@ const REFUSALS = {
   lastSegment:
     "A clip needs at least one segment: the last one cannot be deleted.",
   minLength: `A segment must be at least ${MIN_SEGMENT_SECONDS} s long.`,
+  maxSegments: `A clip holds at most ${MAX_SEGMENTS} segments: delete one before splitting.`,
   segmentMove:
     "Segments sit back to back on the reel in source order: drag their edges to trim or extend them.",
   captionTiming:
@@ -369,16 +374,23 @@ export const useTimelineStore = create<TimelineStore>((set, get) => {
       0,
     );
 
-  /** A segment edit as new v2 segments (016 setSegments: reel items follow the source). */
-  const commitSegments = (segments: Segment[], segmentIds: string[]) => {
-    const rebuilt = rebuild(
-      setSegments(get().toTimeline(), segments),
-      segmentIds,
-    );
+  /**
+   * A new timeline from a segment edit, as one undo step; refused (nothing
+   * changes) when its segments as written break a server rule (count, 0.05 s
+   * on raw floats, reel length), so a save never meets a 422 for them.
+   */
+  const commitSegmentEdit = (next: TimelinePayload, segmentIds: string[]) => {
+    const refusal = segmentsRefusal(segmentsOf(next));
+    if (refusal) return refuse(refusal);
+    const rebuilt = rebuild(next, segmentIds);
     if (!rebuilt.ok) return rebuilt;
     commit(rebuilt.state);
     return OK;
   };
+
+  /** A segment edit as new v2 segments (016 setSegments: reel items follow the source). */
+  const commitSegments = (segments: Segment[], segmentIds: string[]) =>
+    commitSegmentEdit(setSegments(get().toTimeline(), segments), segmentIds);
 
   /** The segment under `splitTime` (reel s), its source cut, or why not. */
   const splitTarget = (
@@ -392,16 +404,15 @@ export const useTimelineStore = create<TimelineStore>((set, get) => {
     const segment = findSegment(elementId);
     if (!segment) return refuse(REFUSALS.notFound);
     const el = segment.element;
-    const end = el.startTime + visibleLength(el);
-    if (
-      !(splitTime > el.startTime + MIN_SEGMENT_SECONDS) ||
-      !(splitTime < end - MIN_SEGMENT_SECONDS)
-    ) {
+    const offset = splitTime - el.startTime;
+    if (!(offset > 0) || !(offset < visibleLength(el))) {
       return refuse(REFUSALS.splitEdge);
     }
     const segments = segmentsOf(get().toTimeline());
     const source = segments[segment.index];
-    const cut = round3(source.start + (splitTime - el.startTime));
+    // Both parts keep the editor's minimum as written (ms): 51 ms, never under 0.05 s in float math.
+    const cut = splitPoint(source, offset);
+    if (cut === null) return refuse(REFUSALS.splitEdge);
     return { ok: true as const, segment, segments, source, cut };
   };
 
@@ -791,16 +802,16 @@ export const useTimelineStore = create<TimelineStore>((set, get) => {
       if (get().readOnly) return refuse(get().readOnly as string);
       const target = splitTarget(trackId, elementId, splitTime);
       if (!target.ok) return target;
+      if (target.segments.length >= MAX_SEGMENTS)
+        return refuse(REFUSALS.maxSegments);
       // The 016 rule (R4): reel items follow the source; OpenCut split one element only.
       const next = splitAt(get().toTimeline(), splitTime);
       if (!next) return refuse(REFUSALS.splitEdge);
       const secondElementId = crypto.randomUUID();
       const ids = target.segment.track.elements.map((el) => el.id);
       ids.splice(target.segment.index + 1, 0, secondElementId);
-      const rebuilt = rebuild(next, ids);
-      if (!rebuilt.ok) return rebuilt;
-      commit(rebuilt.state);
-      return { ok: true, id: secondElementId };
+      const committed = commitSegmentEdit(next, ids);
+      return committed.ok ? { ok: true, id: secondElementId } : committed;
     },
 
     // Split a segment and keep only the left portion
@@ -850,9 +861,10 @@ export const useTimelineStore = create<TimelineStore>((set, get) => {
         segment.index < segments.length - 1
           ? segments[segment.index + 1].start
           : (get().sourceDuration ?? current.end);
-      const start = Math.max(lo, round3(wantStart));
-      const end = Math.min(hi, round3(wantEnd));
-      if (end - start < MIN_SEGMENT_SECONDS - EPS) {
+      // Checked as written (setSegments rounds to the ms): 51 ms, never under 0.05 s in float math.
+      const start = round3(Math.max(lo, round3(wantStart)));
+      const end = round3(Math.min(hi, round3(wantEnd)));
+      if (!longEnough(start, end)) {
         return refuse(REFUSALS.minLength);
       }
       if (start === current.start && end === current.end) return OK;

@@ -1,13 +1,17 @@
 // Adapted from OpenCut (MIT) apps/web/src/hooks/use-timeline-element-resize.ts @ 3037a7e
 // Local changes: no media store. Edge drags preview locally and commit once on release (upstream
 // wrote the store on every mouse move, one history entry each). A segment's edges are source
-// seconds: they stop at the source's bounds and the neighbours' source windows, keep 0.05 s, and
-// commit through trimSegment (016 setSegments: reel items follow). A text overlay's left edge moves
-// its start and keeps its end, its right edge its end, inside the reel; both in one undo step.
+// seconds: they stop at the source's bounds and the neighbours' source windows, keep 51 ms
+// (MIN_EDIT_SEGMENT_SECONDS: never under the server's 0.05 s on raw floats), and commit through
+// trimSegment (016 setSegments: reel items follow). A text overlay's left edge moves its start
+// and keeps its end, its right edge its end, inside the reel; both in one undo step.
 // Captions (their timing is the speech) and voice-overs (their length is the audio) get no
 // handles. Licence: ../../LICENSE-OpenCut.
 import { useEffect, useState } from "react";
-import { MIN_SEGMENT_SECONDS } from "@/lib/timelineEdit";
+import {
+  MIN_EDIT_SEGMENT_SECONDS,
+  MIN_SEGMENT_SECONDS,
+} from "@/lib/timelineEdit";
 import type { EditorElement, EditorTrack } from "@/editor/types";
 import { TIMELINE_CONSTANTS } from "@/editor/opencut/constants/timeline-constants";
 import { useTimelineStore } from "@/editor/opencut/stores/timeline-store";
@@ -33,6 +37,8 @@ interface ResizeDrag {
   initial: { start: number; end: number };
   /** How far each edge may go. */
   bounds: { lo: number; hi: number };
+  /** The shortest the element may get (a segment keeps the editor's 51 ms, so the server never refuses it). */
+  minLength: number;
   /** The edges now. */
   edges: { start: number; end: number };
 }
@@ -69,6 +75,7 @@ function dragFrame(element: EditorElement) {
         lo: prev ? prev.duration - prev.trimEnd : 0,
         hi: next ? next.trimStart : element.duration,
       },
+      minLength: MIN_EDIT_SEGMENT_SECONDS,
     };
   }
   return {
@@ -77,6 +84,7 @@ function dragFrame(element: EditorElement) {
       end: element.startTime + visible(element),
     },
     bounds: { lo: 0, hi: state.getReelDuration() },
+    minLength: MIN_SEGMENT_SECONDS,
   };
 }
 
@@ -84,16 +92,16 @@ function edgesAt(drag: ResizeDrag, clientX: number, zoomLevel: number) {
   const delta =
     (clientX - drag.startX) /
     (TIMELINE_CONSTANTS.PIXELS_PER_SECOND * zoomLevel);
-  const { initial, bounds } = drag;
+  const { initial, bounds, minLength } = drag;
   if (drag.side === "left") {
     const start = Math.min(
-      initial.end - MIN_SEGMENT_SECONDS,
+      initial.end - minLength,
       Math.max(bounds.lo, initial.start + delta),
     );
     return { start, end: initial.end };
   }
   const end = Math.max(
-    initial.start + MIN_SEGMENT_SECONDS,
+    initial.start + minLength,
     Math.min(bounds.hi, initial.end + delta),
   );
   return { start: initial.start, end };
@@ -186,13 +194,14 @@ export function useTimelineElementResize({
     e.stopPropagation();
     e.preventDefault();
     if (!resizable) return;
-    const { initial, bounds } = dragFrame(element);
+    const { initial, bounds, minLength } = dragFrame(element);
     setResizing({
       elementId,
       side,
       startX: e.clientX,
       initial,
       bounds,
+      minLength,
       edges: initial,
     });
   };

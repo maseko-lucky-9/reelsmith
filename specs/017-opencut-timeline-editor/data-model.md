@@ -10,7 +10,7 @@ No database change: `clip_edits.timeline` stays the JSON column of ADR-014, `cli
 
 | Rule | Value (server constant) |
 |---|---|
-| Minimum segment length | 0.05 s (`MIN_SEGMENT_SECONDS`) |
+| Minimum segment length | 0.05 s (`MIN_SEGMENT_SECONDS`), checked as `end - start` on raw floats; the editor keeps 51 ms (`MIN_EDIT_SEGMENT_SECONDS`), because times are written to the millisecond and a 50 ms span can fall under 0.05 s in float math (50.3 − 50.25 = 0.04999999999999716) |
 | Segments | in source order, no overlap, inside the source range; at most 100 (`MAX_ITEMS["video"]`) |
 | Reel length | at most 20 minutes (`MAX_OUTPUT_SECONDS`) |
 | Reel-clock items | must not end past the reel's end (+1 ms, `TIME_TOLERANCE`) |
@@ -65,7 +65,7 @@ VoiceoverElement = MediaElement & { origin: v2 audio item }      # role 'voiceov
 | `addTrack`, `insertTrackAt`, `removeTrack`, `addElementToTrack`, `moveElementToTrack` | kept for `overlays` and `voiceovers` | no media drops; `moveElementToTrack` only between tracks of one role |
 | `updateElementTrim`, `updateElementDuration`, `updateElementStartTime` | kept for overlays (start, duration) and voice-overs (start) | segments go through `trimSegment` |
 | `splitElement`, `splitAndKeepLeft`, `splitAndKeepRight` | kept as names | `segments` only; implemented through `timelineEdit.splitAt` / `setSegments` (R4) |
-| new `trimSegment(id, {start?, end?})`, `deleteSegment(id)` | | through `timelineEdit.setSegments`; refuse below 0.05 s, overlap, outside the source, deleting the last segment |
+| new `trimSegment(id, {start?, end?})`, `deleteSegment(id)` | | through `timelineEdit.setSegments`; refuse below 51 ms as written, overlap, outside the source, a reel over 20 minutes, deleting the last segment; split also refuses a 101st segment. Every segment edit is checked against the server's segment rules (`timelineEdit.segmentsRefusal`) before it is committed |
 | `toggleTrackMute` | kept | `segments` track only (= `mute_source`) |
 | `updateTextElement` | kept | captions: `content` only; overlays: `content`, `fontSize`, `color`, `x`, `y` |
 | `separateAudio`, `replaceElementMedia` | removed | no media import |
