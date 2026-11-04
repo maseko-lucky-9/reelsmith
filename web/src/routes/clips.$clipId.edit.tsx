@@ -29,16 +29,14 @@ import {
   TrimPanel,
   VoiceoverPanel,
 } from '@/components/editor/EditorToolPanels'
-import type { TimelinePayload } from '@/api/client'
 import {
   isV2,
   itemsOf,
   reelDuration,
-  segmentsOf,
   setCaptionText,
-  upgradeTimeline,
   type SourceWindow,
 } from '@/lib/timelineEdit'
+import { cutOf, renderedCut, sameCut } from '@/editor/renderedCut'
 
 export const clipEditRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -71,40 +69,6 @@ function formatVideoTime(seconds: number): string {
 const STUB_VOICEOVER_WARNING =
   'Voice-over added as a silent placeholder: no Piper voice is installed on the server. ' +
   'Run `python -m scripts.fetch_piper_voice` there, then generate it again.'
-
-type Cut = ReadonlyArray<{ start: number; end: number }>
-
-/** The most two boundaries may differ and still be the same cut (the server may nudge by 1 ms). */
-const CUT_TOLERANCE = 1e-3 + 1e-9
-
-function sameCut(a: Cut, b: Cut): boolean {
-  return (
-    a.length === b.length &&
-    a.every((s, i) => Math.abs(s.start - b[i].start) <= CUT_TOLERANCE && Math.abs(s.end - b[i].end) <= CUT_TOLERANCE)
-  )
-}
-
-/** The source cut a timeline plays (v1 read through the clip's window). */
-function cutOf(timeline: TimelinePayload, window: SourceWindow | null): Cut {
-  return segmentsOf(upgradeTimeline(timeline, window) ?? timeline)
-}
-
-/**
- * The cut the clip's file was rendered from, from the server's
- * `[[start, end], ...]`: null/absent is the clip's own window (never edited,
- * or rendered before this was recorded: Split then waits for a re-render),
- * `[]` is "unknown, a render is replacing it" and matches nothing. Null when
- * there is no window to fall back to.
- */
-function renderedCut(
-  rendered: ReadonlyArray<readonly [number, number]> | null | undefined,
-  window: SourceWindow | null,
-): Cut | 'unknown' | null {
-  if (Array.isArray(rendered)) {
-    return rendered.length > 0 ? rendered.map(([start, end]) => ({ start, end })) : 'unknown'
-  }
-  return window ? [window] : null
-}
 
 /** A voice-over request's failure as shown in its panel. */
 function voiceoverErrorMessage(err: unknown): string {
