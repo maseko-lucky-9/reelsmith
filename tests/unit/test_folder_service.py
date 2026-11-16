@@ -94,3 +94,34 @@ def test_against_live_youtube(tmp_path):
     video_folder, clips_folder = create_video_subfolder(str(tmp_path), VIDEO_URL)
     assert os.path.exists(video_folder)
     assert os.path.exists(clips_folder)
+
+
+@pytest.mark.parametrize(
+    ("platform_id", "group"),
+    [
+        ("youtube", "YouTube Videos"),
+        ("tiktok", "TikTok Videos"),
+        ("facebook", "Facebook Videos"),
+        ("instagram", "Instagram Videos"),
+    ],
+)
+@patch("app.services.folder_service.YoutubeDL")
+def test_job_folder_is_grouped_under_its_source_folder(mock_ydl_cls, tmp_path, platform_id, group):
+    mock_ydl_cls.side_effect = Exception("offline")
+
+    video_folder, clips_folder = create_video_subfolder(
+        str(tmp_path), "https://x.test/v", platform_id, job_id="abcdef1234567890"
+    )
+
+    assert video_folder == str(tmp_path / group / f"{platform_id}_video-abcdef12")
+    assert clips_folder == os.path.join(video_folder, "clips")
+    assert os.path.isdir(clips_folder)
+
+
+@pytest.mark.parametrize("platform_id", ["upload", "generate", "video", "unknown"])
+def test_sources_without_a_group_stay_directly_under_the_download_path(tmp_path, platform_id):
+    video_folder, _ = create_video_subfolder(
+        str(tmp_path), "upload://x.mp4", platform_id, job_id="abcdef1234567890"
+    )
+
+    assert os.path.dirname(video_folder) == str(tmp_path)

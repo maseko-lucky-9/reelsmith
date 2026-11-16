@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
+import sys
 from typing import Literal
 from urllib.parse import urlparse
 
@@ -149,10 +151,17 @@ async def create_job(req: CreateJobRequest, request: Request) -> CreateJobRespon
     # prompt (any of them, newest first) is a duplicate; otherwise the prompt
     # gets its own job. Without a prompt the newest job is returned, as before.
     asked = _prompt_key(req.prompt)
+    wants_render = req.pipeline_options.render
+
+    def _is_duplicate(job: JobState) -> bool:
+        # A job that did not render has no finished clip to hand back to a
+        # request that renders (a download-only job must not shadow it).
+        if wants_render and not job.pipeline_options.render:
+            return False
+        return not asked or _prompt_key(job.prompt) == asked
+
     existing = await request.app.state.job_store.find_job_by_url(
-        req.url,
-        _DEDUP_STATUSES,
-        where=(lambda job: _prompt_key(job.prompt) == asked) if asked else None,
+        req.url, _DEDUP_STATUSES, where=_is_duplicate
     )
     if existing is not None:
         return CreateJobResponse(job_id=existing.job_id, status=existing.status)
@@ -275,6 +284,56 @@ def _delete_lock(request: Request) -> asyncio.Lock:
     if lock is None:
         lock = request.app.state.job_delete_lock = asyncio.Lock()
     return lock
+
+
+# Peers allowed to open a folder on this machine: the browser must be here too.
+_LOCAL_PEERS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def _file_manager_argv(folder: str) -> list[str]:
+    if sys.platform == "darwin":
+        return ["open", folder]
+    if sys.platform.startswith("win"):
+        return ["explorer", folder]
+    return ["xdg-open", folder]
+
+
+class RevealResponse(BaseModel):
+    folder: str
+
+
+@router.post("/{job_id}/reveal", response_model=RevealResponse)
+async def reveal_job_folder(job_id: str, request: Request) -> RevealResponse:
+    """Open the job's clips folder in the machine's file manager.
+
+    The folder comes only from the job row and must be an existing folder below
+    the managed download path; nothing a client sends reaches the command.
+
+    Raises:
+        HTTPException: 403 when the request is not from this machine; 404 when
+            the job is unknown or has no folder on disk; 500 when the file
+            manager cannot be started.
+    """
+    peer = request.client.host if request.client else ""
+    if peer not in _LOCAL_PEERS:
+        raise HTTPException(status_code=403, detail="reveal is only available on this machine")
+    try:
+        job = await request.app.state.job_store.get(job_id)
+    except JobNotFoundError as e:
+        raise HTTPException(status_code=404, detail=f"job not found: {job_id}") from e
+    folder = next(
+        (f for f in (job.clips_folder, job.destination_folder) if retention.is_managed_dir(f)),
+        None,
+    )
+    if folder is None:
+        raise HTTPException(status_code=404, detail="the job has no folder on disk")
+    try:
+        await asyncio.to_thread(
+            subprocess.run, _file_manager_argv(folder), check=False, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        raise HTTPException(status_code=500, detail=f"could not open the folder: {e}") from e
+    return RevealResponse(folder=folder)
 
 
 @router.delete("/{job_id}", status_code=204)

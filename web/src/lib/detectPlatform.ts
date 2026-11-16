@@ -58,7 +58,7 @@ export function platformLabel(id: PlatformId): string {
 }
 
 /**
- * True when the URL is short-form 9:16 source (YouTube Shorts, TikTok, Instagram Reel).
+ * True when the URL is short-form 9:16 source (YouTube Shorts, TikTok, Instagram Reel, Facebook Reel).
  * Used to opt these platforms into Render 9:16 by default in the Advanced tab.
  */
 export function isShortFormUrl(url: string): boolean {
@@ -67,6 +67,13 @@ export function isShortFormUrl(url: string): boolean {
   if (platform === 'tiktok' || platform === 'instagram') return true
   if (platform === 'youtube') {
     return /^https?:\/\/(?:[^/]+\.)?(?:youtube\.com|youtu\.be)\/shorts\//i.test(url)
+  }
+  if (platform === 'facebook') {
+    // Facebook Reels: /reel/<id>, /reels/<id>, /share/r/<code>, and fb.watch short links.
+    return (
+      /^https?:\/\/(?:[^/]+\.)?facebook\.com\/(?:reels?|share\/r)\//i.test(url) ||
+      /^https?:\/\/(?:[^/]+\.)?fb\.watch\//i.test(url)
+    )
   }
   return false
 }

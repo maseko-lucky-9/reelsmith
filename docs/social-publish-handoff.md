@@ -85,6 +85,8 @@ n8n mounts the PVC root at `/data/reelsmith-inbox`, so a job is at `/data/reelsm
 YTVIDEO_EXPORT_BASE_FOLDER=/Users/ltmas/SyncthingShares/reelsmith-inbox
 ```
 
+With `YTVIDEO_EXPORT_GROUP_BY_SOURCE=true` jobs export to `<EXPORT_BASE_FOLDER>/<YouTube|TikTok|Facebook> Videos/<job_id>/` instead (spec 018, ADR-016). The publisher scans the flat folder and `YouTube Videos/` only; turn the flag on only after the sidecar and workflow PRs are deployed.
+
 Leave blank to fall back to `<download_path>/<video>/exports` (no per-job sub-folder, so not suitable for n8n). Tests never write to this folder (`conftest.py` redirects it).
 
 ## Standing prerequisites

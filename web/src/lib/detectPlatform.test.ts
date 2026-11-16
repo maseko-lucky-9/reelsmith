@@ -60,7 +60,12 @@ describe('detectPlatform', () => {
     ['https://instagr.am/p/abc/', true],
     ['https://www.youtube.com/watch?v=abc', false],
     ['https://youtu.be/abc', false],
-    ['https://www.facebook.com/share/r/123/', false],
+    ['https://www.facebook.com/share/r/123/', true],
+    ['https://www.facebook.com/reel/123', true],
+    ['https://m.facebook.com/reels/123', true],
+    ['https://fb.watch/abc/', true],
+    ['https://www.facebook.com/watch/?v=123', false],
+    ['https://www.facebook.com/someone/videos/123', false],
     ['', false],
     ['not-a-url', false],
   ])('isShortFormUrl(%s) === %s', (url, expected) => {

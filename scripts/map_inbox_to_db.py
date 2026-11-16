@@ -4,7 +4,8 @@
     python -m scripts.map_inbox_to_db --apply    # write
 
 The inbox is ``<inbox>/<job_id>/<NN>_<title>.mp4`` plus a ``manifest.csv`` per
-job (``YTVIDEO_EXPORT_BASE_FOLDER``). For a job the database knows, each clip
+job (``YTVIDEO_EXPORT_BASE_FOLDER``), or ``<inbox>/<YouTube Videos|TikTok Videos|
+...>/<job_id>/...`` with ``YTVIDEO_EXPORT_GROUP_BY_SOURCE`` on; both are read. For a job the database knows, each clip
 whose file is gone is re-pointed at its copy in the inbox. A folder the
 database has never seen (a run on the old in-memory store, say) is imported as a
 completed job with one chapter and one clip per manifest row, dated from the
@@ -36,6 +37,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.bus.job_store import _STATE_FIELDS
 from app.db.models import ChapterRecord, ClipRecord, JobRecord
 from app.domain.models import ChapterArtifacts, JobState, PipelineOptions
+from app.services.folder_service import SOURCE_FOLDERS
 from app.services.retention import managed_roots
 from app.settings import settings
 
@@ -153,8 +155,20 @@ def _read_job(folder: Path) -> InboxJob | None:
 
 
 def read_inbox(inbox: Path) -> list[InboxJob]:
-    """Every job folder of the inbox that has a manifest, in folder order."""
-    folders = sorted(p for p in inbox.iterdir() if p.is_dir() and _JOB_FOLDER.fullmatch(p.name))
+    """Every job folder of the inbox that has a manifest, in folder order.
+
+    Job folders sit directly in the inbox or in one of the per-source group
+    folders (``SOURCE_FOLDERS``); the flat one wins if a job id is in both.
+    """
+    parents = [inbox, *(inbox / group for group in SOURCE_FOLDERS.values())]
+    found: dict[str, Path] = {}
+    for parent in parents:
+        if not parent.is_dir():
+            continue
+        for p in parent.iterdir():
+            if p.is_dir() and _JOB_FOLDER.fullmatch(p.name):
+                found.setdefault(p.name, p)
+    folders = [found[name] for name in sorted(found)]
     return [job for folder in folders if (job := _read_job(folder)) is not None]
 
 

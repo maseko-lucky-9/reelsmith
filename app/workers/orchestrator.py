@@ -58,6 +58,20 @@ _SAFE_CHAR_RE = re.compile(r"[^\w\-_. ]")
 _CLIP_INDEX_RE = re.compile(r"^(\d+)_")
 
 
+def _export_dir(job_id: str, clips_folder: str, source: str | None) -> str:
+    """Where a job's clips and ``manifest.csv`` are exported.
+
+    With ``YTVIDEO_EXPORT_BASE_FOLDER`` set: ``<base>/<job_id>``, or
+    ``<base>/<group>/<job_id>`` when ``YTVIDEO_EXPORT_GROUP_BY_SOURCE`` is on and
+    the source has a group folder. Unset: ``<job folder>/exports``.
+    """
+    if not settings.export_base_folder:
+        return str(Path(clips_folder).parent / "exports")
+    base = Path(settings.export_base_folder)
+    group = folder_service.source_folder(source) if settings.export_group_by_source else None
+    return str((base / group if group else base) / job_id)
+
+
 def _sanitize(name: str) -> str:
     return _SAFE_CHAR_RE.sub("_", name).strip() or "chapter"
 
@@ -627,10 +641,7 @@ async def _run_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> None:
         output_paths = [p for p in (t.result() for t in chapter_tasks) if p]
 
         # ── Export ────────────────────────────────────────────────────────────
-        if settings.export_base_folder:
-            export_dir = str(Path(settings.export_base_folder) / job_id)
-        else:
-            export_dir = str(Path(clips_folder).parent / "exports")
+        export_dir = _export_dir(job_id, clips_folder, adapter.platform_id)
         exported_paths = await _job_thread(job_id, export_service.export_clips, output_paths, export_dir)
         await _emit(bus, EventType.EXPORT_COMPLETED, job_id, export_dir=export_dir, count=len(exported_paths))
 
@@ -1817,10 +1828,7 @@ async def _reprompt_job(trigger: Event, bus: AsyncEventBus, store: JobStore) -> 
         output_paths = [p for p in (t.result() for t in chapter_tasks) if p]
 
         # ── Export + manifest of the new clips ────────────────────────────────
-        if settings.export_base_folder:
-            export_dir = str(Path(settings.export_base_folder) / job_id)
-        else:
-            export_dir = str(Path(clips_folder).parent / "exports")
+        export_dir = _export_dir(job_id, clips_folder, job.source)
         exported_paths = await _job_thread(job_id, export_service.export_clips, output_paths, export_dir)
         await _emit(bus, EventType.EXPORT_COMPLETED, job_id, export_dir=export_dir, count=len(exported_paths))
         path_map = {Path(p).stem: p for p in exported_paths}

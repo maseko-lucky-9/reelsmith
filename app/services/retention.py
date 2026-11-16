@@ -210,6 +210,13 @@ def is_managed_file(raw: str | None) -> bool:
     return path is not None and _is_managed(path, managed_roots())
 
 
+def is_managed_dir(raw: str | None) -> bool:
+    """True when a database path is an existing folder strictly below a managed
+    root. False for an export folder, a root itself, or anything else."""
+    path = _checked(raw)
+    return path is not None and path.is_dir() and _is_managed(path, managed_roots())
+
+
 # ── Deleting, re-validated at the moment of deletion ──────────────────────────
 
 # With dir_fd support (macOS, Linux) the folder chain is walked from the root

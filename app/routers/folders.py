@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.services.folder_service import create_video_subfolder
+from app.services.platforms import detect_platform_id
 
 router = APIRouter(prefix="/folders", tags=["folders"])
 
@@ -24,7 +25,9 @@ class FolderResponse(BaseModel):
 def post_folder(req: FolderRequest) -> FolderResponse:
     Path(req.download_path).mkdir(parents=True, exist_ok=True)
     try:
-        destination, clips = create_video_subfolder(req.download_path, req.url)
+        destination, clips = create_video_subfolder(
+            req.download_path, req.url, detect_platform_id(req.url) or "video"
+        )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"folder creation failed: {e}") from e
     return FolderResponse(destination_folder=destination, clips_folder=clips)

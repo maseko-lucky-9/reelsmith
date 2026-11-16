@@ -2,7 +2,7 @@ import { createRoute } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState, useEffect } from 'react'
 import { toast } from 'sonner'
-import { Ban, LayoutGrid, List, Search, SlidersHorizontal } from 'lucide-react'
+import { Ban, FolderOpen, LayoutGrid, List, Search, SlidersHorizontal } from 'lucide-react'
 import { rootRoute } from './root'
 import { api } from '@/api/client'
 import { useJobSSE } from '@/hooks/useJobSSE'
@@ -88,6 +88,11 @@ function JobDetailPage() {
     },
   })
 
+  const revealMutation = useMutation({
+    mutationFn: () => api.revealJobFolder(jobId),
+    onError: (e: Error) => toast.error(`Could not open the folder: ${e.message}`),
+  })
+
   function onCancel() {
     const what = reprompting ? 'this reprompt' : 'this job'
     if (!window.confirm(`Cancel ${what}?`)) return
@@ -111,7 +116,10 @@ function JobDetailPage() {
   }
 
   const job = jobQuery.data
-  const allClips = clipsQuery.data ?? []
+  // A download-only job (render off) keeps a clip row per chapter with no file: those are
+  // not clips, so they must not hide the "source downloaded" note or show a dead preview.
+  const downloadOnly = job?.pipeline_options?.render === false
+  const allClips = (clipsQuery.data ?? []).filter((c) => !downloadOnly || c.output_path)
 
   const filteredClips = allClips.filter((c) => {
     if (search) {
@@ -174,6 +182,23 @@ function JobDetailPage() {
           </button>
         )}
       </div>
+
+      {job.status === 'completed' && (job.clips_folder ?? job.destination_folder) && (
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            type="button"
+            onClick={() => revealMutation.mutate()}
+            disabled={revealMutation.isPending}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/15 text-xs text-zinc-200 hover:text-white hover:border-white/40 disabled:opacity-50 transition-colors"
+          >
+            <FolderOpen className="w-3.5 h-3.5" />
+            Open folder
+          </button>
+          <span className="text-zinc-500 text-xs font-mono break-all">
+            {job.clips_folder ?? job.destination_folder}
+          </span>
+        </div>
+      )}
 
       {job.status === 'cancelled' && (
         <p className="text-sm text-amber-400" role="status">
