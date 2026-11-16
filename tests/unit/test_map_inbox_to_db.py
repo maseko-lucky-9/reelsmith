@@ -565,3 +565,23 @@ async def test_a_one_byte_placeholder_mp4_is_reported_and_never_imported_or_used
     async with factory() as session:
         assert (await session.execute(select(JobRecord.id))).scalars().all() == [known]
         assert (await session.execute(select(ClipRecord.output_path))).scalar_one() == "/tmp/yt/gone/00_Dead.mp4"
+
+
+def test_read_inbox_reads_flat_and_per_source_grouped_job_folders(inbox):
+    flat, yt, tt = _job_id(), _job_id(), _job_id()
+    row = [{"filename": "00_A.mp4", "title": "A"}]
+    _make_job_folder(inbox, flat, row)
+    (inbox / "YouTube Videos").mkdir()
+    (inbox / "TikTok Videos").mkdir()
+    _make_job_folder(inbox / "YouTube Videos", yt, row)
+    _make_job_folder(inbox / "TikTok Videos", tt, row)
+    # A folder that is not a source group is not searched one level down.
+    (inbox / "Random Group").mkdir()
+    _make_job_folder(inbox / "Random Group", _job_id(), row)
+    # The same job id in the flat and the grouped layout is read once, flat first.
+    _make_job_folder(inbox / "YouTube Videos", flat, row)
+
+    jobs = mapper.read_inbox(inbox)
+
+    assert sorted(j.job_id for j in jobs) == sorted([flat, yt, tt])
+    assert next(j for j in jobs if j.job_id == flat).folder == inbox / flat

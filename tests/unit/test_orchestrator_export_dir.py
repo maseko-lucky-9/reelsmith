@@ -148,3 +148,33 @@ async def test_manifest_is_written_with_the_jobs_source(tmp_path, monkeypatch, s
 
     # The job record decides, not the adapter (always "youtube" in these stubs).
     assert sources == [source]
+
+
+@pytest.mark.parametrize(
+    ("group_by_source", "source", "expected"),
+    [
+        (False, "youtube", "inbox/job1"),
+        (False, "tiktok", "inbox/job1"),
+        (True, "youtube", "inbox/YouTube Videos/job1"),
+        (True, "tiktok", "inbox/TikTok Videos/job1"),
+        (True, "facebook", "inbox/Facebook Videos/job1"),
+        (True, "upload", "inbox/job1"),
+        (True, None, "inbox/job1"),
+    ],
+)
+def test_export_dir_groups_by_source_only_when_the_flag_is_on(
+    monkeypatch, tmp_path, group_by_source, source, expected
+):
+    monkeypatch.setattr(orch.settings, "export_base_folder", str(tmp_path / "inbox"))
+    monkeypatch.setattr(orch.settings, "export_group_by_source", group_by_source)
+
+    assert orch._export_dir("job1", str(tmp_path / "v" / "clips"), source) == str(tmp_path / expected)
+
+
+def test_export_dir_without_a_base_folder_is_the_job_exports_folder(monkeypatch, tmp_path):
+    monkeypatch.setattr(orch.settings, "export_base_folder", "")
+    monkeypatch.setattr(orch.settings, "export_group_by_source", True)
+
+    assert orch._export_dir("job1", str(tmp_path / "v" / "clips"), "youtube") == str(
+        tmp_path / "v" / "exports"
+    )

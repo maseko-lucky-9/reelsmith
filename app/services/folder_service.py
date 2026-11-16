@@ -1,6 +1,9 @@
 import logging
 import os
 import re
+from collections.abc import Mapping
+from types import MappingProxyType
+from typing import Final
 
 from yt_dlp import YoutubeDL
 
@@ -10,6 +13,22 @@ log = logging.getLogger(__name__)
 
 
 _SLUG_RE = re.compile(r"[^\w\-]")
+
+# One folder per source platform, so a job is easy to find by where it came
+# from. Upload, generate and unknown sources stay directly under the base.
+SOURCE_FOLDERS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "youtube": "YouTube Videos",
+        "tiktok": "TikTok Videos",
+        "facebook": "Facebook Videos",
+        "instagram": "Instagram Videos",
+    }
+)
+
+
+def source_folder(platform_id: str | None) -> str | None:
+    """The group folder name for a platform id, or ``None`` if it has none."""
+    return SOURCE_FOLDERS.get(platform_id or "")
 
 
 def _slugify(name: str, fallback: str) -> str:
@@ -38,7 +57,11 @@ def create_video_subfolder(
     platform_id: str = "video",
     job_id: str | None = None,
 ) -> tuple[str, str]:
-    """Create ``<download_path>/<slug>[-<job8>]/clips`` and return both paths.
+    """Create ``<download_path>/[<group>/]<slug>[-<job8>]/clips``; return both paths.
+
+    ``<group>`` is the platform's folder from ``SOURCE_FOLDERS`` (for example
+    ``TikTok Videos``); platforms without one, and uploads, sit directly under
+    ``download_path``.
 
     With ``job_id`` the folder name ends in the first 8 characters of the job
     id, so two jobs never share an output folder: ``upload://`` and
@@ -66,7 +89,9 @@ def create_video_subfolder(
     if job_id:
         slug = f"{slug}-{job_id[:8]}"
 
-    video_folder_path = os.path.join(download_path, slug)
+    group = source_folder(platform_id)
+    base = os.path.join(download_path, group) if group else download_path
+    video_folder_path = os.path.join(base, slug)
     clips_folder_path = os.path.join(video_folder_path, "clips")
     os.makedirs(video_folder_path, exist_ok=True)
     os.makedirs(clips_folder_path, exist_ok=True)

@@ -280,6 +280,9 @@ class Settings(BaseSettings):
 
     # ── Export ────────────────────────────────────────────────────────────
     export_base_folder: str = ""
+    # Nest each export under its source's folder (``<base>/YouTube Videos/<job_id>``).
+    # Off until the publisher reads the grouped layout.
+    export_group_by_source: bool = False
 
     # ── Rendering ─────────────────────────────────────────────────────────
     caption_words_per_segment: int = 3

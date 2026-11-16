@@ -242,6 +242,10 @@ export const api = {
       method: 'POST',
     }),
 
+  /** Opens the job's clips folder in this machine's file manager (404: no folder; 403: not local). */
+  revealJobFolder: (id: string) =>
+    apiFetch<{ folder: string }>(`/api/jobs/${id}/reveal`, { method: 'POST' }),
+
   /** 204: the job's files, then its rows, are gone (also for an unknown job). 409 while it runs. */
   deleteJob: (id: string) => apiFetch<void>(`/api/jobs/${id}`, { method: 'DELETE' }),
 

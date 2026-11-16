@@ -188,6 +188,7 @@ See `.env.example` for the full list. Key settings:
 |---|---|---|
 | `YTVIDEO_JOB_STORE` | `sql` | `sql` or `memory` (`memory` keeps nothing across restarts) |
 | `YTVIDEO_DB_URL` | `sqlite+aiosqlite:///./reelsmith.db` | Database URL. `.env.example` points it at the docker-compose Postgres, and `scripts/start.sh` exports that URL itself unless your shell already sets one |
+| `YTVIDEO_EXPORT_GROUP_BY_SOURCE` | `false` | With an export folder set, export to `<folder>/<YouTube\|TikTok\|Facebook> Videos/<job_id>/`. Turn on only after the publisher and sidecar read the grouped layout (spec 018) |
 | `YTVIDEO_EXPORT_BASE_FOLDER` | empty | Each job also exports its clips and a `manifest.csv` to `<folder>/<job_id>/`; empty means `<download_path>/<video>/exports`. Never swept by the janitor; `scripts/map_inbox_to_db.py` maps it into the database |
 | `YTVIDEO_RETENTION_DAYS` | `30` | The janitor retires clips older than this and deletes their files below the download folder. `.env.example` sets `365` |
 | `YTVIDEO_TEST_DB_URL` | `postgresql+asyncpg://reelsmith:reelsmith@localhost:5432/reelsmith_test` | Tests only: the database `pytest -m integration` TRUNCATEs. Must be local and named `*_test`; never your app database |
